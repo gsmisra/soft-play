@@ -38,15 +38,13 @@ Modern Dark UI: A sleek, dark-mode interface that's easy on the eyes.
 
 Feature Showcase
 
-(Recommendation: Record short GIFs of these features and embed them here!)
-
 Feature
 
 Description
 
 Manual Spy & Capture
 
-[YOUR-GIF-HERE] 
+🦉
 
 
 
@@ -54,7 +52,7 @@ Manual Spy & Capture
 
 Panel-to-Page Verification
 
-[YOUR-GIF-HERE] 
+🦉
 
 
 
@@ -62,7 +60,7 @@ Panel-to-Page Verification
 
 Live Count & Verification
 
-[YOUR-GIF-HERE] 
+🦉
 
 
 
@@ -70,7 +68,7 @@ Live Count & Verification
 
 Real-Time Search
 
-[YOUR-GIF-HERE] 
+🦉
 
 
 
