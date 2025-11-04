@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Quick Spy</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          sans-serif;
+        margin: 0;
+        font-size: 14px;
+        background-color: #2b2b2b; /* Dark background */
+        color: #dcdcdc; /* Light text */
+        min-width: 350px;
+      }
+      .header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 12px 16px;
+        border-bottom: 1px solid #444;
+      }
+      .header h3 {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 600;
+      }
+      .button-group {
+        display: flex;
+        gap: 8px;
+      }
+      button {
+        border: none;
+        border-radius: 6px;
+        padding: 6px 12px;
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: background-color 0.2s, box-shadow 0.2s;
+        background-color: #555;
+        color: #fff;
+      }
+      button:hover {
+        background-color: #666;
+      }
+      #save-button {
+        background-color: #4a90e2; /* Blue */
+        color: white;
+      }
+      #save-button:hover {
+        background-color: #357abd;
+      }
+      #clear-button {
+        background-color: #777;
+        color: #fff;
+      }
+      #clear-button:hover {
+        background-color: #888;
+      }
+
+      /* --- UPDATED CONTROLS SECTION --- */
+      .controls {
+        padding: 12px 16px;
+        background-color: #333; /* Slightly lighter controls background */
+        border-bottom: 1px solid #444;
+        display: flex;
+        flex-direction: column;
+        gap: 12px; /* Add gap for new search bar */
+      }
+      .controls-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .controls label {
+        font-size: 13px;
+        font-weight: 500;
+        color: #aaa;
+        margin-right: 8px;
+      }
+      select {
+        border: 1px solid #666;
+        border-radius: 6px;
+        padding: 4px 8px;
+        font-size: 13px;
+        background-color: #555;
+        color: #fff;
+      }
+
+      /* --- NEW SEARCH BAR STYLE --- */
+      #search-bar {
+        width: 100%;
+        box-sizing: border-box; /* Important */
+        padding: 8px 12px;
+        font-size: 14px;
+        border: 1px solid #666;
+        border-radius: 6px;
+        background-color: #222;
+        color: #fff;
+      }
+      #search-bar::placeholder {
+        color: #888;
+      }
+      /* --- END OF NEW STYLES --- */
+
+      #locator-list {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        /* Simple calc to make room for header and controls */
+        height: calc(100vh - 145px);
+        overflow-y: auto;
+      }
+      .empty-message {
+        padding: 30px;
+        text-align: center;
+        color: #888;
+        font-style: italic;
+        font-size: 13px;
+      }
+      .locator-card {
+        background-color: #3c3c3c;
+        border-bottom: 1px solid #444;
+        margin: 0;
+      }
+      .card-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 12px 16px;
+      }
+      .element-name {
+        font-size: 14px;
+        font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 150px;
+      }
+      .element-tag {
+        font-family: "Courier New", Courier, monospace;
+        font-size: 12px;
+        color: #aaa;
+        background-color: #2b2b2b;
+        padding: 2px 6px;
+        border-radius: 3px;
+      }
+      .delete-btn {
+        font-family: "Arial", sans-serif;
+        font-weight: bold;
+        font-size: 16px;
+        background: none;
+        color: #aaa;
+        padding: 0 4px;
+        margin-left: 8px;
+      }
+      .delete-btn:hover {
+        color: #ff8b8b;
+        background-color: #553333;
+      }
+      .card-body {
+        padding: 4px 16px 16px 16px;
+      }
+      .locator-item {
+        display: flex;
+        align-items: center;
+        margin-top: 10px;
+        gap: 8px;
+      }
+      .locator-type {
+        font-family: "Courier New", Courier, monospace;
+        font-size: 12px;
+        font-weight: bold;
+        padding: 3px 6px;
+        border-radius: 3px;
+        color: white;
+        flex-shrink: 0;
+        min-width: 40px;
+        text-align: center;
+      }
+      .locator-type.id {
+        background-color: #6a1b9a;
+      } /* Purple */
+      .locator-type.css {
+        background-color: #0065ff;
+      } /* Blue */
+      .locator-type.xpath {
+        background-color: #ff8b00;
+      } /* Orange */
+
+      pre.code-snippet {
+        font-family: "Courier New", Courier, monospace;
+        background-color: #2b2b2b;
+        border: 1px solid #555;
+        padding: 8px;
+        border-radius: 3px;
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-all;
+        flex-grow: 1;
+        font-size: 12px;
+        color: #a9b7c6; /* Light code text */
+      }
+      .locator-buttons {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+      .copy-btn,
+      .verify-btn {
+        background-color: #555;
+        color: #fff;
+        padding: 4px 8px;
+        font-size: 12px;
+        width: 50px; /* Fixed width */
+      }
+      .copy-btn:hover,
+      .verify-btn:hover {
+        background-color: #666;
+      }
+
+      /* Verify Button Colors */
+      .verify-btn.loading {
+        background-color: #555;
+      }
+      .verify-btn.success-1 {
+        background-color: #2a9d8f;
+      } /* Green */
+      .verify-btn.success-multi {
+        background-color: #e9c46a;
+      } /* Yellow */
+      .verify-btn.error {
+        background-color: #e76f51;
+      } /* Red */
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <h3>Recorded Locators</h3>
+      <div class="button-group">
+        <button
+          id="save-button"
+          title="Save all to .json file (Ctrl+Click for .txt)"
+        >
+          Save
+        </button>
+        <button id="clear-button" title="Clear all recorded locators">
+          Clear
+        </button>
+      </div>
+    </div>
+    <div class="controls">
+      <div class="controls-row">
+        <label for="language-selector">Code Snippet:</label>
+        <select id="language-selector">
+          <option value="java">Java (Selenium)</option>
+          <option value="python">Python (Selenium)</option>
+          <option value="javascript">JavaScript (Selenium)</option>
+          <option value="playwright">JavaScript (Playwright)</option>
+          <option value="cypress">JavaScript (Cypress)</option>
+        </select>
+      </div>
+      <!-- NEW SEARCH BAR -->
+      <div class="controls-row">
+        <input type="search" id="search-bar" placeholder="Search by name..." />
+      </div>
+    </div>
+
+    <ul id="locator-list">
+      <!-- Locators will be injected here by sidepanel.js -->
+    </ul>
+
+    <script src="sidepanel.js"></script>
+  </body>
+</html>

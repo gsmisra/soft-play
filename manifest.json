@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "Quick Spy",
+  "version": "2.0",
+  "description": "Browser extenssion developed by TD Securities Singapore QE Practices team. Spy on elements, generate multiple locators and code snippets.",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "downloads",
+    "sidePanel"
+  ],
+  "options_page": "options.html",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["stability.js",
+			"unique_cache.js",
+			"shadow_handler.js",
+			"anchors.js",
+			"verify_api.js",
+			"content_script.js",
+			"highlight_handler.js"
+		],
+      "css": ["styles.css"],
+	  "run_at": "document_idle"
+    }
+  ],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "icons": {
+    "128": "icon.png"
+  }
+}
