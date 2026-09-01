@@ -1,0 +1,119 @@
+{
+  "name": "object-spy-playwright",
+  "displayName": "softPlay",
+  "description": "Drive a real, visible Chrome window via CDP, spy on page objects with hover-to-highlight, generate short relative Playwright locators (XPath/CSS) with live uniqueness scoring, and emit enterprise-grade Playwright automation code in Java or Python.",
+  "version": "0.1.13",
+  "publisher": "local-dev",
+  "private": true,
+  "icon": "media/icon.png",
+  "author": "WenYi Tan, Alicia Loh, Gaurav Misra",
+  "contributors": [
+    {
+      "name": "WenYi Tan"
+    },
+    {
+      "name": "Alicia Loh"
+    },
+    {
+      "name": "Gaurav Misra"
+    }
+  ],
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Testing",
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "objectSpy",
+          "title": "SoftPlay",
+          "icon": "media/activitybar-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "objectSpy": [
+        {
+          "type": "webview",
+          "id": "objectSpy.mainView",
+          "name": "Object Spy"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "objectSpy.openPanel",
+        "title": "SoftPlay: Open Panel",
+        "icon": "$(inspect)"
+      },
+      {
+        "command": "objectSpy.start",
+        "title": "SoftPlay: Start Browser"
+      },
+      {
+        "command": "objectSpy.stop",
+        "title": "SoftPlay: Stop Browser"
+      },
+      {
+        "command": "objectSpy.navigate",
+        "title": "SoftPlay: Navigate To URL"
+      },
+      {
+        "command": "objectSpy.openSettings",
+        "title": "SoftPlay: Open Settings",
+        "icon": "$(gear)"
+      }
+    ],
+    "configuration": {
+      "title": "SoftPlay",
+      "properties": {
+        "objectSpy.cdpPort": {
+          "type": "number",
+          "default": 9222,
+          "description": "Chrome remote debugging port. The extension attaches to an already-running Chrome on this port, or launches a new Chrome process with it. Bound to localhost/127.0.0.1 only — treat this port as sensitive: anything with access to it has full control of the browser session."
+        },
+        "objectSpy.chromeExecutablePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the Chrome (or Edge) executable to launch. Leave blank to auto-detect the system installation."
+        },
+        "objectSpy.useRealChromeProfile": {
+          "type": "boolean",
+          "default": false,
+          "description": "When launching a new Chrome process, point --user-data-dir at your real default Chrome profile so existing logins/sessions are available. NOTE: recent Chrome versions block remote debugging on the actual default profile directory for security reasons — if this fails, Chrome will need a copy of your profile directory instead. When this setting is off, a separate dedicated automation profile is used."
+        },
+        "objectSpy.userDataDir": {
+          "type": "string",
+          "default": "",
+          "description": "Custom --user-data-dir to launch Chrome with. Leave blank to auto-detect (real profile path when 'Use Real Chrome Profile' is on, otherwise a dedicated temp profile)."
+        },
+        "objectSpy.startUrl": {
+          "type": "string",
+          "default": "about:blank",
+          "description": "URL to open when Chrome is launched/attached."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^2.32.0",
+    "typescript": "^5.5.4"
+  },
+  "dependencies": {
+    "playwright-core": "^1.47.0"
+  }
+}
