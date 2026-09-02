@@ -14,6 +14,13 @@ export interface ObjectSpySettings {
   copilotEnabled: boolean;
   /** LanguageModelChat.id of the selected Copilot model, or '' if none picked yet. */
   copilotModelId: string;
+  /** "Use native Playwright feature" toggle — see settingsPanel.ts. ON (the
+   * default) captures each element's locator exactly the way Playwright's
+   * own recorder would: the first reasonable candidate, accepted as-is even
+   * if it isn't provably unique, with no sibling-axis/positional refinement
+   * and no ambiguous-locator pause. OFF restores this extension's own
+   * smart, tiered, guaranteed-unique locator engine (agent/pageAgent.js). */
+  useNativePlaywrightLocators: boolean;
 }
 
 /**
@@ -37,7 +44,8 @@ const DEFAULTS: ObjectSpySettings = {
   languageVersion: '17',
   browserChannel: 'chrome',
   copilotEnabled: false,
-  copilotModelId: ''
+  copilotModelId: '',
+  useNativePlaywrightLocators: true
 };
 
 const STORAGE_KEY = 'objectSpy.settings';

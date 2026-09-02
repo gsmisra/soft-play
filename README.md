@@ -27,6 +27,7 @@ the same captured locators, asked to match the Playwright view's style.
 
 - WenYi Tan
 - Alicia Loh
+- Roshan Ranasinghe
 - Gaurav Misra
 
 ## Using Object Spy
@@ -221,6 +222,146 @@ return type. The generator is an in-house template layer — it does not
 depend on any of Playwright's internal/unexported recorder classes, which
 aren't public API and would break across Playwright versions.
 
+**Every interaction gets an explicit visible-then-enabled wait.** Before a
+generated method clicks, fills, selects, checks/unchecks, or presses a key on
+its locator, it explicitly waits for the element to be visible
+(`target.waitFor(...VISIBLE)` / `target.wait_for(state="visible")`) and then
+asserts it's enabled (`assertThat(target).isEnabled()` /
+`expect(target).to_be_enabled()`) before acting. Playwright's own action
+methods already auto-wait for actionability internally — this is on top of
+that, not a replacement for it — and it earns its keep two ways: a failure
+surfaces as a specific, element-scoped timeout right where the problem is
+instead of a generic action-timeout, and "enabled" specifically isn't
+something a plain `.click()`/`.fill()` auto-wait checks on its own (a
+`<button disabled>` mid-transition is a real, common flake source). Every
+wait is condition-based — nothing here is ever a fixed sleep.
+
+## Use native Playwright feature
+
+A toggle in Settings, under **Locator** (default **ON**). This runs
+Playwright's own real `codegen` CLI tool, as-is — not a reimplementation of
+it. Turning it on changes what **Start**/**Stop** do:
+
+- **On (default):** **Start** launches `playwright codegen` in **its own,
+  separate browser window** (with Playwright's own built-in recorder
+  toolbar baked into the page — a different UI from Object Spy's hover
+  overlay), passing through the URL typed into the box above, the
+  language/version and browser (Chrome/Edge) picked in Settings
+  (`--target=java-junit`/`--target=python-pytest`, `--channel=chrome`/
+  `--channel=msedge`), and streaming its output file's content verbatim
+  into **Generated Code** as it updates — no reformatting, no locator
+  substitution, exactly what codegen itself wrote. **Stop** terminates that
+  process (and its browser goes down with it).
+
+  Because this is a genuinely separate browser process with no way to
+  attach Object Spy's own agent to it, the **Locator Output** table, the
+  Object Spy toggle, and **Generate Code**/**Stop Code Generation** are
+  hidden while this mode is active — a banner in the Control Panel says so.
+  The **AI Generated Code** panel and the **AI-refined code, automatically**
+  pipeline described below both still work normally, refining whatever raw
+  code codegen produced.
+
+- **Off:** the extension's own CDP-attach architecture (Object Spy, the
+  Locator Output table, Generate Code) drives a single already-running
+  Chrome/Edge window the normal way, using this extension's own
+  tiered/smart locator engine.
+
+**How a browser download is still avoided:** `playwright` (the full
+package, not just `playwright-core`) is a real dependency of this
+extension, needed only for the `codegen` CLI file itself — its own
+bundled-browser download step is disabled at install time for this whole
+project (see `.npmrc`'s `playwright_skip_browser_download=1`, plus a
+redundant `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` in `build-extension.bat`),
+so nothing is ever fetched, at build time or at runtime. `--channel chrome`/
+`--channel msedge` tells codegen to drive the same already-installed system
+browser as everywhere else in this extension (see chromeFinder.ts) instead
+of a bundled one — verified end-to-end: launching, letting it record,
+reading its live output file, and terminating it all confirmed to work with
+zero browser downloads and zero leftover processes.
+
+## AI-refined code, automatically
+
+Whenever **Link with GitHub Copilot LLM** is on and a model is picked in
+Settings, the **AI Generated Code** panel is kept current on its own — no
+send button to click at all. A short debounce (1.5s of no new actions)
+after Generate Code records something triggers a refinement request
+automatically; checking a `.github/*.md` file's checkbox (see "Custom md
+files" below) also triggers one immediately, so the effect of a selection
+is visible right away instead of waiting for the next recorded action.
+
+Every refinement request — manual or automatic — always includes a bundled,
+built-in instruction set (`prompts/senior-qe-instructions.md`, shipped with
+the extension) asking the model to apply, comprehensively:
+
+- **Zero hardcoded values anywhere** — every locator, URL, timeout, and
+  expected value as a named constant declared once at the top of the class
+  (Java `static final` fields / Python class attributes), reused by
+  reference everywhere it repeats, never re-embedded as a literal.
+- **Proper error handling** — every logical step wrapped in try/catch
+  (Java) or try/except (Python), never silently swallowed, always
+  re-raised after logging.
+- **Real logging, not print statements** — SLF4J in Java, the standard
+  `logging` module in Python, with `logger.info` for each step's
+  start/success, `logger.warning` for a recoverable hiccup, and
+  `logger.error` (with the failing locator/action) immediately before a
+  failure is re-raised.
+- The same explicit visible-then-enabled waits described above.
+
+Automatic requests reuse this extension's own Copilot session and consent
+(the same "Link with GitHub Copilot LLM" opt-in and VS Code's own one-time
+Language Model API consent dialog both still apply) — nothing is sent
+anywhere without that already being turned on.
+
+## Link Feature File (BDD)
+
+**Link Feature File** (Control Panel) ties a Cucumber Gherkin `.feature`
+file's Scenario/Scenario Outline to whatever gets generated next, so the AI
+refinement pipeline produces proper, linked BDD step definitions instead of
+a plain page object/test.
+
+1. Click **Link Feature File**, pick a `.feature` file. It opens in a
+   separate view: Feature title/description, an optional **Background**
+   block, then every **Scenario**/**Scenario Outline** as its own
+   syntax-highlighted, individually selectable segment (radio button) —
+   Gherkin keywords (`Feature`/`Background`/`Scenario`/`Scenario Outline`/
+   `Given`/`When`/`Then`/`And`/`But`/`Examples`) bold+italic in their own
+   color, `"quoted"`/`<placeholder>` parameter values highlighted distinctly,
+   plain step text in light gray on black, and every data table/Examples
+   cell in bright yellow.
+2. Pick a Scenario/Scenario Outline, click **Use Selected Scenario**. A
+   badge appears in the Control Panel (`Feature › Scenario: name`) — the
+   feature-file view can now be closed or switched away from freely; the
+   selection lives in the extension, not in that view.
+3. **Start** (native `codegen`, or Generate Code in legacy mode) as usual.
+   Whenever code is refined by AI — manually or via the automatic pipeline
+   above — the linked scenario's exact Gherkin text (Background included)
+   is sent alongside the generated code and the built-in senior-QE
+   instructions, which now also cover producing real BDD step definitions:
+   **Cucumber-JVM** for Java, **pytest-bdd** for Python (there's no single
+   "Playwright BDD" tool that works in both languages, so each gets its
+   real, idiomatic one) — every `Given`/`When`/`Then`/`And`/`But` line gets
+   its own step definition, correctly resolving `And`/`But` to the nearest
+   preceding primary keyword, with a traceability comment quoting the exact
+   Gherkin line above each one, parameterized steps/data tables/doc strings
+   handled per that framework's real API, and zero hardcoded values —
+   consistent with everything else this pipeline already enforces.
+4. **The linked file stays available for the rest of the session — closing
+   the view never requires re-linking.** Once opened, a file is cached in
+   memory: clicking the badge text, or clicking the Control Panel's button
+   again (now relabeled **View Feature File**), reopens it instantly with
+   no OS file-browse dialog, so you can pick a **different** scenario from
+   it as many times as you like. The button only goes back to browsing
+   (**Link Feature File**) if nothing has been linked yet. The only ways
+   the linked file itself actually changes are: clicking **Browse Different
+   File…** inside that view (an explicit, deliberate switch to a different
+   `.feature` file), or closing VS Code — never just closing the view.
+   Regenerating with the **same** scenario needs nothing further: the link
+   persists across Start/Stop and Kill All Browsers on its own, and is
+   cleared only by linking a different file/scenario or the badge's **✕**.
+
+Available in both native and legacy modes — it's independent of which one
+actually produces the underlying page object/test code.
+
 ## Kill All Browsers
 
 The toolbar's **Kill All Browsers** button (click twice to confirm — VS
@@ -233,7 +374,7 @@ your everyday browsing Chrome, an unacceptable side effect for a "clear my
 automation session" button. If you attached to an already-running Chrome
 instead of launching one, that Chrome is left running, same as a plain Stop.
 
-## AI Assist (GitHub Copilot)
+## Custom md files (GitHub Copilot AI Assist)
 
 Requires the **GitHub Copilot Chat** extension installed and signed in.
 softPlay never bundles or hardcodes a model list — it asks VS Code's
@@ -244,30 +385,42 @@ subscription/extension version exposes are what show up.
 1. Open **Settings**, turn on **Link with GitHub Copilot LLM**, and pick a
    model from the dropdown (populated live from Copilot — "No Copilot chat
    models found" means Copilot Chat isn't installed or you're not signed
-   in). This reveals a collapsible **AI Assist** section and a second
+   in). This reveals a collapsible **Custom md files** section and a second
    **AI Generated Code** view in the main panel.
-2. Expand **AI Assist**. It auto-detects every `.github/**/*.md` file in
-   your workspace (instructions, skills, custom prompts) — check whichever
-   ones you want followed, or none. Click **Refresh file list** if you add
-   files after opening the panel.
-3. Click **Send to Copilot**. This sends the model a single message
-   containing: the content of your selected `.md` files, the JSON of every
-   captured locator, and the current **Generated Code** view's content as a
-   style reference — explicitly asked to reproduce the same Page-Object
-   structure, reuse the given locators as-is, and return only a fenced code
-   block. The response streams into the **AI Generated Code** view live as
-   it arrives.
+2. Expand **Custom md files**. It auto-detects every `.github/**/*.md` file
+   in your workspace (instructions, skills, custom prompts). **There is no
+   separate send button** — checking a file's checkbox is itself the
+   action: the extension tracks the current selection and folds whichever
+   files are checked into every refinement automatically, both the
+   automatic post-recording pipeline (see "AI-refined code, automatically"
+   above) and the chat composer's manual send below. Unchecking everything
+   is fine too — refinement still runs, just without any project-specific
+   `.md` file's content, on top of the always-included built-in
+   instructions. Click **Refresh file list** if you add files after opening
+   the panel.
+3. The chat composer underneath is for **free-text instructions** — type
+   something and press Enter (or click ➤) to trigger an immediate
+   refinement request combining that text, whatever `.md` files are
+   currently checked, the captured locators, and the current **Generated
+   Code** view's content as a style reference. The response streams into
+   the **AI Generated Code** view live as it arrives.
 4. Both code views are independently editable, syntax-highlighted, and
    independently scrollable (side by side when the panel is wide enough —
    drag the Activity Bar view wider, or drag it into the editor area, to see
    both at once; they stack on a narrow sidebar). **Save Code** on either
-   view works the same way as the Playwright view's.
+   view works the same way as the Playwright view's. Each also has its own
+   ▾/▸ collapse toggle in its header (next to the title) — collapse one to
+   view the other at its full, unchanged size without the collapsed one
+   still taking up sidebar space next to or above it.
 
 **Consent:** the first time any extension calls the Language Model API in a
 session, VS Code shows a one-time permission dialog — that's Copilot's own
-gate, not something softPlay controls. Per the API's own contract, this
-call only ever happens in direct response to your **Send to Copilot**
-click, never automatically.
+gate, not something softPlay controls. This can be triggered either by the
+chat composer's manual send or by the automatic post-recording refinement
+described in "AI-refined code, automatically" above — either way, it only
+ever runs at all while you've explicitly turned on **Link with GitHub
+Copilot LLM** and picked a model in Settings, which is itself the real,
+one-time opt-in.
 
 **Honest limitations, since this integration depends on an environment this
 build couldn't exercise end-to-end the way the rest of the extension was
@@ -292,6 +445,7 @@ section of the main UI:
 | --- | --- | --- | --- |
 | Browser | Chrome / Edge | **Chrome** | `context.globalState` |
 | Locator type | CSS / XPath | **XPath** | `context.globalState` |
+| Use native Playwright feature | On / Off | **On** | `context.globalState` |
 | Language | Java / Python | Java | `context.globalState` |
 | Language / runtime version | Java: 11, 17, 21 · Python: 3.9–3.12 | Java 17 | `context.globalState` |
 | Link with GitHub Copilot LLM | On / Off | Off | `context.globalState` |
@@ -302,6 +456,16 @@ don't affect how the extension itself runs. Changes apply immediately
 (locator type takes effect on the next hover) and persist across VS Code
 restarts. Default test-framework scaffolding for code generation (not yet
 user-configurable) is JUnit 5 for Java and pytest for Python.
+
+The two toggle switches are deliberately different sizes: "Link with GitHub
+Copilot LLM" is the full-size switch (it's the one gating a whole section of
+UI below it), and "Use native Playwright feature" uses a visibly smaller
+variant, since it's a narrower, single-behavior setting. Both switches' track
+color previously fell back to a theme variable (`--vscode-dropdown-border`)
+that's fully transparent in several built-in VS Code themes, making the
+"off" state nearly invisible — both now use `--vscode-checkbox-border`
+instead, the variable VS Code defines specifically for checkbox-like
+controls, which always has real contrast.
 
 ## Edge cases: shadow DOM, iframes, dynamic ids
 
@@ -474,9 +638,15 @@ src/
   browser/
     browserManager.ts     CDP attach/launch, navigate, Object Spy/recording state, status events
     chromeFinder.ts        Cross-platform Chrome/Edge executable + profile discovery
+    codegenManager.ts      "Use native Playwright feature": spawns/kills the real
+                           `playwright codegen` CLI, watches its output file
   panel/
     objectSpyPanel.ts      Main UI: Activity Bar sidebar view (WebviewViewProvider) + message bridge
     settingsPanel.ts       Settings webview panel (locator type, language, version)
+    featureFilePanel.ts    "Link Feature file": browse/parse/select a Gherkin Scenario
+  bdd/
+    gherkinParser.ts       Dependency-free .feature file parser (Scenarios, Outlines, Examples, tables)
+    gherkinHighlight.ts    Renders parsed Gherkin as syntax-highlighted HTML for featureFilePanel.ts
   settings/
     settingsStore.ts       Persists settings via context.globalState, notifies listeners
   codegen/
@@ -492,10 +662,15 @@ media/
   highlight.js             Dependency-free regex tokenizer for the code editor's syntax highlighting
   icon.png                 Marketplace/Extensions-view icon (256x256)
   activitybar-icon.svg     Activity Bar icon (monochrome, VS Code recolors it per theme)
+prompts/
+  senior-qe-instructions.md  Bundled LLM instruction set (try/catch, logger.info/
+                             warn/error, explicit waits, zero hardcoded values) —
+                             always included in every AI refinement request
 scripts/
   bump-version.js          Auto-increments package.json's build number (build-extension.bat)
   generate-icon.js         Regenerates media/icon.png from scratch (no image-library dependency)
 build-extension.bat        npm install -> compile -> bump version -> package a single .vsix
+.npmrc                     playwright_skip_browser_download=1 — see "Use native Playwright feature"
 ```
 
 ## Roadmap (see Master Build Prompt doc for full detail)

@@ -1,13 +1,16 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as fs from 'fs';
 import { BrowserManager, BrowserStatus, CapturedElement, RecordedActionEvent } from '../browser/browserManager';
+import { CodegenManager, CodegenStatus } from '../browser/codegenManager';
 import { SettingsStore } from '../settings/settingsStore';
 import { SettingsPanel } from './settingsPanel';
+import { FeatureFilePanel, LinkedScenario } from './featureFilePanel';
 import { CodeGenerator, RecordedAction } from '../codegen/codeGenerator';
 import { CopilotUnavailableError, extractCodeBlock, sendPrompt } from '../llm/copilotClient';
 
 type InboundMessage =
-  | { type: 'start' }
+  | { type: 'start'; payload?: string }
   | { type: 'stop' }
   | { type: 'navigate'; payload: string }
   | { type: 'toggleSpy' }
@@ -22,7 +25,11 @@ type InboundMessage =
   | { type: 'refreshPromptFiles' }
   | { type: 'sendToLlm'; payload: { selectedFiles: string[]; code: string; customInstructions: string } }
   | { type: 'saveLlmCode'; payload: string }
-  | { type: 'highlightElement'; payload: string };
+  | { type: 'highlightElement'; payload: string }
+  | { type: 'linkFeatureFile' }
+  | { type: 'reopenFeatureFile' }
+  | { type: 'unlinkFeatureFile' }
+  | { type: 'selectedInstructionFiles'; payload: string[] };
 
 /** Dedup/identity key for a captured element — see item #3: an element already
  * scanned (same locator type + locator string) is never added to the table twice. */
@@ -49,6 +56,16 @@ export const OBJECT_SPY_VIEW_ID = 'objectSpy.mainView';
 export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
   private readonly browserManager = new BrowserManager();
+  // "Use native Playwright feature" (Settings, default ON) — drives real
+  // Playwright `codegen` in its OWN separate browser window instead of this
+  // extension's CDP-attach + custom agent architecture. See codegenManager.ts
+  // for why the two can't share a session, and startBrowser()/stopBrowser()
+  // for how the panel picks between the two based on the current setting.
+  private readonly codegenManager = new CodegenManager();
+  // The most recent raw code `codegen` wrote, verbatim — what "Generated
+  // Code" shows while native mode is active, entirely bypassing
+  // CodeGenerator (see getCurrentGeneratedCode()).
+  private nativeGeneratedCode = '';
   private readonly disposables: vscode.Disposable[] = [];
 
   // Captured elements persist across panel hide/reveal (retainContextWhenHidden
@@ -58,6 +75,25 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   // Generate Code's recorded actions can share the same table (#15).
   private readonly capturedElements = new Map<string, CapturedElement>();
   private readonly settingsPanel: SettingsPanel;
+  private readonly featureFilePanel: FeatureFilePanel;
+  // The Gherkin Scenario/Scenario Outline currently linked via "Link
+  // Feature file" (Control Panel) — folded into every LLM refinement
+  // request (manual or automatic) so the generated step definitions are
+  // tied to this exact scenario's step lines. Persists across Start/Stop
+  // and even Kill All Browsers, and across regenerating code from the same
+  // or a fresh codegen session — by design, so "regenerate with the same
+  // scenario" (explicitly asked for) doesn't require re-picking it every
+  // time. Cleared only when the user explicitly unlinks it or links a
+  // different one.
+  private linkedScenario: LinkedScenario | undefined;
+  // Workspace-relative paths of whichever "Custom md files" (.github/*.md)
+  // checkboxes are currently checked in the webview — kept in sync via the
+  // 'selectedInstructionFiles' message every time the user (un)checks one.
+  // There is no more "Send to Copilot"/"Send Anyway" button: checking a box
+  // IS the action now, folded automatically into the next AI refinement
+  // (manual chat send or the automatic post-recording pipeline) rather than
+  // requiring a separate explicit send.
+  private selectedInstructionFiles: string[] = [];
 
   private readonly codeGenerator = new CodeGenerator();
   private generating = false;
@@ -65,10 +101,19 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   // the user's resolution in the panel — see §"Ambiguous locator" decision.
   private pendingAmbiguous: RecordedActionEvent | undefined;
 
-  // Tracks the in-flight "Send to Copilot" request, if any, so a second
-  // click (or the view closing) can cancel the previous one cleanly instead
-  // of leaving two streams writing into the same AI code view.
+  // Tracks the in-flight LLM refinement request, if any (manual chat send
+  // or the automatic pipeline), so a second one starting (or the view
+  // closing) can cancel the previous one cleanly instead of leaving two
+  // streams writing into the same AI code view.
   private llmCancellation: vscode.CancellationTokenSource | undefined;
+
+  // Debounces the automatic "refine with AI" pipeline (try/catch, logging,
+  // explicit waits, zero hardcoded values — see prompts/senior-qe-instructions.md)
+  // that fires whenever Generate Code records a new action and Copilot is
+  // linked, so a burst of clicks doesn't fire one Copilot request per click —
+  // only once activity settles for a moment.
+  private autoRefineTimer: ReturnType<typeof setTimeout> | undefined;
+  private static readonly AUTO_REFINE_DEBOUNCE_MS = 1500;
 
   // Diagnostic/informational messages (Chrome launch, recorded actions,
   // etc.) go to a proper VS Code Output channel rather than a panel of
@@ -78,6 +123,19 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
 
   constructor(private readonly context: vscode.ExtensionContext, private readonly settingsStore: SettingsStore) {
     this.settingsPanel = new SettingsPanel(context, settingsStore);
+    this.featureFilePanel = new FeatureFilePanel(
+      (scenario) => {
+        this.linkedScenario = scenario;
+        this.postLinkedScenario();
+        this.outputChannel.appendLine(
+          `Linked ${scenario.scenarioKind} "${scenario.scenarioName}" from ${scenario.featureFilePath}`
+        );
+      },
+      (filePath) => {
+        this.postFeatureFileAvailable(true);
+        this.outputChannel.appendLine(`Feature file available for this session: ${filePath}`);
+      }
+    );
 
     // Locator type lives in the Settings panel (context.globalState), not a
     // VS Code workspace setting — push the current value in now, and again
@@ -85,6 +143,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     // always reflects it.
     void this.browserManager.setLocatorType(this.settingsStore.get().locatorType);
     this.browserManager.setBrowserChannel(this.settingsStore.get().browserChannel);
+    void this.browserManager.setNativeLocatorMode(this.settingsStore.get().useNativePlaywrightLocators);
 
     this.disposables.push(
       this.browserManager.onStatusChange((status) => {
@@ -100,9 +159,17 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
       this.browserManager.onLog((message) => this.outputChannel.appendLine(message)),
       this.browserManager.onCapture((info) => this.addElement(info)),
       this.browserManager.onAction((action) => void this.handleAction(action)),
+      this.codegenManager.onStatusChange((status) => this.postStatus(mapCodegenStatus(status))),
+      this.codegenManager.onLog((message) => this.outputChannel.appendLine(message)),
+      this.codegenManager.onCodeUpdate((code) => {
+        this.nativeGeneratedCode = code;
+        this.postCode(true);
+      }),
       this.settingsStore.onChange((settings) => {
         void this.browserManager.setLocatorType(settings.locatorType);
         this.browserManager.setBrowserChannel(settings.browserChannel);
+        void this.browserManager.setNativeLocatorMode(settings.useNativePlaywrightLocators);
+        this.postNativeModeActive(settings.useNativePlaywrightLocators);
         this.postCode();
         this.postCopilotEnabledState(settings.copilotEnabled);
       })
@@ -138,9 +205,12 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     );
 
     // Sync current state into the freshly (re-)resolved webview.
-    this.postStatus(this.browserManager.getStatus());
+    this.postStatus(this.currentStatus());
     this.postSpyState(this.browserManager.isSpyEnabled());
     this.postGeneratingState(this.generating);
+    this.postNativeModeActive(this.settingsStore.get().useNativePlaywrightLocators);
+    this.postLinkedScenario();
+    this.postFeatureFileAvailable(this.featureFilePanel.hasLinkedFile());
     this.postCode();
     this.postCopilotEnabledState(this.settingsStore.get().copilotEnabled);
     for (const info of this.capturedElements.values()) {
@@ -151,7 +221,17 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     }
   }
 
-  async startBrowser(): Promise<void> {
+  /** `url` is only meaningful in native mode (Playwright `codegen`'s own
+   * positional CLI argument, needed at spawn time) — the Command Palette's
+   * "softPlay: Start Browser" command has no URL to offer, so it's optional;
+   * codegen simply opens blank and the user types into its own address bar,
+   * same as running it by hand with no URL. */
+  async startBrowser(url?: string): Promise<void> {
+    if (this.settingsStore.get().useNativePlaywrightLocators) {
+      const settings = this.settingsStore.get();
+      await this.codegenManager.start(url?.trim() ?? '', settings.language, settings.browserChannel);
+      return;
+    }
     try {
       await this.browserManager.start();
     } catch (err) {
@@ -160,7 +240,20 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   }
 
   async stopBrowser(): Promise<void> {
+    if (this.settingsStore.get().useNativePlaywrightLocators) {
+      await this.codegenManager.stop();
+      return;
+    }
     await this.browserManager.stop();
+  }
+
+  /** Whichever of the two managers is relevant right now, translated to the
+   * one BrowserStatus shape the panel/webview already understand — see
+   * mapCodegenStatus(). */
+  private currentStatus(): BrowserStatus {
+    return this.settingsStore.get().useNativePlaywrightLocators
+      ? mapCodegenStatus(this.codegenManager.getStatus())
+      : this.browserManager.getStatus();
   }
 
   openSettings(): void {
@@ -176,10 +269,15 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   }
 
   dispose(): void {
+    if (this.autoRefineTimer) {
+      clearTimeout(this.autoRefineTimer);
+    }
     this.llmCancellation?.cancel();
     this.llmCancellation?.dispose();
     this.browserManager.dispose();
+    this.codegenManager.dispose();
     this.settingsPanel.dispose();
+    this.featureFilePanel.dispose();
     this.outputChannel.dispose();
     this.disposables.forEach((d) => d.dispose());
   }
@@ -191,7 +289,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   private async handleMessage(message: InboundMessage): Promise<void> {
     switch (message.type) {
       case 'start':
-        await this.startBrowser();
+        await this.startBrowser(message.payload);
         break;
       case 'stop':
         await this.stopBrowser();
@@ -239,6 +337,35 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
         break;
       case 'highlightElement':
         await this.highlightElement(message.payload);
+        break;
+      case 'linkFeatureFile':
+        // Once a file has been linked, this button reopens that SAME
+        // cached file (no OS browse dialog) instead of forcing the user to
+        // re-pick it — per the explicit ask that a linked file stay
+        // available until a genuinely different one is linked (via the
+        // feature view's own "Browse Different File…" button) or VS Code
+        // closes, not just because this view was closed. Only browses when
+        // nothing has been linked yet this session.
+        if (this.featureFilePanel.hasLinkedFile()) {
+          await this.featureFilePanel.reopenLastFile();
+        } else {
+          await this.featureFilePanel.browseAndOpen();
+        }
+        break;
+      case 'reopenFeatureFile':
+        await this.featureFilePanel.reopenLastFile();
+        break;
+      case 'unlinkFeatureFile':
+        this.linkedScenario = undefined;
+        this.postLinkedScenario();
+        break;
+      case 'selectedInstructionFiles':
+        this.selectedInstructionFiles = message.payload;
+        // Checking a box is itself the action now (no more "Send to
+        // Copilot" button) — if there's already some generated code, give
+        // immediate feedback rather than waiting for the next recorded
+        // action to happen to trigger a refinement.
+        this.scheduleAutoRefine();
         break;
     }
   }
@@ -349,7 +476,12 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   }
 
   private async killAllBrowsers(): Promise<void> {
+    // Both, unconditionally, regardless of which mode is current — clears
+    // an orphaned session left over from before the Settings toggle was
+    // last flipped, not just whichever manager the current setting implies.
     await this.browserManager.killAllAndClear();
+    await this.codegenManager.stop();
+    this.nativeGeneratedCode = '';
     this.capturedElements.clear();
     this.codeGenerator.reset();
     this.generating = false;
@@ -362,11 +494,20 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   }
 
   // -----------------------------------------------------------------------
-  // AI Assist (GitHub Copilot) — item 16. Deliberately separate from the
-  // Playwright codegen path: it only ever runs in direct response to the
-  // "Send to Copilot" button (VS Code's Language Model API requires that —
-  // it shows a one-time consent dialog the first time an extension calls
-  // sendRequest, and the API contract requires that call be user-initiated).
+  // "Custom md files" (GitHub Copilot AI Assist) — item 16, revised: there
+  // is no more "Send to Copilot"/"Send Anyway" button. Checking a
+  // .github/*.md file's checkbox is itself the action (sendToLlm() and
+  // autoRefineWithLlm() both read this.selectedInstructionFiles, kept in
+  // sync via the 'selectedInstructionFiles' message on every checkbox
+  // change) — it's folded automatically into the next refinement, either
+  // the chat composer's manual send (free-text instructions + whatever's
+  // checked) or the automatic pipeline debounced after each new action
+  // Generate Code records (scheduleAutoRefine() -> autoRefineWithLlm()).
+  // Either way it only ever fires while "Link with GitHub Copilot LLM" is
+  // on and a model is picked in Settings, which is itself an explicit,
+  // one-time opt-in; VS Code's Language Model API separately shows its own
+  // one-time consent dialog the first time this extension calls
+  // sendRequest, regardless of which path triggers it.
   // -----------------------------------------------------------------------
 
   private async refreshPromptFiles(): Promise<void> {
@@ -376,6 +517,66 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   }
 
   private async sendToLlm(selectedFiles: string[], playwrightCode: string, customInstructions: string): Promise<void> {
+    const instructions = await this.readInstructionFiles(selectedFiles);
+    await this.runLlmRefinement(instructions, playwrightCode, customInstructions.trim());
+  }
+
+  /**
+   * Fires automatically whenever Generate Code records a new action, with no
+   * button click required — the try/catch + logger + explicit-wait +
+   * zero-hardcoded-values refinement (prompts/senior-qe-instructions.md) is
+   * meant to keep the AI Generated Code panel current as the recording
+   * grows, not require the user to remember to re-click Send. Debounced
+   * (see AUTO_REFINE_DEBOUNCE_MS) so a burst of clicks fires one Copilot
+   * request once things settle, not one per click. Silently does nothing if
+   * Copilot isn't linked — this is a convenience on top of the manual "Send
+   * to Copilot" flow, not a requirement to use it.
+   */
+  private scheduleAutoRefine(): void {
+    const settings = this.settingsStore.get();
+    if (!settings.copilotEnabled || !settings.copilotModelId) {
+      return;
+    }
+    if (this.autoRefineTimer) {
+      clearTimeout(this.autoRefineTimer);
+    }
+    this.autoRefineTimer = setTimeout(() => {
+      this.autoRefineTimer = undefined;
+      void this.autoRefineWithLlm();
+    }, ObjectSpyPanel.AUTO_REFINE_DEBOUNCE_MS);
+  }
+
+  private async autoRefineWithLlm(): Promise<void> {
+    const settings = this.settingsStore.get();
+    if (!settings.copilotEnabled || !settings.copilotModelId) {
+      return;
+    }
+    const playwrightCode = this.getCurrentGeneratedCode();
+    if (!playwrightCode.trim()) {
+      return; // nothing recorded yet in either mode -- nothing to refine
+    }
+    // Uses whichever "Custom md files" checkboxes are currently checked in
+    // the webview (see the 'selectedInstructionFiles' handler) — there is
+    // no more "Send to Copilot" button to separately opt files in, so
+    // automatic refinement respects exactly what's checked, same as a
+    // manual chat send does. Proceeds fine with none checked too — the
+    // bundled senior-QE instructions (readSeniorQeInstructions()) always
+    // apply regardless.
+    const instructions = await this.readInstructionFiles(this.selectedInstructionFiles);
+    await this.runLlmRefinement(instructions, playwrightCode, '');
+  }
+
+  /** Shared by the chat composer's manual send and the automatic
+   * post-recording refinement — always folds in the bundled senior-QE
+   * instructions (try/catch, logger.info/warn/error, explicit visible+enabled
+   * waits, zero hardcoded values, everything parameterized as top-level
+   * static/class constants) on top of whatever project-specific `.github/`
+   * files and free-text instructions were supplied. */
+  private async runLlmRefinement(
+    instructions: { path: string; content: string }[],
+    playwrightCode: string,
+    customInstructions: string
+  ): Promise<void> {
     const settings = this.settingsStore.get();
     if (!settings.copilotEnabled || !settings.copilotModelId) {
       this.postLlmError('Enable "Link with GitHub Copilot LLM" and pick a model in Settings first.');
@@ -390,13 +591,14 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     this.postLlmStart();
 
     try {
-      const instructions = await this.readInstructionFiles(selectedFiles);
       const prompt = buildLlmPrompt(
         settings.language,
+        readSeniorQeInstructions(),
         instructions,
         this.buildLocatorsJson(),
         playwrightCode,
-        customInstructions.trim()
+        customInstructions,
+        this.linkedScenario
       );
 
       let accumulated = '';
@@ -454,6 +656,26 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
 
   private postCopilotEnabledState(enabled: boolean): void {
     this.webview?.postMessage({ type: 'copilotEnabledState', payload: enabled });
+  }
+
+  private postNativeModeActive(active: boolean): void {
+    this.webview?.postMessage({ type: 'nativeModeActive', payload: active });
+  }
+
+  private postLinkedScenario(): void {
+    this.webview?.postMessage({
+      type: 'linkedScenario',
+      payload: this.linkedScenario
+        ? { featureName: this.linkedScenario.featureName, scenarioName: this.linkedScenario.scenarioName, scenarioKind: this.linkedScenario.scenarioKind }
+        : null
+    });
+  }
+
+  /** A file has become available to reopen without a fresh browse dialog
+   * (see FeatureFilePanel.hasLinkedFile()) — the Control Panel button
+   * relabels itself accordingly. */
+  private postFeatureFileAvailable(available: boolean): void {
+    this.webview?.postMessage({ type: 'featureFileAvailable', payload: available });
   }
 
   private postLlmStart(): void {
@@ -520,7 +742,13 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
       this.postCode(true);
       return;
     }
-    if (action.matches !== 1) {
+    // "Use native Playwright feature" (Settings, default ON) skips this
+    // pause entirely — real Playwright Codegen doesn't verify uniqueness
+    // either, and will happily hand you a locator that needs `.first()`/
+    // manual disambiguation later; this mode intentionally matches that,
+    // accepting whatever was captured as-is instead of blocking the
+    // recording to ask for a fix.
+    if (action.matches !== 1 && !this.settingsStore.get().useNativePlaywrightLocators) {
       this.pendingAmbiguous = action;
       // Pause reporting only — NOT the whole recording session (setRecording
       // would also disable click pass-through, since Object Spy's own
@@ -585,21 +813,38 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     this.webview?.postMessage({ type: 'generatingState', payload: generating });
   }
 
-  /** `isNewRecording` flags a genuinely new action just landed (vs. a
-   * refresh triggered by, say, a Settings change) — the panel uses it to
-   * flash the "New code recorded." indicator (#2). */
-  private postCode(isNewRecording = false): void {
+  /** Whichever the current mode actually is: the raw text `codegen` wrote
+   * verbatim (native mode — no CodeGenerator involvement at all, per the
+   * feature's whole point), or this extension's own template-generated
+   * Page Object code (legacy CDP-attach mode). Shared by postCode() and the
+   * AI refinement pipeline so both always agree on what "the current
+   * generated code" means. */
+  private getCurrentGeneratedCode(): string {
     const settings = this.settingsStore.get();
-    const code = this.codeGenerator.generate(
+    if (settings.useNativePlaywrightLocators) {
+      return this.nativeGeneratedCode;
+    }
+    return this.codeGenerator.generate(
       settings.language,
       settings.languageVersion,
       this.browserManager.getPageTitle(),
       settings.browserChannel
     );
+  }
+
+  /** `isNewRecording` flags a genuinely new action just landed (vs. a
+   * refresh triggered by, say, a Settings change) — the panel uses it to
+   * flash the "New code recorded." indicator (#2). */
+  private postCode(isNewRecording = false): void {
+    const settings = this.settingsStore.get();
+    const code = this.getCurrentGeneratedCode();
     this.webview?.postMessage({
       type: 'code',
       payload: { code, language: settings.language, languageVersion: settings.languageVersion, isNewRecording }
     });
+    if (isNewRecording) {
+      this.scheduleAutoRefine();
+    }
   }
 
   private postAmbiguous(action: RecordedActionEvent, note?: string): void {
@@ -645,21 +890,34 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
         <button id="stopBtn" class="btn" disabled>Stop</button>
         <span id="statusPill" class="status-pill status-idle">Idle</span>
       </div>
-      <div class="toolbar-row">
-        <input id="urlInput" type="text" placeholder="https://example.com" />
-        <button id="navigateBtn" class="btn" disabled>Navigate</button>
+      <div id="nativeModeNote" class="native-mode-note" hidden>
+        <strong>Use native Playwright feature</strong> is on (Settings) — Start launches
+        Playwright's own <code>codegen</code> tool in its own browser window. Object Spy,
+        the Locator Output table, and Generate Code aren't available while it's running;
+        the URL below is only used as the page it opens to.
       </div>
       <div class="toolbar-row">
-        <button id="spyBtn" class="btn" disabled title="Hover the real Chrome window to highlight elements; click to capture a locator">Object Spy: Off</button>
-        <button id="genCodeBtn" class="btn" disabled title="Record real browser actions and generate Playwright code">Generate Code</button>
-        <button id="stopCodeBtn" class="btn" disabled title="Pause recording — Generate Code resumes without losing what's generated">Stop Code Generation</button>
+        <input id="urlInput" type="text" placeholder="https://example.com" />
+        <button id="navigateBtn" class="btn legacy-only" disabled>Navigate</button>
+      </div>
+      <div class="toolbar-row">
+        <button id="spyBtn" class="btn legacy-only" disabled title="Hover the real Chrome window to highlight elements; click to capture a locator">Object Spy: Off</button>
+        <button id="genCodeBtn" class="btn legacy-only" disabled title="Record real browser actions and generate Playwright code">Generate Code</button>
+        <button id="stopCodeBtn" class="btn legacy-only" disabled title="Pause recording — Generate Code resumes without losing what's generated">Stop Code Generation</button>
         <button id="settingsBtn" class="btn btn-icon" title="Settings (locator type, language)">⚙</button>
       </div>
       <div class="toolbar-row">
         <button id="killAllBtn" class="btn btn-danger" title="Close every browser this extension launched and clear all captured locators + generated code">Kill All Browsers</button>
       </div>
+      <div class="toolbar-row">
+        <button id="linkFeatureBtn" class="btn" title="Browse to a Cucumber .feature file and pick a Scenario/Scenario Outline to link to the generated code">Link Feature File</button>
+        <span id="linkedScenarioBadge" class="linked-scenario-badge" hidden>
+          <span id="linkedScenarioText"></span>
+          <button id="unlinkScenarioBtn" class="btn-icon-small" title="Unlink this scenario">✕</button>
+        </span>
+      </div>
 
-      <div id="ambiguousBanner" class="ambiguous-banner" hidden>
+      <div id="ambiguousBanner" class="ambiguous-banner legacy-only" hidden>
         <div class="ambiguous-text">
           <strong>Ambiguous locator</strong> — <span id="ambiguousDetail"></span>
         </div>
@@ -670,7 +928,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     </div>
   </details>
 
-  <details class="section" id="locatorOutputSection" open>
+  <details class="section legacy-only" id="locatorOutputSection" open>
     <summary>Locator Output</summary>
     <div class="section-body">
       <table id="resultsTable">
@@ -703,23 +961,17 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     <div class="section-body">
       <div id="aiAssistSection" class="ai-assist" hidden>
         <details>
-          <summary>AI Assist (GitHub Copilot)</summary>
+          <summary>Custom md files</summary>
           <div class="ai-assist-body">
-            <div class="ai-files-header">Instruction / skill / prompt files (<code>.github/*.md</code>)</div>
+            <div class="ai-files-header">Instruction / skill / prompt files (<code>.github/*.md</code>) — check any to include them automatically</div>
             <div id="promptFilesList" class="prompt-files-list">
               <div class="prompt-files-empty">No .md files found yet — click Refresh.</div>
             </div>
             <div class="ai-assist-actions">
               <button id="refreshPromptFilesBtn" class="btn btn-small">Refresh file list</button>
-              <button id="sendToLlmBtn" class="btn btn-primary">Send to Copilot</button>
             </div>
 
-            <div id="noPromptWarning" class="no-prompt-warning" hidden>
-              <span>No custom instruction, skill, or prompt file is selected for the LLM to follow. Add details below, or send anyway.</span>
-              <button id="sendAnywayBtn" class="btn btn-small">Send Anyway</button>
-            </div>
-
-            <div id="chatComposer" class="chat-composer" hidden>
+            <div id="chatComposer" class="chat-composer">
               <div id="chatMessages" class="chat-messages"></div>
               <div class="chat-input-row">
                 <textarea id="chatInput" class="chat-input" rows="1" placeholder="Add any details for the AI to follow…"></textarea>
@@ -731,9 +983,10 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
       </div>
 
       <div class="code-panels">
-        <div class="code-panel">
+        <div class="code-panel" id="playwrightCodePanel">
           <div class="code-header">
-            <h3 class="section-title">Playwright Code <span id="codeLanguageLabel"></span></h3>
+            <button id="collapseCodeBtn" class="btn-icon-small code-collapse-btn" title="Collapse this panel">▾</button>
+            <h3 class="section-title">Playwright Code <span id="codeLanguageLabel"></span> <span id="nativeModeBadge" class="native-mode-badge" hidden>Native Playwright Codegen</span></h3>
             <span id="newCodeFlash" class="new-code-flash" hidden>New code recorded.</span>
             <button id="copyCodeBtn" class="btn btn-small">Copy Code</button>
             <button id="saveCodeBtn" class="btn">Save Code</button>
@@ -749,13 +1002,14 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
 
         <div class="code-panel" id="llmCodePanel" hidden>
           <div class="code-header">
+            <button id="collapseLlmCodeBtn" class="btn-icon-small code-collapse-btn" title="Collapse this panel">▾</button>
             <h3 class="section-title">AI Generated Code <span id="llmStatusLabel" class="llm-status"></span></h3>
             <button id="copyLlmCodeBtn" class="btn btn-small">Copy Code</button>
             <button id="saveLlmCodeBtn" class="btn">Save Code</button>
           </div>
           <div class="code-editor-wrap">
             <pre id="llmCodeHighlight" class="code-highlight" aria-hidden="true"><code></code></pre>
-            <textarea id="llmCodeEditArea" class="code-edit-area" spellcheck="false">// Enable "Link with GitHub Copilot LLM" in Settings, pick any instruction files above, then click "Send to Copilot".</textarea>
+            <textarea id="llmCodeEditArea" class="code-edit-area" spellcheck="false">// Enable "Link with GitHub Copilot LLM" in Settings and pick a model, then check a .md file below or type instructions in the chat — the AI Generated Code view fills in automatically as code is recorded.</textarea>
           </div>
         </div>
       </div>
@@ -778,6 +1032,47 @@ function getNonce(): string {
   return text;
 }
 
+// Read once and cached — this is the built-in "think like a senior UI test
+// automation engineer" refinement standard (try/catch, logger.info/warn/error,
+// explicit visible+enabled waits, zero hardcoded values) sent to the LLM on
+// every refinement, manual or automatic. Lives outside src/ deliberately,
+// same as agent/pageAgent.js: .vscodeignore excludes src/**/*.ts from the
+// packaged extension, but this file must ship as plain markdown, not be
+// compiled. Missing/unreadable is a benign "run without the extra standard"
+// fallback, never a hard failure — the reference code and any .github/
+// project instructions still make it into the prompt either way.
+let cachedSeniorQeInstructions: string | undefined;
+function readSeniorQeInstructions(): string {
+  if (cachedSeniorQeInstructions !== undefined) {
+    return cachedSeniorQeInstructions;
+  }
+  try {
+    cachedSeniorQeInstructions = fs.readFileSync(
+      path.join(__dirname, '..', '..', 'prompts', 'senior-qe-instructions.md'),
+      'utf8'
+    );
+  } catch {
+    cachedSeniorQeInstructions = '';
+  }
+  return cachedSeniorQeInstructions;
+}
+
+/** Translates CodegenStatus into the one BrowserStatus shape the webview
+ * already knows how to render (status pill, Start/Stop enablement) — so
+ * native mode needs no separate status-handling code client-side at all. */
+function mapCodegenStatus(status: CodegenStatus): BrowserStatus {
+  switch (status.state) {
+    case 'idle':
+      return { state: 'idle' };
+    case 'starting':
+      return { state: 'connecting', detail: 'Launching Playwright codegen…' };
+    case 'running':
+      return { state: 'connected', url: status.url };
+    case 'error':
+      return { state: 'error', message: status.message };
+  }
+}
+
 function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -797,10 +1092,12 @@ function escapePropertiesValue(value: string): string {
  */
 function buildLlmPrompt(
   language: 'java' | 'python',
+  builtInInstructions: string,
   instructions: { path: string; content: string }[],
   locatorsJson: string,
   playwrightCode: string,
-  customInstructions: string
+  customInstructions: string,
+  linkedScenario?: LinkedScenario
 ): string {
   const languageName = language === 'java' ? 'Java (JUnit 5, Playwright for Java)' : 'Python (pytest, Playwright for Python)';
 
@@ -814,6 +1111,10 @@ function buildLlmPrompt(
       `Respond with ONLY the final code in a single fenced code block and no other commentary.`
   ];
 
+  if (builtInInstructions) {
+    parts.push(`\n## Mandatory refinement standard — apply every part of this\n${builtInInstructions}`);
+  }
+
   if (instructions.length) {
     parts.push(
       `\n## Project instructions/skills/prompts (from .github/) — follow these`,
@@ -825,6 +1126,30 @@ function buildLlmPrompt(
   // was selected (or in addition to one), see item #2's no-instructions warning.
   if (customInstructions) {
     parts.push(`\n## Additional instructions from the user — follow these too\n${customInstructions}`);
+  }
+
+  // "Link Feature file" (Control Panel) — a Gherkin Scenario/Scenario
+  // Outline the user picked in the Feature File view. Present only when
+  // one is currently linked; see the "BDD Gherkin Step Definition Linking"
+  // section of the built-in instructions above for exactly how this must
+  // be turned into step definitions. IMPORTANT: this extension has one
+  // single AI Generated Code view, so the response must stay ONE file in
+  // ONE fenced code block — extractCodeBlock() (copilotClient.ts) only
+  // ever captures the first fenced block in the response, so asking for a
+  // separate step-definitions file here would silently lose it.
+  if (linkedScenario) {
+    const gherkinBlock = [linkedScenario.backgroundRawText, linkedScenario.rawText].filter(Boolean).join('\n\n');
+    parts.push(
+      `\n## Linked Gherkin ${linkedScenario.scenarioKind} — "${linkedScenario.scenarioName}" (from ${linkedScenario.featureName})`,
+      `The user has linked this exact Cucumber ${linkedScenario.scenarioKind} to the recorded flow above via ` +
+        `"Link Feature file". Every Given/When/Then/And/But/* line below must get its own properly linked BDD ` +
+        `step definition per the "BDD Gherkin Step Definition Linking" instructions — do not just append the ` +
+        `Gherkin as a comment. Produce exactly ONE file, in exactly ONE fenced code block: the refined page ` +
+        `object/test code AND its BDD step definitions together, correctly organized and imported as idiomatic ` +
+        `for the target language's real BDD framework (Cucumber-JVM for Java, pytest-bdd for Python) — never ` +
+        `split this into multiple files or code blocks.`,
+      `\`\`\`gherkin\n${gherkinBlock}\n\`\`\``
+    );
   }
 
   parts.push(

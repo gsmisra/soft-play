@@ -48,13 +48,18 @@ type FlowSegment = { kind: 'navigate'; url: string } | { kind: 'chain'; steps: S
  * (action type, locator) pair, and a separate test composes them in the
  * order they were recorded. Re-recording the same locator (e.g. typing into
  * the same field twice) reuses its existing method instead of duplicating
- * one. Wait/assertion strategy: Playwright's own action methods
- * (click/fill/...) already auto-wait for actionability, so no arbitrary
- * sleeps are ever emitted; on top of that, a fill/select/check step asserts
- * the field actually reflects the value afterward, and a click identified
- * as submit-like (an <a>, a submit button, or input[type=submit|button])
- * is followed by a load-state wait, so a flow that navigates doesn't race
- * the next step against a still-loading page.
+ * one. Wait/assertion strategy: every interaction is preceded by an
+ * explicit wait for the element to be visible, then an explicit assertion
+ * that it's enabled — Playwright's own action methods already auto-wait for
+ * actionability internally, but making both checks explicit fails fast with
+ * a clear, element-specific message instead of a generic action timeout,
+ * and "enabled" specifically isn't something a plain click/fill auto-wait
+ * verifies on its own. No arbitrary sleeps are ever emitted — every wait is
+ * condition-based. On top of that, a fill/select/check step asserts the
+ * field actually reflects the value afterward, and a click identified as
+ * submit-like (an <a>, a submit button, or input[type=submit|button]) is
+ * followed by a load-state wait, so a flow that navigates doesn't race the
+ * next step against a still-loading page.
  *
  * Locators are never inlined as string literals in the Page Object methods
  * — every unique locator gets one named constant (in a generated `Locators`
@@ -384,6 +389,7 @@ ${Array.from(locatorConstants.values())
   return `package com.example.tests;
 
 import com.microsoft.playwright.*;
+import com.microsoft.playwright.options.WaitForSelectorState;
 
 import static com.microsoft.playwright.assertions.PlaywrightAssertions.assertThat;
 
@@ -453,7 +459,17 @@ function javaPageObjectMethod(
   const lines: string[] = [
     `  // ${describeAction(action)}`,
     `  ${pageClass} ${methodName}(${params}) {`,
-    `    ${targetType} target = ${locatorExpr};`
+    `    ${targetType} target = ${locatorExpr};`,
+    // Explicit synchronization before touching the element — Playwright's
+    // own action methods already auto-wait for actionability internally,
+    // but making the wait explicit here (1) fails fast with a clear,
+    // element-specific timeout message instead of burying the real cause
+    // inside a generic click-timeout, and (2) also confirms the element is
+    // enabled, which a plain click/fill auto-wait does NOT check for a
+    // <button disabled> or similar — this is the actual QE-standard
+    // "wait for visible, then wait for enabled" pattern, not a sleep.
+    '    target.waitFor(new Locator.WaitForOptions().setState(WaitForSelectorState.VISIBLE));',
+    '    assertThat(target).isEnabled();'
   ];
 
   switch (action.actionType) {
@@ -594,7 +610,16 @@ function pythonPageObjectMethod(
   const lines: string[] = [
     `    # ${describeAction(action)}`,
     `    def ${methodName}(self${params})${returnType}:`,
-    `        target = self.page.locator(Locators.${locatorConstantFor(action, locatorConstants)})`
+    `        target = self.page.locator(Locators.${locatorConstantFor(action, locatorConstants)})`,
+    // Explicit synchronization before touching the element — see the Java
+    // template's identical comment: Playwright's own action methods already
+    // auto-wait for actionability, but this (1) fails fast with a clear,
+    // element-specific timeout instead of a generic click-timeout, and
+    // (2) also confirms the element is enabled, which a plain click/fill
+    // auto-wait does not check on its own — the actual QE-standard
+    // "wait for visible, then wait for enabled" pattern, not a sleep.
+    '        target.wait_for(state="visible")',
+    '        expect(target).to_be_enabled()'
   ];
 
   switch (action.actionType) {

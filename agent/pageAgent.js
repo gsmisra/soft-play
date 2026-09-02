@@ -95,9 +95,16 @@
   // Object Spy's own click-blocking capture mode just because a capture is
   // paused.
   window.__objectSpyRecordingPaused = !!__desired.recordingPaused;
+  // "Use native Playwright feature" (Settings, default ON) — see
+  // computeLocatorInfo() for what this actually changes.
+  window.__objectSpyNativeMode = __desired.nativeMode !== false;
 
   window.__objectSpySetConfig = function (cfg) {
     window.__objectSpyConfig = Object.assign({}, window.__objectSpyConfig, cfg || {});
+  };
+
+  window.__objectSpySetNativeMode = function (enabled) {
+    window.__objectSpyNativeMode = !!enabled;
   };
 
   window.__objectSpySetEnabled = function (enabled) {
@@ -817,11 +824,20 @@
    * heuristic guess) — and never stopping at an ambiguous result while a
    * better option remains: primary candidate -> sibling-axis refinement ->
    * guaranteed-unique positional index.
+   *
+   * Skipped entirely in "Use native Playwright feature" mode (Settings,
+   * default ON — see window.__objectSpyNativeMode below): that mode captures
+   * whatever the PRIMARY candidate is and accepts it as-is, matches===1 or
+   * not, exactly like Playwright's own recorder — which doesn't verify
+   * uniqueness either and will happily hand you a locator that needs
+   * `.first()`/manual disambiguation. This is the extension's own added
+   * value, and only this extension's own value — so it's what native mode
+   * turns off.
    */
   function computeLocatorInfo(el) {
     var locatorType = (window.__objectSpyConfig && window.__objectSpyConfig.locatorType) || 'xpath';
     var primary = locatorType === 'xpath' ? computeXPathPrimary(el) : computeCssPrimary(el);
-    if (primary.matches === 1) {
+    if (primary.matches === 1 || window.__objectSpyNativeMode) {
       return finalizeInfo(primary);
     }
 

@@ -2,17 +2,20 @@
   "name": "object-spy-playwright",
   "displayName": "softPlay",
   "description": "Drive a real, visible Chrome window via CDP, spy on page objects with hover-to-highlight, generate short relative Playwright locators (XPath/CSS) with live uniqueness scoring, and emit enterprise-grade Playwright automation code in Java or Python.",
-  "version": "0.1.16",
+  "version": "0.1.22",
   "publisher": "local-dev",
   "private": true,
   "icon": "media/icon.png",
-  "author": "WenYi Tan, Alicia Loh, Gaurav Misra",
+  "author": "WenYi Tan, Alicia Loh, Roshan Ranasinghe, Gaurav Misra",
   "contributors": [
     {
       "name": "WenYi Tan"
     },
     {
       "name": "Alicia Loh"
+    },
+    {
+      "name": "Roshan Ranasinghe"
     },
     {
       "name": "Gaurav Misra"
@@ -114,6 +117,7 @@
     "typescript": "^5.5.4"
   },
   "dependencies": {
-    "playwright-core": "^1.47.0"
+    "playwright-core": "^1.47.0",
+    "playwright": "^1.47.0"
   }
 }

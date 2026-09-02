@@ -10,6 +10,11 @@ echo ============================================
 echo  Object Spy for Playwright -- build
 echo ============================================
 
+rem Redundant with .npmrc's playwright_skip_browser_download=1 -- belt and
+rem suspenders so a browser is never fetched here even if .npmrc is somehow
+rem bypassed (a global npm config override, etc).
+set PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+
 echo.
 echo [1/4] Installing dependencies (npm install)...
 call npm install

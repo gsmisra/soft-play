@@ -9,6 +9,10 @@
   const spyBtn = document.getElementById('spyBtn');
   const settingsBtn = document.getElementById('settingsBtn');
   const killAllBtn = document.getElementById('killAllBtn');
+  const linkFeatureBtn = document.getElementById('linkFeatureBtn');
+  const linkedScenarioBadge = document.getElementById('linkedScenarioBadge');
+  const linkedScenarioText = document.getElementById('linkedScenarioText');
+  const unlinkScenarioBtn = document.getElementById('unlinkScenarioBtn');
   const resultsBody = document.querySelector('#resultsTable tbody');
   const selectAllCheckbox = document.getElementById('selectAllCheckbox');
   const deleteSelectedBtn = document.getElementById('deleteSelectedBtn');
@@ -25,6 +29,9 @@
   const codeHighlightPre = document.getElementById('codeHighlight');
   const codeRefreshBanner = document.getElementById('codeRefreshBanner');
   const codeRefreshBtn = document.getElementById('codeRefreshBtn');
+  const playwrightCodePanel = document.getElementById('playwrightCodePanel');
+  const collapseCodeBtn = document.getElementById('collapseCodeBtn');
+  const collapseLlmCodeBtn = document.getElementById('collapseLlmCodeBtn');
   const ambiguousBanner = document.getElementById('ambiguousBanner');
   const ambiguousDetail = document.getElementById('ambiguousDetail');
   const ambiguousLocatorInput = document.getElementById('ambiguousLocatorInput');
@@ -32,14 +39,11 @@
   const ambiguousSkipBtn = document.getElementById('ambiguousSkipBtn');
   const aiAssistSection = document.getElementById('aiAssistSection');
   const promptFilesList = document.getElementById('promptFilesList');
-  const noPromptWarning = document.getElementById('noPromptWarning');
-  const sendAnywayBtn = document.getElementById('sendAnywayBtn');
   const chatComposer = document.getElementById('chatComposer');
   const chatMessages = document.getElementById('chatMessages');
   const chatInput = document.getElementById('chatInput');
   const chatSendBtn = document.getElementById('chatSendBtn');
   const refreshPromptFilesBtn = document.getElementById('refreshPromptFilesBtn');
-  const sendToLlmBtn = document.getElementById('sendToLlmBtn');
   const llmCodePanel = document.getElementById('llmCodePanel');
   const llmStatusLabel = document.getElementById('llmStatusLabel');
   const saveLlmCodeBtn = document.getElementById('saveLlmCodeBtn');
@@ -48,15 +52,24 @@
   const llmCodeHighlightPre = document.getElementById('llmCodeHighlight');
   const emptyRowHtml = '<td colspan="5">No elements captured yet. Turn on Object Spy and click an element in the real Chrome window.</td>';
   const LLM_PLACEHOLDER =
-    '// Enable "Link with GitHub Copilot LLM" in Settings, pick any instruction files above, then click "Send to Copilot".';
+    '// Enable "Link with GitHub Copilot LLM" in Settings and pick a model, then check a .md file below or type instructions in the chat — the AI Generated Code view fills in automatically as code is recorded.';
+
+  const nativeModeNote = document.getElementById('nativeModeNote');
+  const nativeModeBadge = document.getElementById('nativeModeBadge');
 
   let connected = false;
   let generating = false;
   let killConfirmPending = false;
   let killConfirmTimer = null;
+  let nativeModeActive = false;
 
   startBtn.addEventListener('click', () => {
-    vscode.postMessage({ type: 'start' });
+    // Native mode: the URL is only usable at spawn time (Playwright's own
+    // `codegen` CLI takes it as a positional argument) -- there's no
+    // separate "Navigate" once its browser window is already open, unlike
+    // the CDP-attach flow below, where a URL is optional (defaults to
+    // whatever objectSpy.startUrl / a blank page).
+    vscode.postMessage({ type: 'start', payload: nativeModeActive ? urlInput.value.trim() : undefined });
   });
 
   stopBtn.addEventListener('click', () => {
@@ -179,6 +192,18 @@
     copyToClipboard(llmEditor.getValue(), copyLlmCodeBtn);
   });
 
+  // Collapse either code panel independently -- lets one be viewed at full
+  // height without the other (in its default, uncollapsed size) still
+  // taking up sidebar space alongside it.
+  function toggleCollapse(panel, btn) {
+    const collapsed = panel.classList.toggle('collapsed');
+    btn.textContent = collapsed ? '▸' : '▾';
+    btn.title = collapsed ? 'Expand this panel' : 'Collapse this panel';
+  }
+
+  collapseCodeBtn.addEventListener('click', () => toggleCollapse(playwrightCodePanel, collapseCodeBtn));
+  collapseLlmCodeBtn.addEventListener('click', () => toggleCollapse(llmCodePanel, collapseLlmCodeBtn));
+
   refreshPromptFilesBtn.addEventListener('click', () => {
     vscode.postMessage({ type: 'refreshPromptFiles' });
   });
@@ -194,23 +219,14 @@
     });
   }
 
-  // Item #2: sending to the LLM with nothing telling it what to follow
-  // (no .md file, no free-text instructions) is easy to do by accident and
-  // wastes a round trip -- warn instead of silently sending nothing useful.
-  sendToLlmBtn.addEventListener('click', () => {
-    if (selectedPromptFiles().length === 0) {
-      noPromptWarning.hidden = false;
-      chatComposer.hidden = false;
-      chatInput.focus();
-      return;
-    }
-    dispatchToLlm('');
-  });
-
-  sendAnywayBtn.addEventListener('click', () => {
-    noPromptWarning.hidden = true;
-    dispatchToLlm('');
-  });
+  // No more "Send to Copilot"/"Send Anyway" buttons: checking a .md file
+  // below is itself the action now -- the extension host tracks the
+  // current checkbox selection (see the 'change' listener in
+  // renderPromptFiles()) and folds it into every AI refinement
+  // automatically, manual or the automatic post-recording pipeline, so
+  // there's nothing left to separately "send". The chat composer below is
+  // still a genuinely separate, deliberate action: free-text instructions
+  // typed there and sent explicitly.
 
   // Messenger-style composer: Enter sends, Shift+Enter inserts a newline,
   // and the textarea grows with content up to a few lines (see main.css).
@@ -222,7 +238,6 @@
     appendChatBubble(text);
     chatInput.value = '';
     autoResizeChatInput();
-    noPromptWarning.hidden = true;
     dispatchToLlm(text);
   }
 
@@ -275,6 +290,45 @@
     killAllBtn.textContent = 'Kill All Browsers';
     killAllBtn.classList.remove('btn-danger-confirm');
     clearTimeout(killConfirmTimer);
+  }
+
+  linkFeatureBtn.addEventListener('click', () => {
+    vscode.postMessage({ type: 'linkFeatureFile' });
+  });
+
+  unlinkScenarioBtn.addEventListener('click', (e) => {
+    e.stopPropagation(); // don't also trigger the badge's own reopen click below
+    vscode.postMessage({ type: 'unlinkFeatureFile' });
+  });
+
+  linkedScenarioText.addEventListener('click', () => {
+    vscode.postMessage({ type: 'reopenFeatureFile' });
+  });
+  linkedScenarioText.style.cursor = 'pointer';
+  linkedScenarioText.title = linkedScenarioText.title || 'Click to reopen this feature file and pick a different scenario';
+
+  function applyLinkedScenario(scenario) {
+    if (!scenario) {
+      linkedScenarioBadge.hidden = true;
+      linkedScenarioText.textContent = '';
+      return;
+    }
+    linkedScenarioBadge.hidden = false;
+    linkedScenarioText.textContent = scenario.featureName + ' › ' + scenario.scenarioKind + ': ' + scenario.scenarioName;
+    linkedScenarioText.title = linkedScenarioText.textContent + ' — click to pick a different scenario from this file';
+  }
+
+  // A feature file becomes "available" the moment it's successfully
+  // parsed — independent of whether a scenario has been picked from it yet
+  // — and stays available (this button just reopens it, no OS dialog) for
+  // the rest of the session, until a different file is linked or VS Code
+  // closes. Relabeling makes that persistence discoverable instead of
+  // surprising.
+  function applyFeatureFileAvailable(available) {
+    linkFeatureBtn.textContent = available ? 'View Feature File' : 'Link Feature File';
+    linkFeatureBtn.title = available
+      ? 'Reopen the linked feature file to pick a different Scenario/Scenario Outline'
+      : 'Browse and select a Cucumber .feature file and pick a Scenario/Scenario Outline to link to the generated code';
   }
 
   // ---------------------------------------------------------------------
@@ -385,6 +439,15 @@
       case 'copilotEnabledState':
         applyCopilotEnabledState(message.payload);
         break;
+      case 'nativeModeActive':
+        applyNativeModeActive(message.payload);
+        break;
+      case 'linkedScenario':
+        applyLinkedScenario(message.payload);
+        break;
+      case 'featureFileAvailable':
+        applyFeatureFileAvailable(message.payload);
+        break;
       case 'promptFiles':
         renderPromptFiles(message.payload);
         break;
@@ -404,21 +467,40 @@
   });
 
   function applyCopilotEnabledState(enabled) {
+    // aiAssistSection nests chatComposer, so hiding it here already hides
+    // the composer too -- no need to separately toggle chatComposer.hidden.
     aiAssistSection.hidden = !enabled;
     llmCodePanel.hidden = !enabled;
     if (enabled) {
       vscode.postMessage({ type: 'refreshPromptFiles' });
     } else {
-      noPromptWarning.hidden = true;
-      chatComposer.hidden = true;
       chatMessages.innerHTML = '';
       chatInput.value = '';
     }
   }
 
+  function applyNativeModeActive(active) {
+    nativeModeActive = active;
+    document.body.classList.toggle('native-mode', active);
+    nativeModeNote.hidden = !active;
+    nativeModeBadge.hidden = !active;
+    urlInput.placeholder = active ? 'https://example.com (opened when you click Start)' : 'https://example.com';
+  }
+
+  // Tells the extension host which .md files are currently checked, so the
+  // automatic AI refinement pipeline (fires on every new recorded action,
+  // no button needed) always uses the up-to-date selection. Also fired
+  // once right after a re-render, since rebuilding the checkbox DOM always
+  // starts unchecked -- keeps the host's tracked selection from silently
+  // going stale relative to what's actually visible.
+  function postSelectedInstructionFiles() {
+    vscode.postMessage({ type: 'selectedInstructionFiles', payload: selectedPromptFiles() });
+  }
+
   function renderPromptFiles(files) {
     if (!files.length) {
       promptFilesList.innerHTML = '<div class="prompt-files-empty">No .md files found under .github/.</div>';
+      postSelectedInstructionFiles();
       return;
     }
     promptFilesList.innerHTML = '';
@@ -428,30 +510,29 @@
       const checkbox = document.createElement('input');
       checkbox.type = 'checkbox';
       checkbox.value = file;
+      checkbox.addEventListener('change', postSelectedInstructionFiles);
       label.appendChild(checkbox);
       const text = document.createElement('span');
       text.textContent = file;
       label.appendChild(text);
       promptFilesList.appendChild(label);
     }
+    postSelectedInstructionFiles();
   }
 
   function llmStart() {
-    sendToLlmBtn.disabled = true;
     llmStatusLabel.textContent = '(generating…)';
     llmStatusLabel.className = 'llm-status llm-status-active';
     llmEditor.setValue('');
   }
 
   function llmDone(finalCode) {
-    sendToLlmBtn.disabled = false;
     llmStatusLabel.textContent = '';
     llmStatusLabel.className = 'llm-status';
     llmEditor.setValue(finalCode);
   }
 
   function llmError(message) {
-    sendToLlmBtn.disabled = false;
     llmStatusLabel.textContent = 'Error';
     llmStatusLabel.className = 'llm-status llm-status-error';
     llmEditor.setValue('// ' + message);

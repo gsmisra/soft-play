@@ -130,7 +130,13 @@ export class SettingsPanel implements vscode.Disposable {
       font-size: 0.85em;
       color: var(--vscode-descriptionForeground);
     }
-    /* Toggle switch, matching common editor styling — a styled checkbox. */
+    /* Toggle switch, matching common editor styling — a styled checkbox.
+       Fixed: the track used to fall back to --vscode-dropdown-border, which
+       is unset (fully transparent) in several built-in themes — the switch
+       was there and functioned, but its "off" state was nearly invisible.
+       --vscode-checkbox-border is the variable VS Code itself defines
+       specifically for checkbox-like controls and always has real contrast,
+       so both states stay visible in every theme. */
     .switch {
       position: relative;
       display: inline-block;
@@ -138,14 +144,22 @@ export class SettingsPanel implements vscode.Disposable {
       height: 20px;
       flex: none;
     }
-    .switch input { opacity: 0; width: 0; height: 0; }
+    .switch input {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      margin: 0;
+      cursor: pointer;
+      z-index: 1;
+    }
     .switch-track {
       position: absolute;
       inset: 0;
-      background: var(--vscode-dropdown-border, #767676);
+      background: var(--vscode-checkbox-border, #767676);
+      border: 1px solid var(--vscode-contrastBorder, transparent);
       border-radius: 10px;
-      cursor: pointer;
       transition: background 0.15s;
+      pointer-events: none;
     }
     .switch-track::before {
       content: '';
@@ -153,7 +167,7 @@ export class SettingsPanel implements vscode.Disposable {
       width: 14px;
       height: 14px;
       left: 3px;
-      top: 3px;
+      top: 2px;
       background: #fff;
       border-radius: 50%;
       transition: transform 0.15s;
@@ -163,6 +177,22 @@ export class SettingsPanel implements vscode.Disposable {
     }
     .switch input:checked + .switch-track::before {
       transform: translateX(16px);
+    }
+    /* Small variant — for a toggle that shouldn't draw as much visual
+       weight as the main AI Assist one (e.g. "Use native Playwright
+       feature"), per an explicit ask to keep it visually distinct/smaller. */
+    .switch.small {
+      width: 26px;
+      height: 15px;
+    }
+    .switch.small .switch-track::before {
+      width: 10px;
+      height: 10px;
+      left: 2px;
+      top: 1.5px;
+    }
+    .switch.small input:checked + .switch-track::before {
+      transform: translateX(11px);
     }
     #copilotModelRow, #copilotStatus { display: none; }
     #copilotModelRow.visible, #copilotStatus.visible { display: flex; }
@@ -195,6 +225,16 @@ export class SettingsPanel implements vscode.Disposable {
       <label><input type="radio" name="locatorType" value="css" /> CSS</label>
       <label><input type="radio" name="locatorType" value="xpath" /> XPath</label>
     </div>
+  </div>
+  <div class="field">
+    <label>
+      Use native Playwright feature
+      <span class="hint">On (default): Start/Stop in the main panel run Playwright's own real "codegen" tool as-is, in its own separate browser window — Generated Code shows exactly what it wrote, unmodified. Object Spy and the Locator Output table aren't available while it runs, since it owns its own browser. Off: this extension's own Object Spy + smart locator engine, attached to a single Chrome/Edge window.</span>
+    </label>
+    <label class="switch small">
+      <input type="checkbox" id="useNativePlaywrightLocators" />
+      <span class="switch-track"></span>
+    </label>
   </div>
 
   <h2>Code Generation</h2>
@@ -242,6 +282,7 @@ export class SettingsPanel implements vscode.Disposable {
       const vscode = acquireVsCodeApi();
       const languageSelect = document.getElementById('language');
       const versionSelect = document.getElementById('languageVersion');
+      const useNativePlaywrightLocators = document.getElementById('useNativePlaywrightLocators');
       const copilotEnabled = document.getElementById('copilotEnabled');
       const copilotModelRow = document.getElementById('copilotModelRow');
       const copilotModelSelect = document.getElementById('copilotModel');
@@ -272,6 +313,10 @@ export class SettingsPanel implements vscode.Disposable {
 
       versionSelect.addEventListener('change', () => {
         vscode.postMessage({ type: 'update', payload: { languageVersion: versionSelect.value } });
+      });
+
+      useNativePlaywrightLocators.addEventListener('change', () => {
+        vscode.postMessage({ type: 'update', payload: { useNativePlaywrightLocators: useNativePlaywrightLocators.checked } });
       });
 
       copilotEnabled.addEventListener('change', () => {
@@ -346,6 +391,7 @@ export class SettingsPanel implements vscode.Disposable {
         document.querySelectorAll('input[name="browserChannel"]').forEach((radio) => {
           radio.checked = radio.value === settings.browserChannel;
         });
+        useNativePlaywrightLocators.checked = settings.useNativePlaywrightLocators;
         languageSelect.value = settings.language;
         renderVersions(settings.language, settings.languageVersion);
 

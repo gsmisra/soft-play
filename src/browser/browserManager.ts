@@ -148,6 +148,11 @@ export class BrowserManager implements vscode.Disposable {
   // real value in via setLocatorType() at construction anyway, but this
   // keeps BrowserManager sensible if ever used standalone.
   private locatorType: LocatorType = 'xpath';
+  // Matches SettingsStore's own default (ON). See pageAgent.js's
+  // computeLocatorInfo() for what this actually changes: skips the smart
+  // sibling-axis/positional-index refinement and just accepts the primary
+  // candidate as-is, exactly like Playwright's own recorder does.
+  private nativeLocatorMode = true;
   private lastPageTitle = '';
   // Matches SettingsStore's own default. Chrome/Edge only — this extension
   // never downloads or bundles a browser of its own (see chromeFinder.ts).
@@ -178,6 +183,17 @@ export class BrowserManager implements vscode.Disposable {
   async setLocatorType(type: LocatorType): Promise<void> {
     this.locatorType = type;
     await this.applySpyState();
+  }
+
+  /** "Use native Playwright feature" (Settings, default ON) — see the
+   * `nativeLocatorMode` field comment. */
+  async setNativeLocatorMode(enabled: boolean): Promise<void> {
+    this.nativeLocatorMode = enabled;
+    await this.applySpyState();
+  }
+
+  isNativeLocatorMode(): boolean {
+    return this.nativeLocatorMode;
   }
 
   isRecording(): boolean {
@@ -632,7 +648,8 @@ export class BrowserManager implements vscode.Disposable {
       locatorType: this.locatorType,
       enabled: this.spyEnabled,
       recording: this.recording,
-      recordingPaused: this.recordingPaused
+      recordingPaused: this.recordingPaused,
+      nativeMode: this.nativeLocatorMode
     };
     try {
       this.combinedInitScript = await this.context.addInitScript(
@@ -683,12 +700,14 @@ export class BrowserManager implements vscode.Disposable {
           (globalThis as any).__objectSpySetEnabled?.(state.enabled);
           (globalThis as any).__objectSpySetRecording?.(state.recording);
           (globalThis as any).__objectSpySetRecordingPaused?.(state.recordingPaused);
+          (globalThis as any).__objectSpySetNativeMode?.(state.nativeMode);
         },
         {
           locatorType: this.locatorType,
           enabled: this.spyEnabled,
           recording: this.recording,
-          recordingPaused: this.recordingPaused
+          recordingPaused: this.recordingPaused,
+          nativeMode: this.nativeLocatorMode
         }
       )
       .catch(() => undefined);

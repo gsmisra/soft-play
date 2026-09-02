@@ -43,10 +43,12 @@ export class CopilotUnavailableError extends Error {
 
 /**
  * Sends `prompt` to the selected model and streams the response text via
- * `onChunk` as it arrives. Per the API's own contract, this must only be
- * called in direct response to a user action (VS Code shows a one-time
- * consent dialog on first use per extension) — callers here are always
- * triggered by the panel's "Send to Copilot" button, never automatically.
+ * `onChunk` as it arrives. VS Code shows a one-time consent dialog the
+ * first time an extension calls this API in a session — that's the API's
+ * own gate; callers here (the chat composer's manual send, and the
+ * automatic post-recording refinement pipeline — see objectSpyPanel.ts's
+ * runLlmRefinement()) both only ever fire while the user has explicitly
+ * turned on "Link with GitHub Copilot LLM" and picked a model in Settings.
  */
 export async function sendPrompt(
   modelId: string,
