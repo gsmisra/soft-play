@@ -1,7 +1,7 @@
 import { LocatorType, BrowserChannel } from '../browser/browserManager';
 import { Language } from '../settings/settingsStore';
 
-export type ActionType = 'click' | 'fill' | 'selectOption' | 'check' | 'uncheck' | 'press';
+export type ActionType = 'click' | 'fill' | 'selectOption' | 'check' | 'uncheck' | 'press' | 'navigate';
 
 export interface RecordedAction {
   actionType: ActionType;
@@ -30,6 +30,11 @@ interface Step {
   action: RecordedAction;
   takesValue: boolean;
 }
+
+/** One piece of the test's flow, in recorded order: either a page-level
+ * navigation (a plain statement, breaking the fluent chain) or a run of
+ * consecutive element-interaction steps (one chained expression). */
+type FlowSegment = { kind: 'navigate'; url: string } | { kind: 'chain'; steps: Step[] };
 
 /**
  * Maps recorded browser actions to enterprise-grade Playwright automation
@@ -90,12 +95,45 @@ export class CodeGenerator {
    */
   generate(language: Language, languageVersion: string, pageTitle: string, browserChannel: BrowserChannel): string {
     const { callSteps, definitionSteps } = buildSteps(this.actions, language);
+    const flowSegments = buildFlowSegments(this.actions, callSteps);
     const locatorConstants = buildLocatorConstants(this.actions);
     const className = classNameFromTitle(pageTitle);
     return language === 'java'
-      ? generateJava(callSteps, definitionSteps, languageVersion, className, browserChannel, locatorConstants)
-      : generatePython(callSteps, definitionSteps, languageVersion, className, browserChannel, locatorConstants);
+      ? generateJava(flowSegments, definitionSteps, languageVersion, className, browserChannel, locatorConstants)
+      : generatePython(flowSegments, definitionSteps, languageVersion, className, browserChannel, locatorConstants);
   }
+}
+
+/**
+ * Interleaves navigate actions (plain statements) with runs of consecutive
+ * element-interaction steps (one fluent chain each) in recorded order — a
+ * navigation always breaks the current chain rather than being folded into
+ * it, since it isn't a Page Object method call. `callSteps` must have been
+ * built from this exact same `actions` array (buildSteps() already skips
+ * 'navigate' entries the same way this function does), so walking both in
+ * lockstep always lines up.
+ */
+function buildFlowSegments(actions: RecordedAction[], callSteps: Step[]): FlowSegment[] {
+  const segments: FlowSegment[] = [];
+  let chain: Step[] = [];
+  let callIndex = 0;
+
+  for (const action of actions) {
+    if (action.actionType === 'navigate') {
+      if (chain.length > 0) {
+        segments.push({ kind: 'chain', steps: chain });
+        chain = [];
+      }
+      segments.push({ kind: 'navigate', url: action.value ?? '' });
+    } else {
+      chain.push(callSteps[callIndex]);
+      callIndex++;
+    }
+  }
+  if (chain.length > 0) {
+    segments.push({ kind: 'chain', steps: chain });
+  }
+  return segments;
 }
 
 /**
@@ -111,6 +149,9 @@ function buildLocatorConstants(actions: RecordedAction[]): Map<string, LocatorCo
   const usedNames = new Set<string>();
 
   for (const action of actions) {
+    if (action.actionType === 'navigate') {
+      continue; // a URL, not a locator -- see buildFlowSegments()
+    }
     const key = action.locatorType + '|' + action.locator;
     if (byKey.has(key)) {
       continue;
@@ -194,6 +235,9 @@ function buildSteps(actions: RecordedAction[], language: Language): { callSteps:
   const usedNames = new Set<string>();
 
   for (const action of actions) {
+    if (action.actionType === 'navigate') {
+      continue; // not an element interaction -- becomes a plain page.navigate()/goto() statement, see buildFlowSegments()
+    }
     const key = action.actionType + '|' + action.locatorType + '|' + action.locator;
     const takesValue = action.actionType === 'fill' || action.actionType === 'selectOption';
     let methodName = nameByKey.get(key);
@@ -217,7 +261,8 @@ function uniqueMethodName(action: RecordedAction, used: Set<string>, language: L
     selectOption: 'select',
     check: 'check',
     uncheck: 'uncheck',
-    press: 'press'
+    press: 'press',
+    navigate: 'navigate' // unreachable -- buildSteps() filters 'navigate' out before calling this
   };
   const words = wordsFrom(slugSource(action));
   let base = language === 'java' ? toCamelCase(verb[action.actionType], words) : toSnakeCase(verb[action.actionType], words);
@@ -280,7 +325,7 @@ function toSnakeCase(verb: string, words: string[]): string {
 // ---------------------------------------------------------------------
 
 function generateJava(
-  callSteps: Step[],
+  flowSegments: FlowSegment[],
   definitionSteps: Step[],
   version: string,
   className: string,
@@ -324,9 +369,17 @@ ${Array.from(locatorConstants.values())
       : '';
 
   const flowCalls =
-    callSteps.length === 0
+    flowSegments.length === 0
       ? '    // No actions recorded yet — interact with the browser while Generate Code is running.'
-      : `    ${instanceVar}\n` + callSteps.map((s) => `      .${s.methodName}(${javaCallArgs(s)})`).join('\n') + ';';
+      : flowSegments
+          .map((segment) =>
+            segment.kind === 'navigate'
+              ? `    page.navigate(${javaString(segment.url)});`
+              : `    ${instanceVar}\n` +
+                segment.steps.map((s) => `      .${s.methodName}(${javaCallArgs(s)})`).join('\n') +
+                ';'
+          )
+          .join('\n');
 
   return `package com.example.tests;
 
@@ -449,7 +502,7 @@ function javaString(value: string): string {
 // ---------------------------------------------------------------------
 
 function generatePython(
-  callSteps: Step[],
+  flowSegments: FlowSegment[],
   definitionSteps: Step[],
   version: string,
   className: string,
@@ -467,11 +520,17 @@ function generatePython(
     .join('\n\n');
 
   const flowCalls =
-    callSteps.length === 0
+    flowSegments.length === 0
       ? '    # No actions recorded yet — interact with the browser while Generate Code is running.'
-      : `    (\n        ${instanceVar}\n` +
-        callSteps.map((s) => `        .${s.methodName}(${pythonCallArgs(s)})`).join('\n') +
-        '\n    )';
+      : flowSegments
+          .map((segment) =>
+            segment.kind === 'navigate'
+              ? `    page.goto(${pythonString(segment.url)})`
+              : `    (\n        ${instanceVar}\n` +
+                segment.steps.map((s) => `        .${s.methodName}(${pythonCallArgs(s)})`).join('\n') +
+                '\n    )'
+          )
+          .join('\n');
 
   const signature = typed ? `def ${testName}(page: Page) -> None:` : `def ${testName}(page):`;
 

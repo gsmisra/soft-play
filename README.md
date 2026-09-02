@@ -116,9 +116,38 @@ Three actions sit below the table:
    and an amber banner prompts you to fix the locator (pre-filled, editable)
    or **Skip** the action — it never silently guesses an `.nth()` index. Fix
    the text and click **Resume** to re-verify against the live DOM and
-   continue.
+   continue. Pausing only suppresses reporting *new* actions — clicks keep
+   working normally the whole time (including ones that navigate), since
+   the real app still needs to behave exactly like it would with no
+   extension attached at all while you sort out the ambiguous one.
 4. Click **Stop Code Generation** to pause without losing what's been
    generated — click **Generate Code** again to resume the same session.
+
+The very first navigation the browser was already on when you clicked
+**Generate Code** — wherever it got there, including a URL you typed
+directly into the real Chrome window's own address bar (not just the
+Navigate button or manual browsing before recording started) — is captured
+as the flow's opening `page.navigate(url)`/`page.goto(url)` step, so the
+generated test is actually runnable on its own instead of starting on a
+blank page. Any later top-level navigation is captured the same way, as its
+own step that breaks the fluent chain, whether it came from the extension's
+Navigate button or was typed straight into the browser's address bar; a
+navigation that happens as the *side effect* of a recorded click (e.g.
+clicking "Sign In") doesn't get a separate step — Playwright's own
+auto-waiting on that click already covers it. (Address-bar navigations are
+detected via a short quiet window after the page's `load` event — if no
+click/fill/etc. was reported in the ~2 seconds before the page loaded, the
+new URL is treated as a direct navigation rather than the side effect of
+something already being recorded.)
+
+**New tabs and windows are followed automatically.** If a recorded click (or
+raw Object Spy) opens a new tab or window — e.g. a "Sign in" link on a page
+like Gmail that opens `accounts.google.com` in its own tab — the extension
+installs the same capture/recording agent on that new page the instant
+Chrome creates it, so Object Spy and Generate Code keep working there with
+no extra steps. Every tab and window opened during the session (not just
+the first one) is tracked this way for as long as the browser stays
+attached.
 
 Every time a new action is actually recorded, a **"New code recorded."**
 label blinks green next to the Playwright Code header for a couple of
@@ -133,7 +162,11 @@ freshly generated version instead. Click **Save Code** to write the current
 editor contents to a file — the save dialog defaults to a filename derived
 from the class name below, with a `.java` or `.py` extension depending on
 the language selected in Settings (you can rename it, same as any save
-dialog).
+dialog). Click **Copy Code** to copy the current editor contents to the
+clipboard instead — the button flashes "Copied!" for confirmation (falling
+back to a hidden-textarea copy if the browser Clipboard API is unavailable
+in the webview). The same two buttons are also on the **AI Generated Code**
+panel, for whatever GitHub Copilot produced.
 
 **Output structure is Page-Object-ready, not a flat script:** the page
 object and test class are named after the **title of the last page you

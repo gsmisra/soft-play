@@ -28,7 +28,7 @@ export interface CapturedElement {
   inShadowDom: boolean;
 }
 
-export type RecordedActionType = 'click' | 'fill' | 'selectOption' | 'check' | 'uncheck' | 'press';
+export type RecordedActionType = 'click' | 'fill' | 'selectOption' | 'check' | 'uncheck' | 'press' | 'navigate';
 
 export interface RecordedActionEvent extends CapturedElement {
   actionType: RecordedActionType;
@@ -71,6 +71,14 @@ export class BrowserManager implements vscode.Disposable {
   private browser: import('playwright-core').Browser | undefined;
   private context: import('playwright-core').BrowserContext | undefined;
   private page: import('playwright-core').Page | undefined;
+  // Every page/tab/popup we've installed the agent on — Object Spy and
+  // Generate Code work in ANY of them (a new tab opened by a link or
+  // window.open() is otherwise invisible to the extension entirely, since
+  // Playwright's exposeFunction()/addInitScript() are bound per-Page, not
+  // per-BrowserContext). `this.page` itself stays the single "primary" tab
+  // for Start/Stop/Navigate/Highlight On Page/title tracking — this set is
+  // only for broadcasting spy/recording state and wiring up reporting.
+  private readonly pages = new Set<import('playwright-core').Page>();
 
   // Only set when *we* spawned the Chrome process — we must never kill a Chrome
   // window the user already had running before we attached to it.
@@ -91,6 +99,34 @@ export class BrowserManager implements vscode.Disposable {
   private status: BrowserStatus = { state: 'idle' };
   private spyEnabled = false;
   private recording = false;
+  // True only while an ambiguous locator is awaiting resolution in the
+  // panel — see setRecordingPaused(). Deliberately NOT the same as flipping
+  // `recording` off: doing that used to fall back to Object Spy's own
+  // click-blocking capture mode for the click that triggered the pause and
+  // every click after it until the user resolved the banner, since
+  // `spyEnabled` is never cleared just because recording paused (see
+  // setRecording() below) — a real bug where a real link/button click
+  // would get captured but never actually navigate. Pausing must keep
+  // clicks passing through exactly like active recording does; it only
+  // suppresses reporting NEW actions while paused.
+  private recordingPaused = false;
+  // The last URL a navigate action was actually recorded for — the single
+  // source of truth all three navigate-capture paths (session start,
+  // explicit Navigate button, and typing directly into the real browser's
+  // own address bar) dedupe against, so e.g. resuming a paused session
+  // without navigating anywhere new never re-emits a duplicate step for the
+  // same URL. See setRecording(), navigate(), and the 'load' handler in
+  // installPageAgent().
+  private lastRecordedNavigateUrl = '';
+  // Timestamp of the last action (click/fill/.../press) reported from ANY
+  // page — used to tell "the user just typed a new URL into the real
+  // browser's address bar" apart from "this navigation is the side effect
+  // of the action we just recorded" (e.g. clicking a link, or pressing
+  // Enter to submit a search) when a full page load fires. Heuristic, not
+  // exact: a page that takes a very long time to navigate after a click
+  // could still get one redundant (harmless) extra navigate() step; see the
+  // 'load' handler in installPageAgent() for the window this guards.
+  private lastReportedActionAt = 0;
   // Matches SettingsStore's own default — ObjectSpyPanel always pushes the
   // real value in via setLocatorType() at construction anyway, but this
   // keeps BrowserManager sensible if ever used standalone.
@@ -113,25 +149,18 @@ export class BrowserManager implements vscode.Disposable {
   }
 
   /**
-   * Toggles Object Spy hover-highlight + click-to-capture in the page. Safe
-   * to call before a page exists — the state is applied as soon as one is.
+   * Toggles Object Spy hover-highlight + click-to-capture — in every tab,
+   * not just the primary one. Safe to call before a page exists — the
+   * state is applied as soon as one is.
    */
   async setSpyEnabled(enabled: boolean): Promise<void> {
     this.spyEnabled = enabled;
-    if (this.page) {
-      await this.page
-        .evaluate((e) => (globalThis as any).__objectSpySetEnabled?.(e), enabled)
-        .catch(() => undefined);
-    }
+    await this.applySpyState();
   }
 
   async setLocatorType(type: LocatorType): Promise<void> {
     this.locatorType = type;
-    if (this.page) {
-      await this.page
-        .evaluate((cfg) => (globalThis as any).__objectSpySetConfig?.(cfg), { locatorType: type })
-        .catch(() => undefined);
-    }
+    await this.applySpyState();
   }
 
   isRecording(): boolean {
@@ -149,18 +178,61 @@ export class BrowserManager implements vscode.Disposable {
     this.recording = enabled;
     if (enabled) {
       this.spyEnabled = true;
+    } else {
+      // Stopping the whole session (as opposed to a transient ambiguity
+      // pause) also clears any leftover pause state.
+      this.recordingPaused = false;
     }
-    if (this.page) {
-      await this.page
-        .evaluate(
-          (state) => {
-            (globalThis as any).__objectSpySetEnabled?.(state.spyEnabled);
-            (globalThis as any).__objectSpySetRecording?.(state.recording);
-          },
-          { spyEnabled: this.spyEnabled, recording: enabled }
-        )
-        .catch(() => undefined);
+    await this.applySpyState();
+
+    // Capture the page's current URL as the flow's opening navigation —
+    // otherwise a generated test that never navigates anywhere is
+    // unrunnable. Explicit/typed mid-session navigations are captured
+    // separately, in navigate() and installPageAgent()'s 'load' handler.
+    if (enabled && this.page) {
+      this.recordNavigateIfNew(this.page.url());
     }
+  }
+
+  /** Fires a navigate action for `url`, unless it's blank or the same URL
+   * the last navigate action already recorded — the single dedup point for
+   * all three ways a navigation gets captured (see `lastRecordedNavigateUrl`). */
+  private recordNavigateIfNew(url: string): void {
+    if (!url || url === 'about:blank' || url === this.lastRecordedNavigateUrl) {
+      return;
+    }
+    this.lastRecordedNavigateUrl = url;
+    this.actionEmitter.fire(this.buildNavigateAction(url));
+  }
+
+  /** Pauses/resumes reporting NEW actions while an ambiguous locator awaits
+   * resolution in the panel — deliberately distinct from setRecording(),
+   * which also controls whether clicks get blocked (see the field comment
+   * on `recordingPaused` for the bug this separation fixes). */
+  async setRecordingPaused(paused: boolean): Promise<void> {
+    this.recordingPaused = paused;
+    await this.applySpyState();
+  }
+
+  private buildNavigateAction(url: string): RecordedActionEvent {
+    // A navigation isn't tied to any DOM element, so most CapturedElement
+    // fields are meaningless placeholders here — objectSpyPanel.ts special-
+    // cases actionType 'navigate' to skip the Elements table/ambiguity-check
+    // paths that would otherwise try to use them.
+    return {
+      actionType: 'navigate',
+      tag: '',
+      text: url,
+      elementName: 'navigate',
+      locatorType: this.locatorType,
+      locator: '',
+      tier: 'css',
+      qualityLabel: 'Excellent · Unique',
+      matches: 1,
+      inIframe: false,
+      inShadowDom: false,
+      value: url
+    };
   }
 
   /**
@@ -289,18 +361,35 @@ export class BrowserManager implements vscode.Disposable {
 
       const contexts = browser.contexts();
       this.context = contexts[0] ?? (await browser.newContext());
+
+      // Object Spy/Generate Code must work in EVERY tab, not just the first
+      // one — a new tab or window (a link with target="_blank", a
+      // window.open() call, Gmail/most real sites do this constantly) is
+      // otherwise a page our extension never even sees. Cover any tabs that
+      // were already open when we attached, and any opened later.
+      // installPageAgent() itself guards against double-installing on a
+      // page it's already seen, so registering this before vs. after the
+      // pages-that-already-exist loop below can't race or double-bind.
+      this.context.on('page', (newPage) => {
+        void this.installPageAgent(newPage).catch(() => undefined);
+      });
+
       const pages = this.context.pages();
       this.page = pages[0] ?? (await this.context.newPage());
-
-      await this.installPageAgent(this.page);
+      for (const existingPage of this.context.pages()) {
+        await this.installPageAgent(existingPage);
+      }
 
       browser.on('disconnected', () => {
         this.log('Chrome disconnected.');
         this.browser = undefined;
         this.context = undefined;
         this.page = undefined;
+        this.pages.clear();
         this.spyEnabled = false;
         this.recording = false;
+        this.recordingPaused = false;
+        this.lastRecordedNavigateUrl = '';
         this.setStatus({ state: 'idle' });
       });
 
@@ -328,6 +417,13 @@ export class BrowserManager implements vscode.Disposable {
     await this.page.goto(url, { waitUntil: 'domcontentloaded' });
     this.lastPageTitle = await this.page.title().catch(() => '');
     this.setStatus({ state: 'connected', url: this.page.url() });
+
+    // An explicit, deliberate navigation via this method (the Navigate
+    // button) during an active Generate Code session gets its own step —
+    // e.g. testing a flow that starts by typing a second URL mid-recording.
+    if (this.recording) {
+      this.recordNavigateIfNew(this.page.url());
+    }
   }
 
   async stop(): Promise<void> {
@@ -347,9 +443,12 @@ export class BrowserManager implements vscode.Disposable {
       this.browser = undefined;
       this.context = undefined;
       this.page = undefined;
+      this.pages.clear();
       this.launchedProcess = undefined;
       this.spyEnabled = false;
       this.recording = false;
+      this.recordingPaused = false;
+      this.lastRecordedNavigateUrl = '';
       this.setStatus({ state: 'idle' });
     }
   }
@@ -401,10 +500,20 @@ export class BrowserManager implements vscode.Disposable {
    *      therefore addInitScript — never happens.
    */
   private async installPageAgent(page: import('playwright-core').Page): Promise<void> {
+    if (this.pages.has(page)) {
+      return; // already installed -- exposeFunction() throws if bound twice on the same page
+    }
+    this.pages.add(page);
+    page.once('close', () => this.pages.delete(page));
+
     await page.exposeFunction('__objectSpyCapture', (info: CapturedElement) => {
       this.captureEmitter.fire(info);
     });
     await page.exposeFunction('__objectSpyAction', (info: RecordedActionEvent) => {
+      // Tracked for the 'load' handler below, to tell "the user just typed
+      // a new URL into the address bar" apart from "this navigation is the
+      // side effect of the action just recorded".
+      this.lastReportedActionAt = Date.now();
       this.actionEmitter.fire(info);
     });
 
@@ -424,8 +533,10 @@ export class BrowserManager implements vscode.Disposable {
       // HOW the user got to a new page — clicking a link or submitting a
       // form in the real Chrome window (the normal way this extension gets
       // used) never goes through our own navigate() method, which only
-      // covers the Navigate button/initial start URL.
-      if (frame === page.mainFrame()) {
+      // covers the Navigate button/initial start URL. Only the primary tab
+      // names the generated class, though — a background tab's title
+      // shouldn't override it.
+      if (frame === page.mainFrame() && page === this.page) {
         this.refreshPageTitle(page);
       }
     });
@@ -433,8 +544,19 @@ export class BrowserManager implements vscode.Disposable {
     // a more reliable moment to read <title> than right after
     // framenavigated, when a client-rendered page's JS may not have set it
     // yet. framenavigated's own refresh above still covers same-document
-    // (pushState) SPA route changes, where 'load' never fires again.
-    page.on('load', () => this.refreshPageTitle(page));
+    // (pushState) SPA route changes, where 'load' never fires again. Also
+    // where a navigation typed directly into the real browser's own address
+    // bar gets captured as a step — see recordNavigateIfNew() and the
+    // `lastReportedActionAt` comment above for how a click/press-triggered
+    // navigation avoids getting a redundant extra step here.
+    page.on('load', () => {
+      if (page === this.page) {
+        this.refreshPageTitle(page);
+      }
+      if (this.recording && !this.recordingPaused && Date.now() - this.lastReportedActionAt > 2000) {
+        this.recordNavigateIfNew(page.url());
+      }
+    });
   }
 
   private refreshPageTitle(page: import('playwright-core').Page): void {
@@ -465,18 +587,26 @@ export class BrowserManager implements vscode.Disposable {
           (globalThis as any).__objectSpySetConfig?.({ locatorType: state.locatorType });
           (globalThis as any).__objectSpySetEnabled?.(state.enabled);
           (globalThis as any).__objectSpySetRecording?.(state.recording);
+          (globalThis as any).__objectSpySetRecordingPaused?.(state.recordingPaused);
         },
-        { locatorType: this.locatorType, enabled: this.spyEnabled, recording: this.recording }
+        {
+          locatorType: this.locatorType,
+          enabled: this.spyEnabled,
+          recording: this.recording,
+          recordingPaused: this.recordingPaused
+        }
       )
       .catch(() => undefined);
   }
 
+  /** Broadcasts current locatorType/spyEnabled/recording/recordingPaused to
+   * every tracked page (and every frame within each) — not just the primary
+   * tab, so a new tab or window is never silently left out. */
   private async applySpyState(): Promise<void> {
-    if (!this.page) {
-      return;
-    }
-    for (const frame of this.page.frames()) {
-      await this.applyStateToFrame(frame);
+    for (const page of this.pages) {
+      for (const frame of page.frames()) {
+        await this.applyStateToFrame(frame);
+      }
     }
   }
 

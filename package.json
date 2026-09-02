@@ -2,7 +2,7 @@
   "name": "object-spy-playwright",
   "displayName": "softPlay",
   "description": "Drive a real, visible Chrome window via CDP, spy on page objects with hover-to-highlight, generate short relative Playwright locators (XPath/CSS) with live uniqueness scoring, and emit enterprise-grade Playwright automation code in Java or Python.",
-  "version": "0.1.13",
+  "version": "0.1.15",
   "publisher": "local-dev",
   "private": true,
   "icon": "media/icon.png",

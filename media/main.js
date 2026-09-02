@@ -18,6 +18,7 @@
   const genCodeBtn = document.getElementById('genCodeBtn');
   const stopCodeBtn = document.getElementById('stopCodeBtn');
   const saveCodeBtn = document.getElementById('saveCodeBtn');
+  const copyCodeBtn = document.getElementById('copyCodeBtn');
   const codeLanguageLabel = document.getElementById('codeLanguageLabel');
   const newCodeFlash = document.getElementById('newCodeFlash');
   const codeEditArea = document.getElementById('codeEditArea');
@@ -42,6 +43,7 @@
   const llmCodePanel = document.getElementById('llmCodePanel');
   const llmStatusLabel = document.getElementById('llmStatusLabel');
   const saveLlmCodeBtn = document.getElementById('saveLlmCodeBtn');
+  const copyLlmCodeBtn = document.getElementById('copyLlmCodeBtn');
   const llmCodeEditArea = document.getElementById('llmCodeEditArea');
   const llmCodeHighlightPre = document.getElementById('llmCodeHighlight');
   const emptyRowHtml = '<td colspan="5">No elements captured yet. Turn on Object Spy and click an element in the real Chrome window.</td>';
@@ -133,6 +135,48 @@
 
   saveLlmCodeBtn.addEventListener('click', () => {
     vscode.postMessage({ type: 'saveLlmCode', payload: llmEditor.getValue() });
+  });
+
+  function flashCopyBtn(btn, label) {
+    const original = btn.textContent;
+    btn.textContent = label;
+    btn.disabled = true;
+    setTimeout(() => {
+      btn.textContent = original;
+      btn.disabled = false;
+    }, 1200);
+  }
+
+  async function copyToClipboard(text, btn) {
+    try {
+      await navigator.clipboard.writeText(text);
+      flashCopyBtn(btn, 'Copied!');
+    } catch (err) {
+      // Fallback for environments where the async Clipboard API is blocked
+      // (e.g. focus/permission restrictions inside a webview).
+      try {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+        flashCopyBtn(btn, 'Copied!');
+      } catch (fallbackErr) {
+        flashCopyBtn(btn, 'Copy failed');
+      }
+    }
+  }
+
+  copyCodeBtn.addEventListener('click', () => {
+    copyToClipboard(playwrightEditor.getValue(), copyCodeBtn);
+  });
+
+  copyLlmCodeBtn.addEventListener('click', () => {
+    copyToClipboard(llmEditor.getValue(), copyLlmCodeBtn);
   });
 
   refreshPromptFilesBtn.addEventListener('click', () => {

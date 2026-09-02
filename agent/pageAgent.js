@@ -74,6 +74,13 @@
   window.__objectSpyConfig = window.__objectSpyConfig || { locatorType: 'css' };
   window.__objectSpyEnabled = false;
   window.__objectSpyRecording = false;
+  // True only while an ambiguous locator is awaiting resolution in the
+  // panel. Deliberately does NOT block clicks (see onClick below) — the
+  // whole point of this separate flag is that pausing must feel identical
+  // to active recording from the page's perspective, never falling back to
+  // Object Spy's own click-blocking capture mode just because a capture is
+  // paused.
+  window.__objectSpyRecordingPaused = false;
 
   window.__objectSpySetConfig = function (cfg) {
     window.__objectSpyConfig = Object.assign({}, window.__objectSpyConfig, cfg || {});
@@ -88,6 +95,13 @@
 
   window.__objectSpySetRecording = function (enabled) {
     window.__objectSpyRecording = !!enabled;
+    if (!enabled) {
+      window.__objectSpyRecordingPaused = false;
+    }
+  };
+
+  window.__objectSpySetRecordingPaused = function (paused) {
+    window.__objectSpyRecordingPaused = !!paused;
   };
 
   // Computed once per frame/document — window.top is always safely
@@ -294,10 +308,13 @@
     var info = target === lastComputedEl && lastComputed ? lastComputed : computeLocatorInfo(target);
 
     if (window.__objectSpyRecording) {
-      // Recording mode: never block the click — the real app must actually
-      // navigate/submit/etc. so the recorded flow matches what really
-      // happened. Report it, then let the default action proceed.
-      if (typeof window.__objectSpyAction === 'function') {
+      // Recording mode: never block the click, whether actively capturing
+      // or paused for an ambiguous-locator resolution — the real app must
+      // actually navigate/submit/etc. so the recorded flow (and the app
+      // itself) behaves exactly like it would with no extension attached at
+      // all. Only suppress reporting a NEW action while paused; still let
+      // the default action proceed either way.
+      if (!window.__objectSpyRecordingPaused && typeof window.__objectSpyAction === 'function') {
         window.__objectSpyAction(
           Object.assign({ actionType: 'click', submitLike: isSubmitLike(target) }, describeTarget(target, info))
         );
@@ -320,7 +337,7 @@
   }
 
   function reportAction(actionType, target, value) {
-    if (!window.__objectSpyRecording || !target) {
+    if (!window.__objectSpyRecording || window.__objectSpyRecordingPaused || !target) {
       return;
     }
     var info = computeLocatorInfo(target);

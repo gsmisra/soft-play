@@ -496,6 +496,10 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   private async stopGenerateCode(): Promise<void> {
     this.generating = false;
     await this.browserManager.setRecording(false);
+    if (this.pendingAmbiguous) {
+      this.pendingAmbiguous = undefined;
+      this.postAmbiguousResolved();
+    }
     this.postGeneratingState(false);
   }
 
@@ -506,9 +510,24 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     if (!this.generating) {
       return; // stale event racing a Stop Code Generation click
     }
+    // A navigation isn't tied to any element — no locator to be ambiguous
+    // about, and nothing meaningful to show in the Elements table — so it
+    // skips straight to the generated code (see codeGenerator.ts's
+    // buildFlowSegments()).
+    if (action.actionType === 'navigate') {
+      this.codeGenerator.addAction(toRecordedAction(action));
+      this.outputChannel.appendLine(`Recorded: navigate → ${action.value}`);
+      this.postCode(true);
+      return;
+    }
     if (action.matches !== 1) {
       this.pendingAmbiguous = action;
-      await this.browserManager.setRecording(false);
+      // Pause reporting only — NOT the whole recording session (setRecording
+      // would also disable click pass-through, since Object Spy's own
+      // `spyEnabled` never gets cleared just because recording paused; that
+      // used to silently start blocking every click, including ones that
+      // should navigate, until the ambiguous banner was resolved).
+      await this.browserManager.setRecordingPaused(true);
       this.postAmbiguous(action);
       return;
     }
@@ -546,7 +565,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     this.pendingAmbiguous = undefined;
     this.postAmbiguousResolved();
     if (this.generating) {
-      await this.browserManager.setRecording(true);
+      await this.browserManager.setRecordingPaused(false);
     }
   }
 
@@ -716,6 +735,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
           <div class="code-header">
             <h3 class="section-title">Playwright Code <span id="codeLanguageLabel"></span></h3>
             <span id="newCodeFlash" class="new-code-flash" hidden>New code recorded.</span>
+            <button id="copyCodeBtn" class="btn btn-small">Copy Code</button>
             <button id="saveCodeBtn" class="btn">Save Code</button>
           </div>
           <div id="codeRefreshBanner" class="code-refresh-banner" hidden>
@@ -730,6 +750,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
         <div class="code-panel" id="llmCodePanel" hidden>
           <div class="code-header">
             <h3 class="section-title">AI Generated Code <span id="llmStatusLabel" class="llm-status"></span></h3>
+            <button id="copyLlmCodeBtn" class="btn btn-small">Copy Code</button>
             <button id="saveLlmCodeBtn" class="btn">Save Code</button>
           </div>
           <div class="code-editor-wrap">
