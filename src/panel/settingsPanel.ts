@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
 import { LANGUAGE_VERSIONS, Language, ObjectSpySettings, SettingsStore } from '../settings/settingsStore';
-import { LocatorType } from '../browser/browserManager';
 import { listCopilotModels } from '../llm/copilotClient';
 
 type InboundMessage =
@@ -8,10 +7,10 @@ type InboundMessage =
   | { type: 'listModels' };
 
 /**
- * The Settings menu (Master Build Prompt §3.5) — deliberately a separate
- * webview panel from the main Object Spy UI, not a section bolted onto it.
- * Controls locator type, language, and exact language/runtime version, all
- * persisted via SettingsStore (context.globalState).
+ * The Settings menu — deliberately a separate webview panel from the main
+ * UI, not a section bolted onto it. Controls the browser channel, the
+ * generated code's language/runtime version, and GitHub Copilot linking,
+ * all persisted via SettingsStore (context.globalState).
  */
 export class SettingsPanel implements vscode.Disposable {
   private panel: vscode.WebviewPanel | undefined;
@@ -178,22 +177,6 @@ export class SettingsPanel implements vscode.Disposable {
     .switch input:checked + .switch-track::before {
       transform: translateX(16px);
     }
-    /* Small variant — for a toggle that shouldn't draw as much visual
-       weight as the main AI Assist one (e.g. "Use native Playwright
-       feature"), per an explicit ask to keep it visually distinct/smaller. */
-    .switch.small {
-      width: 26px;
-      height: 15px;
-    }
-    .switch.small .switch-track::before {
-      width: 10px;
-      height: 10px;
-      left: 2px;
-      top: 1.5px;
-    }
-    .switch.small input:checked + .switch-track::before {
-      transform: translateX(11px);
-    }
     #copilotModelRow, #copilotStatus { display: none; }
     #copilotModelRow.visible, #copilotStatus.visible { display: flex; }
     .status-text {
@@ -215,33 +198,11 @@ export class SettingsPanel implements vscode.Disposable {
     </div>
   </div>
 
-  <h2>Locator</h2>
-  <div class="field">
-    <label>
-      Locator type
-      <span class="hint">Used everywhere Object Spy and Generate Code produce a locator — either/or, never both.</span>
-    </label>
-    <div class="radio-group">
-      <label><input type="radio" name="locatorType" value="css" /> CSS</label>
-      <label><input type="radio" name="locatorType" value="xpath" /> XPath</label>
-    </div>
-  </div>
-  <div class="field">
-    <label>
-      Use native Playwright feature
-      <span class="hint">On (default): Start/Stop in the main panel run Playwright's own real "codegen" tool as-is, in its own separate browser window — Generated Code shows exactly what it wrote, unmodified. Object Spy and the Locator Output table aren't available while it runs, since it owns its own browser. Off: this extension's own Object Spy + smart locator engine, attached to a single Chrome/Edge window.</span>
-    </label>
-    <label class="switch small">
-      <input type="checkbox" id="useNativePlaywrightLocators" />
-      <span class="switch-track"></span>
-    </label>
-  </div>
-
   <h2>Code Generation</h2>
   <div class="field">
     <label>
       Language
-      <span class="hint">Generate Code emits Playwright automation in this language.</span>
+      <span class="hint">Playwright codegen (Start) emits automation in this language — passed through as its own --target flag.</span>
     </label>
     <select id="language">
       <option value="java">Java</option>
@@ -282,7 +243,6 @@ export class SettingsPanel implements vscode.Disposable {
       const vscode = acquireVsCodeApi();
       const languageSelect = document.getElementById('language');
       const versionSelect = document.getElementById('languageVersion');
-      const useNativePlaywrightLocators = document.getElementById('useNativePlaywrightLocators');
       const copilotEnabled = document.getElementById('copilotEnabled');
       const copilotModelRow = document.getElementById('copilotModelRow');
       const copilotModelSelect = document.getElementById('copilotModel');
@@ -290,14 +250,6 @@ export class SettingsPanel implements vscode.Disposable {
       const copilotStatusText = document.getElementById('copilotStatusText');
       let languageVersions = {};
       let pendingModelId = '';
-
-      document.querySelectorAll('input[name="locatorType"]').forEach((radio) => {
-        radio.addEventListener('change', () => {
-          if (radio.checked) {
-            vscode.postMessage({ type: 'update', payload: { locatorType: radio.value } });
-          }
-        });
-      });
 
       document.querySelectorAll('input[name="browserChannel"]').forEach((radio) => {
         radio.addEventListener('change', () => {
@@ -313,10 +265,6 @@ export class SettingsPanel implements vscode.Disposable {
 
       versionSelect.addEventListener('change', () => {
         vscode.postMessage({ type: 'update', payload: { languageVersion: versionSelect.value } });
-      });
-
-      useNativePlaywrightLocators.addEventListener('change', () => {
-        vscode.postMessage({ type: 'update', payload: { useNativePlaywrightLocators: useNativePlaywrightLocators.checked } });
       });
 
       copilotEnabled.addEventListener('change', () => {
@@ -385,13 +333,9 @@ export class SettingsPanel implements vscode.Disposable {
         languageVersions = message.languageVersions;
         const settings = message.payload;
 
-        document.querySelectorAll('input[name="locatorType"]').forEach((radio) => {
-          radio.checked = radio.value === settings.locatorType;
-        });
         document.querySelectorAll('input[name="browserChannel"]').forEach((radio) => {
           radio.checked = radio.value === settings.browserChannel;
         });
-        useNativePlaywrightLocators.checked = settings.useNativePlaywrightLocators;
         languageSelect.value = settings.language;
         renderVersions(settings.language, settings.languageVersion);
 
@@ -421,4 +365,4 @@ function getNonce(): string {
 }
 
 // Re-exported for anything that only needs the type name from this module.
-export type { LocatorType, Language };
+export type { Language };

@@ -3,8 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { spawn, ChildProcess } from 'child_process';
-import { Language } from '../settings/settingsStore';
-import { BrowserChannel } from './chromeFinder';
+import { Language, BrowserChannel } from '../settings/settingsStore';
 
 export type CodegenStatus =
   | { state: 'idle' }
@@ -13,25 +12,22 @@ export type CodegenStatus =
   | { state: 'error'; message: string };
 
 /**
- * Drives Playwright's OWN `codegen` CLI tool as a child process — the
- * "Use native Playwright feature" mode (Settings, default ON). This is
- * deliberately a completely separate code path from BrowserManager: real
- * `playwright codegen` launches and owns its own browser window with its
- * own built-in recorder overlay baked into the page. It has no supported
- * way to attach to an externally-launched Chrome/Edge the way this
- * extension's CDP-attach architecture works, so it can't share a browser
- * (or a session) with Object Spy/Generate Code at all — hence the UI hides
- * that whole side of the panel while a codegen session is running (see
- * objectSpyPanel.ts's nativeModeActive wiring).
+ * Drives Playwright's OWN `codegen` CLI tool as a child process — the sole
+ * way this extension launches a browser, scans elements, and records
+ * actions into generated code. Real `playwright codegen` launches and owns
+ * its own browser window with its own built-in recorder overlay baked into
+ * the page, and this class's whole job is spawning/killing that process and
+ * streaming its output file's content back verbatim (see onCodeUpdate).
  *
  * `playwright` (the full package, not just `playwright-core`) is a real
  * dependency of this extension purely for this CLI file — never for its own
- * bundled browser. `--channel chrome`/`--channel msedge` drives the same
- * already-installed system browser as everywhere else in this extension
- * (see chromeFinder.ts); Playwright's browser-download step is disabled at
- * install time for this whole project (see .npmrc), so nothing is ever
- * fetched at runtime, in keeping with the bank-environment constraint that
- * a Chromium/Firefox/WebKit binary is never downloaded.
+ * bundled browser. `--channel chrome`/`--channel msedge` drives the real,
+ * already-installed system browser directly (Playwright resolves the
+ * installed Chrome/Edge path for a named channel on its own — no separate
+ * executable-finding logic needed here); Playwright's browser-download step
+ * is disabled at install time for this whole project (see .npmrc), so
+ * nothing is ever fetched at runtime, in keeping with the bank-environment
+ * constraint that a Chromium/Firefox/WebKit binary is never downloaded.
  */
 export class CodegenManager implements vscode.Disposable {
   private child: ChildProcess | undefined;
@@ -130,9 +126,10 @@ export class CodegenManager implements vscode.Disposable {
   }
 
   /** Terminates the spawned `codegen` process — its browser goes down with
-   * it (same Windows/macOS/Linux "kill the parent, the OS's job-object/
-   * process-group cleanup takes the children too" mechanism verified for
-   * BrowserManager's own launched Chrome/Edge process). */
+   * it (verified: the OS's own job-object/process-group cleanup takes down
+   * a launched Chrome/Edge's child processes when the parent process that
+   * launched it is killed, with no need to enumerate and kill them
+   * ourselves). */
   async stop(): Promise<void> {
     this.stopPolling();
     const child = this.child;
@@ -213,9 +210,8 @@ function resolveCodegenCliPath(): string {
   return cliPath;
 }
 
-/** Mirrors browserManager.ts's own normalizeUrl() — a bare host/path typed
- * without a scheme is assumed to be https://, same as everywhere else in
- * this extension a URL is accepted from the user. */
+/** A bare host/path typed without a scheme is assumed to be https://, same
+ * as everywhere else in this extension a URL is accepted from the user. */
 function normalizeUrl(input: string): string {
   const trimmed = input.trim();
   if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)) {

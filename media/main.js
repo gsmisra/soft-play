@@ -3,24 +3,14 @@
 
   const startBtn = document.getElementById('startBtn');
   const stopBtn = document.getElementById('stopBtn');
-  const navigateBtn = document.getElementById('navigateBtn');
   const urlInput = document.getElementById('urlInput');
   const statusPill = document.getElementById('statusPill');
-  const spyBtn = document.getElementById('spyBtn');
   const settingsBtn = document.getElementById('settingsBtn');
   const killAllBtn = document.getElementById('killAllBtn');
   const linkFeatureBtn = document.getElementById('linkFeatureBtn');
   const linkedScenarioBadge = document.getElementById('linkedScenarioBadge');
   const linkedScenarioText = document.getElementById('linkedScenarioText');
   const unlinkScenarioBtn = document.getElementById('unlinkScenarioBtn');
-  const resultsBody = document.querySelector('#resultsTable tbody');
-  const selectAllCheckbox = document.getElementById('selectAllCheckbox');
-  const deleteSelectedBtn = document.getElementById('deleteSelectedBtn');
-  const highlightOnPageBtn = document.getElementById('highlightOnPageBtn');
-  const saveLocatorsJsonBtn = document.getElementById('saveLocatorsJsonBtn');
-  const saveLocatorsPropsBtn = document.getElementById('saveLocatorsPropsBtn');
-  const genCodeBtn = document.getElementById('genCodeBtn');
-  const stopCodeBtn = document.getElementById('stopCodeBtn');
   const saveCodeBtn = document.getElementById('saveCodeBtn');
   const copyCodeBtn = document.getElementById('copyCodeBtn');
   const codeLanguageLabel = document.getElementById('codeLanguageLabel');
@@ -32,11 +22,6 @@
   const playwrightCodePanel = document.getElementById('playwrightCodePanel');
   const collapseCodeBtn = document.getElementById('collapseCodeBtn');
   const collapseLlmCodeBtn = document.getElementById('collapseLlmCodeBtn');
-  const ambiguousBanner = document.getElementById('ambiguousBanner');
-  const ambiguousDetail = document.getElementById('ambiguousDetail');
-  const ambiguousLocatorInput = document.getElementById('ambiguousLocatorInput');
-  const ambiguousResumeBtn = document.getElementById('ambiguousResumeBtn');
-  const ambiguousSkipBtn = document.getElementById('ambiguousSkipBtn');
   const aiAssistSection = document.getElementById('aiAssistSection');
   const promptFilesList = document.getElementById('promptFilesList');
   const chatComposer = document.getElementById('chatComposer');
@@ -50,96 +35,25 @@
   const copyLlmCodeBtn = document.getElementById('copyLlmCodeBtn');
   const llmCodeEditArea = document.getElementById('llmCodeEditArea');
   const llmCodeHighlightPre = document.getElementById('llmCodeHighlight');
-  const emptyRowHtml = '<td colspan="5">No elements captured yet. Turn on Object Spy and click an element in the real Chrome window.</td>';
   const LLM_PLACEHOLDER =
     '// Enable "Link with GitHub Copilot LLM" in Settings and pick a model, then check a .md file below or type instructions in the chat — the AI Generated Code view fills in automatically as code is recorded.';
 
-  const nativeModeNote = document.getElementById('nativeModeNote');
-  const nativeModeBadge = document.getElementById('nativeModeBadge');
-
-  let connected = false;
-  let generating = false;
   let killConfirmPending = false;
   let killConfirmTimer = null;
-  let nativeModeActive = false;
 
   startBtn.addEventListener('click', () => {
-    // Native mode: the URL is only usable at spawn time (Playwright's own
-    // `codegen` CLI takes it as a positional argument) -- there's no
-    // separate "Navigate" once its browser window is already open, unlike
-    // the CDP-attach flow below, where a URL is optional (defaults to
-    // whatever objectSpy.startUrl / a blank page).
-    vscode.postMessage({ type: 'start', payload: nativeModeActive ? urlInput.value.trim() : undefined });
+    // The URL is only usable at spawn time (Playwright's own `codegen` CLI
+    // takes it as a positional argument) -- there's no way to change it
+    // once its browser window is already open from outside that window.
+    vscode.postMessage({ type: 'start', payload: urlInput.value.trim() });
   });
 
   stopBtn.addEventListener('click', () => {
     vscode.postMessage({ type: 'stop' });
   });
 
-  navigateBtn.addEventListener('click', () => {
-    const url = urlInput.value.trim();
-    if (url) {
-      vscode.postMessage({ type: 'navigate', payload: url });
-    }
-  });
-
-  urlInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      navigateBtn.click();
-    }
-  });
-
-  spyBtn.addEventListener('click', () => {
-    vscode.postMessage({ type: 'toggleSpy' });
-  });
-
   settingsBtn.addEventListener('click', () => {
     vscode.postMessage({ type: 'openSettings' });
-  });
-
-  genCodeBtn.addEventListener('click', () => {
-    vscode.postMessage({ type: 'startGenerateCode' });
-  });
-
-  stopCodeBtn.addEventListener('click', () => {
-    vscode.postMessage({ type: 'stopGenerateCode' });
-  });
-
-  ambiguousResumeBtn.addEventListener('click', () => {
-    vscode.postMessage({ type: 'resolveAmbiguous', payload: { locator: ambiguousLocatorInput.value } });
-  });
-
-  ambiguousSkipBtn.addEventListener('click', () => {
-    vscode.postMessage({ type: 'resolveAmbiguous', payload: null });
-  });
-
-  selectAllCheckbox.addEventListener('change', () => {
-    resultsBody.querySelectorAll('.row-check').forEach((cb) => {
-      cb.checked = selectAllCheckbox.checked;
-    });
-    updateRowSelectionButtons();
-  });
-
-  deleteSelectedBtn.addEventListener('click', () => {
-    const keys = Array.from(resultsBody.querySelectorAll('.row-check:checked')).map((cb) => cb.closest('tr').dataset.key);
-    if (keys.length) {
-      vscode.postMessage({ type: 'deleteElements', payload: keys });
-    }
-  });
-
-  highlightOnPageBtn.addEventListener('click', () => {
-    const checked = resultsBody.querySelectorAll('.row-check:checked');
-    if (checked.length === 1) {
-      vscode.postMessage({ type: 'highlightElement', payload: checked[0].closest('tr').dataset.key });
-    }
-  });
-
-  saveLocatorsJsonBtn.addEventListener('click', () => {
-    vscode.postMessage({ type: 'saveLocators', payload: { format: 'json' } });
-  });
-
-  saveLocatorsPropsBtn.addEventListener('click', () => {
-    vscode.postMessage({ type: 'saveLocators', payload: { format: 'properties' } });
   });
 
   saveCodeBtn.addEventListener('click', () => {
@@ -219,14 +133,13 @@
     });
   }
 
-  // No more "Send to Copilot"/"Send Anyway" buttons: checking a .md file
-  // below is itself the action now -- the extension host tracks the
-  // current checkbox selection (see the 'change' listener in
-  // renderPromptFiles()) and folds it into every AI refinement
-  // automatically, manual or the automatic post-recording pipeline, so
-  // there's nothing left to separately "send". The chat composer below is
-  // still a genuinely separate, deliberate action: free-text instructions
-  // typed there and sent explicitly.
+  // No "Send to Copilot"/"Send Anyway" buttons: checking a .md file below is
+  // itself the action -- the extension host tracks the current checkbox
+  // selection (see the 'change' listener in renderPromptFiles()) and folds
+  // it into every AI refinement automatically, manual or the automatic
+  // post-recording pipeline, so there's nothing left to separately "send".
+  // The chat composer below is still a genuinely separate, deliberate
+  // action: free-text instructions typed there and sent explicitly.
 
   // Messenger-style composer: Enter sends, Shift+Enter inserts a newline,
   // and the textarea grows with content up to a few lines (see main.css).
@@ -381,7 +294,7 @@
   const llmEditor = createCodeEditor(llmCodeEditArea, llmCodeHighlightPre);
 
   // Once the user hand-edits the code, a newly recorded action must not
-  // silently clobber their edits -- see item #1 (editable code) + #11.
+  // silently clobber their edits -- offer a refresh instead.
   let userEditedCode = false;
   let pendingFreshCode = null;
 
@@ -412,35 +325,14 @@
       case 'status':
         applyStatus(message.payload);
         break;
-      case 'spyState':
-        applySpyState(message.payload);
-        break;
-      case 'capture':
-        appendCapture(message.payload);
-        break;
-      case 'removeElements':
-        removeElements(message.payload);
-        break;
-      case 'generatingState':
-        applyGeneratingState(message.payload);
-        break;
       case 'code':
         applyCode(message.payload);
-        break;
-      case 'ambiguousAction':
-        showAmbiguous(message.payload, message.note);
-        break;
-      case 'ambiguousResolved':
-        hideAmbiguous();
         break;
       case 'clearAll':
         clearAll();
         break;
       case 'copilotEnabledState':
         applyCopilotEnabledState(message.payload);
-        break;
-      case 'nativeModeActive':
-        applyNativeModeActive(message.payload);
         break;
       case 'linkedScenario':
         applyLinkedScenario(message.payload);
@@ -479,20 +371,12 @@
     }
   }
 
-  function applyNativeModeActive(active) {
-    nativeModeActive = active;
-    document.body.classList.toggle('native-mode', active);
-    nativeModeNote.hidden = !active;
-    nativeModeBadge.hidden = !active;
-    urlInput.placeholder = active ? 'https://example.com (opened when you click Start)' : 'https://example.com';
-  }
-
   // Tells the extension host which .md files are currently checked, so the
-  // automatic AI refinement pipeline (fires on every new recorded action,
-  // no button needed) always uses the up-to-date selection. Also fired
-  // once right after a re-render, since rebuilding the checkbox DOM always
-  // starts unchecked -- keeps the host's tracked selection from silently
-  // going stale relative to what's actually visible.
+  // automatic AI refinement pipeline (fires on every new codegen output
+  // update, no button needed) always uses the up-to-date selection. Also
+  // fired once right after a re-render, since rebuilding the checkbox DOM
+  // always starts unchecked -- keeps the host's tracked selection from
+  // silently going stale relative to what's actually visible.
   function postSelectedInstructionFiles() {
     vscode.postMessage({ type: 'selectedInstructionFiles', payload: selectedPromptFiles() });
   }
@@ -538,20 +422,6 @@
     llmEditor.setValue('// ' + message);
   }
 
-  function applySpyState(enabled) {
-    spyBtn.textContent = enabled ? 'Object Spy: On' : 'Object Spy: Off';
-    spyBtn.classList.toggle('btn-active', enabled);
-    spyBtn.disabled = !connected;
-  }
-
-  function applyGeneratingState(enabled) {
-    generating = enabled;
-    genCodeBtn.disabled = !connected || enabled;
-    stopCodeBtn.disabled = !enabled;
-    genCodeBtn.classList.toggle('btn-active', enabled);
-    genCodeBtn.textContent = enabled ? 'Generating…' : 'Generate Code';
-  }
-
   function applyCode(payload) {
     codeLanguageLabel.textContent =
       '(' + payload.language[0].toUpperCase() + payload.language.slice(1) + ' ' + payload.languageVersion + ')';
@@ -578,130 +448,12 @@
     }, 2500);
   }
 
-  function showAmbiguous(action, note) {
-    ambiguousBanner.hidden = false;
-    ambiguousDetail.textContent =
-      (note ? note + ' ' : '') +
-      action.actionType + ' on <' + action.tag + '> "' + (action.text || '') + '" matched ' + action.matches + ' elements.';
-    ambiguousLocatorInput.value = action.locator;
-    ambiguousLocatorInput.focus();
-  }
-
-  function hideAmbiguous() {
-    ambiguousBanner.hidden = true;
-    ambiguousLocatorInput.value = '';
-  }
-
-  function keyFor(info) {
-    return info.locatorType + '::' + info.locator;
-  }
-
-  function appendCapture(info) {
-    const key = keyFor(info);
-    if (resultsBody.querySelector('tr[data-key="' + cssAttrEscape(key) + '"]')) {
-      return; // already present -- host already dedupes, this is just a safety net
-    }
-
-    const emptyRow = resultsBody.querySelector('.empty-row');
-    if (emptyRow) {
-      emptyRow.remove();
-    }
-
-    const row = document.createElement('tr');
-    row.dataset.key = key;
-
-    const qualityTier = info.qualityLabel.split(' · ')[0];
-    const qualityClass = qualityTier === 'Excellent'
-      ? 'quality-excellent'
-      : qualityTier === 'Good'
-      ? 'quality-good'
-      : qualityTier === 'Fair'
-      ? 'quality-fair'
-      : 'quality-weak';
-
-    row.innerHTML =
-      '<td class="col-check"><input type="checkbox" class="row-check" /></td>' +
-      '<td class="element-name-cell"></td>' +
-      '<td class="locator-cell"></td>' +
-      '<td></td>' +
-      '<td></td>';
-
-    const nameCell = row.children[1];
-    const nameText = document.createElement('span');
-    nameText.textContent = info.elementName;
-    nameCell.appendChild(nameText);
-    if (info.inIframe) {
-      nameCell.appendChild(makeBadge('iframe', 'badge-iframe', 'Found inside an <iframe>'));
-    }
-    if (info.inShadowDom) {
-      nameCell.appendChild(makeBadge('shadow', 'badge-shadow', 'Found inside a shadow root'));
-    }
-
-    row.children[2].textContent = info.locator;
-    row.children[2].title = info.locatorType.toUpperCase() + ': ' + info.locator;
-
-    const qualityBadge = document.createElement('span');
-    qualityBadge.className = 'quality-badge ' + qualityClass;
-    qualityBadge.textContent = qualityTier;
-    row.children[3].appendChild(qualityBadge);
-
-    row.children[4].textContent =
-      info.matches === 1 ? 'Unique' : info.matches > 1 ? 'Ambiguous (' + info.matches + ')' : 'Not found';
-    if (info.matches !== 1) {
-      row.children[4].classList.add('matches-ambiguous');
-    }
-
-    row.querySelector('.row-check').addEventListener('change', updateRowSelectionButtons);
-
-    resultsBody.appendChild(row);
-    row.scrollIntoView({ block: 'nearest' });
-  }
-
-  function makeBadge(text, cls, title) {
-    const badge = document.createElement('span');
-    badge.className = 'badge ' + cls;
-    badge.textContent = text;
-    badge.title = title;
-    return badge;
-  }
-
-  function cssAttrEscape(value) {
-    if (window.CSS && typeof window.CSS.escape === 'function') {
-      return window.CSS.escape(value);
-    }
-    return value.replace(/(["\\])/g, '\\$1');
-  }
-
-  function removeElements(keys) {
-    const keySet = new Set(keys);
-    Array.from(resultsBody.querySelectorAll('tr[data-key]')).forEach((row) => {
-      if (keySet.has(row.dataset.key)) {
-        row.remove();
-      }
-    });
-    if (!resultsBody.querySelector('tr[data-key]')) {
-      resultsBody.innerHTML = '<tr class="empty-row">' + emptyRowHtml + '</tr>';
-    }
-    selectAllCheckbox.checked = false;
-    updateRowSelectionButtons();
-  }
-
-  function updateRowSelectionButtons() {
-    const checkedCount = resultsBody.querySelectorAll('.row-check:checked').length;
-    deleteSelectedBtn.disabled = checkedCount === 0;
-    highlightOnPageBtn.disabled = checkedCount !== 1;
-  }
-
   function clearAll() {
-    resultsBody.innerHTML = '<tr class="empty-row">' + emptyRowHtml + '</tr>';
-    selectAllCheckbox.checked = false;
-    updateRowSelectionButtons();
     userEditedCode = false;
     pendingFreshCode = null;
     codeRefreshBanner.hidden = true;
-    playwrightEditor.setValue('// Click "Generate Code" and interact with the real Chrome window.');
+    playwrightEditor.setValue('// Click "Start" and interact with the codegen browser window.');
     llmEditor.setValue(LLM_PLACEHOLDER);
-    hideAmbiguous();
     clearTimeout(newCodeFlashTimer);
     newCodeFlash.hidden = true;
   }
@@ -709,13 +461,6 @@
   function applyStatus(status) {
     statusPill.className = 'status-pill';
     statusPill.title = '';
-    connected = status.state === 'connected';
-    spyBtn.disabled = !connected;
-    genCodeBtn.disabled = !connected || generating;
-    if (!connected) {
-      stopCodeBtn.disabled = true;
-      hideAmbiguous();
-    }
 
     switch (status.state) {
       case 'idle':
@@ -723,21 +468,18 @@
         statusPill.textContent = 'Idle';
         startBtn.disabled = false;
         stopBtn.disabled = true;
-        navigateBtn.disabled = true;
         break;
       case 'connecting':
         statusPill.classList.add('status-connecting');
         statusPill.textContent = status.detail || 'Connecting…';
         startBtn.disabled = true;
         stopBtn.disabled = false;
-        navigateBtn.disabled = true;
         break;
       case 'connected':
         statusPill.classList.add('status-connected');
         statusPill.textContent = 'Connected';
         startBtn.disabled = true;
         stopBtn.disabled = false;
-        navigateBtn.disabled = false;
         if (status.url) {
           urlInput.value = status.url;
         }
@@ -748,7 +490,6 @@
         statusPill.title = status.message;
         startBtn.disabled = false;
         stopBtn.disabled = true;
-        navigateBtn.disabled = true;
         break;
     }
   }

@@ -17,14 +17,6 @@ body {
   gap: 8px;
 }
 
-/* "Use native Playwright feature" (Settings, default ON): Object Spy, the
-   Locator Output table, and Generate Code have no page of their own to
-   attach to while a `playwright codegen` session (its own separate browser
-   window) is running -- see objectSpyPanel.ts's nativeModeActive wiring. */
-body.native-mode .legacy-only {
-  display: none !important;
-}
-
 .native-mode-note {
   margin: 4px 0 10px;
   padding: 8px 10px;
@@ -39,26 +31,42 @@ body.native-mode .legacy-only {
   font-family: var(--vscode-editor-font-family, monospace);
 }
 
-.native-mode-badge {
-  font-size: 0.72em;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  color: var(--vscode-textLink-foreground, #3794ff);
-  border: 1px solid currentColor;
-  border-radius: 3px;
-  padding: 1px 5px;
-  vertical-align: middle;
-}
-
 .title-row {
   justify-content: space-between;
   flex-wrap: wrap;
   row-gap: 4px;
 }
 
-/* Three collapsible sections (Control Panel / Locator Output / Generated
-   Code) — native <details>/<summary>, no JS needed for expand/collapse. */
+.title-group {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+/* Settings gear, moved to the top of the UI (the title row) and enlarged —
+   it used to sit as a small icon button among the Control Panel's other
+   buttons; there's only one button of real consequence left there now
+   (Start), so Settings gets top billing instead. */
+.btn-icon-top {
+  flex: none;
+  font-size: 1.5em;
+  line-height: 1;
+  padding: 4px 10px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 4px;
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+  cursor: pointer;
+}
+
+.btn-icon-top:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+/* Two collapsible sections (Control Panel / Generated Code) — native
+   <details>/<summary>, no JS needed for expand/collapse. */
 .section {
   border-bottom: 1px solid var(--vscode-panel-border);
 }
@@ -126,10 +134,6 @@ body.native-mode .legacy-only {
   background: var(--vscode-button-hoverBackground);
 }
 
-.btn-icon {
-  padding: 4px 8px;
-}
-
 .linked-scenario-badge {
   display: inline-flex;
   align-items: center;
@@ -160,15 +164,6 @@ body.native-mode .legacy-only {
 }
 .btn-icon-small:hover {
   color: var(--vscode-errorForeground, #f14c4c);
-}
-
-.btn-active {
-  background: #a1260d;
-  color: #fff;
-}
-
-.btn-active:hover:not(:disabled) {
-  background: #c22e10;
 }
 
 .btn-small {
@@ -210,90 +205,6 @@ body.native-mode .legacy-only {
 .status-connecting { background: #7a5c00; color: #fff; }
 .status-connected { background: #14803c; color: #fff; }
 .status-error { background: #a1260d; color: #fff; }
-
-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.9em;
-}
-
-th, td {
-  text-align: left;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--vscode-panel-border);
-}
-
-th {
-  color: var(--vscode-descriptionForeground);
-  font-weight: 600;
-  text-transform: uppercase;
-  font-size: 0.75em;
-  letter-spacing: 0.04em;
-}
-
-.empty-row td {
-  color: var(--vscode-descriptionForeground);
-  font-style: italic;
-  text-align: center;
-  padding: 20px 8px;
-}
-
-.col-check {
-  width: 24px;
-}
-
-.element-name-cell {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.badge {
-  padding: 1px 6px;
-  border-radius: 8px;
-  font-size: 0.72em;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  white-space: nowrap;
-}
-
-.badge-iframe { background: #0b6bb8; color: #fff; }
-.badge-shadow { background: #6b3fa0; color: #fff; }
-
-.table-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.locator-cell {
-  font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 0.9em;
-  max-width: 320px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.quality-badge {
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-size: 0.85em;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.quality-excellent { background: #14803c; color: #fff; }
-.quality-good { background: #0b6bb8; color: #fff; }
-.quality-fair { background: #7a5c00; color: #fff; }
-.quality-weak { background: #a1260d; color: #fff; }
-
-.matches-ambiguous {
-  color: #d9822b;
-  font-weight: 600;
-}
 
 .section-title {
   margin: 20px 0 8px;
@@ -581,31 +492,5 @@ th {
 
 .chat-send-btn:hover {
   background: #006fd6;
-}
-
-.ambiguous-banner {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  background: rgba(217, 130, 43, 0.15);
-  border: 1px solid #d9822b;
-  border-radius: 3px;
-}
-
-.ambiguous-text {
-  flex: 1;
-  font-size: 0.85em;
-}
-
-#ambiguousLocatorInput {
-  flex: 1;
-  min-width: 160px;
-  padding: 4px 8px;
-  background: var(--vscode-input-background);
-  color: var(--vscode-input-foreground);
-  border: 1px solid var(--vscode-input-border, transparent);
-  border-radius: 2px;
-  font-family: var(--vscode-editor-font-family, monospace);
 }
 

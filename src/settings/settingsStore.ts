@@ -1,33 +1,29 @@
 import * as vscode from 'vscode';
-import { LocatorType, BrowserChannel } from '../browser/browserManager';
 
 export type Language = 'java' | 'python';
 
+/** Chrome or Edge only — this extension never downloads/bundles a browser
+ * of its own. Passed straight through to Playwright `codegen`'s own
+ * `--channel` flag (see codegenManager.ts), which drives the real,
+ * already-installed system browser instead of needing one of Playwright's
+ * own bundled binaries. */
+export type BrowserChannel = 'chrome' | 'edge';
+
 export interface ObjectSpySettings {
-  locatorType: LocatorType;
   language: Language;
   languageVersion: string;
-  /** Chrome or Edge only — this extension never downloads/bundles a browser
-   * of its own (see chromeFinder.ts). Default Chrome. */
   browserChannel: BrowserChannel;
   /** "Link with GitHub Copilot LLM" toggle — see settingsPanel.ts and src/llm/copilotClient.ts. */
   copilotEnabled: boolean;
   /** LanguageModelChat.id of the selected Copilot model, or '' if none picked yet. */
   copilotModelId: string;
-  /** "Use native Playwright feature" toggle — see settingsPanel.ts. ON (the
-   * default) captures each element's locator exactly the way Playwright's
-   * own recorder would: the first reasonable candidate, accepted as-is even
-   * if it isn't provably unique, with no sibling-axis/positional refinement
-   * and no ambiguous-locator pause. OFF restores this extension's own
-   * smart, tiered, guaranteed-unique locator engine (agent/pageAgent.js). */
-  useNativePlaywrightLocators: boolean;
 }
 
 /**
- * Language/runtime versions offered per language. Purely a templating
- * concern for the Phase 4 code generator (idioms like Java's `var`, or
- * f-strings vs. older Python formatting) — it never affects how the
- * extension itself runs.
+ * Language/runtime versions offered per language — drives Playwright
+ * `codegen`'s own `--target` flag (java-junit for Java, python-pytest for
+ * Python; see codegenManager.ts) and, separately, which language/runtime
+ * idioms the "Custom md files" AI refinement prompt asks for.
  */
 export const LANGUAGE_VERSIONS: Record<Language, string[]> = {
   java: ['11', '17', '21'],
@@ -35,27 +31,21 @@ export const LANGUAGE_VERSIONS: Record<Language, string[]> = {
 };
 
 const DEFAULTS: ObjectSpySettings = {
-  // XPath by default: its axis-based fallbacks (following-sibling/preceding-
-  // sibling, positional predicates) reach useful, unique locators in more
-  // real-world markup shapes than CSS can on its own — see the locator
-  // engine's tiering in agent/pageAgent.js.
-  locatorType: 'xpath',
   language: 'java',
   languageVersion: '17',
   browserChannel: 'chrome',
   copilotEnabled: false,
-  copilotModelId: '',
-  useNativePlaywrightLocators: true
+  copilotModelId: ''
 };
 
 const STORAGE_KEY = 'objectSpy.settings';
 
 /**
- * Owns Object Spy's persistent settings (locator type, language, language
- * version) — per the Master Build Prompt (§3.5), these live in
- * `context.globalState` rather than VS Code workspace settings, so the
- * Settings panel is the single source of truth (no separate settings.json
- * copy to drift out of sync with).
+ * Owns softPlay's persistent settings (language, language version, browser
+ * channel, GitHub Copilot linking) — these live in `context.globalState`
+ * rather than VS Code workspace settings, so the Settings panel is the
+ * single source of truth (no separate settings.json copy to drift out of
+ * sync with).
  */
 export class SettingsStore implements vscode.Disposable {
   private readonly changeEmitter = new vscode.EventEmitter<ObjectSpySettings>();

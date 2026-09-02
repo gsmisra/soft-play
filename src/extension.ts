@@ -31,20 +31,8 @@ export function activate(context: vscode.ExtensionContext): void {
       panelManager.openSettings();
     }),
 
-    vscode.commands.registerCommand('objectSpy.navigate', async () => {
-      const url = await vscode.window.showInputBox({
-        prompt: 'Enter a URL to navigate to',
-        placeHolder: 'https://example.com',
-        value: 'https://'
-      });
-      if (url) {
-        panelManager.show();
-        await panelManager.navigate(url);
-      }
-    }),
-
-    // Ensures BrowserManager (and any launched Chrome process handle) is cleaned up
-    // when the extension host shuts down.
+    // Ensures CodegenManager (and any launched codegen process handle) is
+    // cleaned up when the extension host shuts down.
     { dispose: () => panelManager.dispose() },
     settingsStore
   );
