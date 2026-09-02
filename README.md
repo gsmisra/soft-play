@@ -140,14 +140,22 @@ click/fill/etc. was reported in the ~2 seconds before the page loaded, the
 new URL is treated as a direct navigation rather than the side effect of
 something already being recorded.)
 
-**New tabs and windows are followed automatically.** If a recorded click (or
-raw Object Spy) opens a new tab or window — e.g. a "Sign in" link on a page
-like Gmail that opens `accounts.google.com` in its own tab — the extension
-installs the same capture/recording agent on that new page the instant
-Chrome creates it, so Object Spy and Generate Code keep working there with
-no extra steps. Every tab and window opened during the session (not just
-the first one) is tracked this way for as long as the browser stays
-attached.
+**New tabs and windows are followed automatically — including a fast
+redirect chain before it settles.** If a recorded click (or raw Object Spy)
+opens a new tab or window — e.g. a "Sign in" link on a page like Gmail that
+bounces through several `accounts.google.com` URLs before landing on a
+sign-in form — Object Spy and Generate Code keep working there with no
+extra steps, from that page's very first document. This is deliberately
+*not* implemented by reacting to Chrome's "new page" notification and then
+setting things up (too slow for a real multi-hop redirect: by the time that
+reactive setup finishes, the chain can already have moved past every
+intermediate page); the capture/recording agent and whatever
+locatorType/enabled/recording state is currently active are instead
+registered once at the browser-connection level, so Chrome itself applies
+them to any tab, window, or popup from the instant it's created — no setup
+call of ours has to win a race against that page's own navigation. Every
+tab and window opened during the session (not just the first one) is
+covered this way for as long as the browser stays attached.
 
 Every time a new action is actually recorded, a **"New code recorded."**
 label blinks green next to the Playwright Code header for a couple of

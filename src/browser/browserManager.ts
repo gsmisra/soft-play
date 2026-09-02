@@ -507,27 +507,30 @@ export class BrowserManager implements vscode.Disposable {
   }
 
   /**
-   * Installs the Object Spy page agent (agent/pageAgent.js) on a freshly
-   * attached page, and every frame in it — including cross-origin iframes.
-   * Playwright's exposeFunction/addInitScript already operate per-frame on
-   * their own (per Playwright's docs: exposeFunction binds on every frame's
-   * window, and addInitScript re-runs for every frame attach/navigation),
-   * and — crucially — via CDP rather than in-page script, so the DOM's
-   * same-origin policy that would normally block reaching into a
-   * cross-origin iframe never applies here. This matters for real banking
-   * pages, which commonly embed cross-origin iframes (payment widgets,
-   * SSO/2FA frames, etc.) that Object Spy still needs to be able to inspect.
+   * Wires up per-page reporting for a freshly attached page, and every frame
+   * in it — including cross-origin iframes. The agent script itself (and
+   * the state it starts with) is already active on this page before this
+   * function ever runs — see applyCombinedInitScript() — since that's
+   * registered once at the browser CONTEXT level, not per-page; what's left
+   * here is everything Playwright can only do per-Page:
    *
    *   1. exposeFunction so the in-page script can report captured elements
    *      / actions back to the extension host — bound once per Page.
-   *   2. addInitScript so the agent re-runs in every future frame document.
-   *   3. An immediate evaluate() in every *existing* frame as a safety net —
-   *      addInitScript only affects documents loaded after it's registered,
-   *      so a page (or iframe) we attached to mid-session needs this too.
-   *   4. A framenavigated listener (fires for ANY frame, not just main) that
+   *      Playwright binds this on every frame's window (via CDP rather than
+   *      in-page script, so the DOM's same-origin policy that would
+   *      normally block reaching into a cross-origin iframe never applies
+   *      here — this matters for real banking pages, which commonly embed
+   *      cross-origin iframes for payment widgets, SSO/2FA, etc.), and
+   *      re-applies it automatically on every future navigation of this
+   *      page for its whole lifetime, same as the context-level init script.
+   *   2. An immediate evaluate() in every *existing* frame as a safety net —
+   *      the context-level init script only affects documents created after
+   *      it was registered, so a page (or iframe) we attached to mid-session
+   *      (already loaded before we ever connected) needs this too.
+   *   3. A framenavigated listener (fires for ANY frame, not just main) that
    *      re-applies current spy/config/recording state, covering
    *      same-document (SPA) navigations where a fresh reload — and
-   *      therefore addInitScript — never happens.
+   *      therefore the context-level init script — never happens.
    */
   private async installPageAgent(page: import('playwright-core').Page): Promise<void> {
     if (this.pages.has(page)) {
