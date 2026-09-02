@@ -79,6 +79,23 @@ export class BrowserManager implements vscode.Disposable {
   // for Start/Stop/Navigate/Highlight On Page/title tracking — this set is
   // only for broadcasting spy/recording state and wiring up reporting.
   private readonly pages = new Set<import('playwright-core').Page>();
+  // The page agent script AND the "desired state" it reads on startup (see
+  // pageAgent.js's `__desired` handling) are registered TOGETHER as a single
+  // addInitScript at the BROWSER CONTEXT level — see
+  // applyCombinedInitScript() for why both of those choices matter: (1)
+  // context-level, not per-page, so Chrome applies it to every future
+  // page/tab/popup from its very first document with no async race against
+  // that page's own navigation, confirmed against a real fast-redirect
+  // timing test where a per-page addInitScript call still lost that race;
+  // (2) bundled into ONE script, not two, because addInitScript has no way
+  // to insert a replacement in the middle of an existing registration
+  // order — a separate "state" script re-registered after the "main" one
+  // was already added always ends up running AFTER it, even though the
+  // main script needs to read the state that the state script sets. Baking
+  // both into one script generated fresh on every state change sidesteps
+  // that entirely. This Disposable is the currently-registered copy; kept
+  // so it can be replaced (not stacked) whenever state changes.
+  private combinedInitScript: import('playwright-core').Disposable | undefined;
 
   // Only set when *we* spawned the Chrome process — we must never kill a Chrome
   // window the user already had running before we attached to it.
@@ -362,6 +379,17 @@ export class BrowserManager implements vscode.Disposable {
       const contexts = browser.contexts();
       this.context = contexts[0] ?? (await browser.newContext());
 
+      // Register the agent script (with the current desired state baked in)
+      // at the CONTEXT level before anything else touches a page — see the
+      // `combinedInitScript` field comment for why this must be one script,
+      // not two, and why context-level rather than per-page. This is what
+      // guarantees a brand-new tab/window/popup (including one several hops
+      // into a fast redirect chain, like a real sign-in flow) starts in the
+      // correct enabled/recording state from its very first document,
+      // instead of racing a per-page setup call against that page's own
+      // navigation.
+      await this.applyCombinedInitScript();
+
       // Object Spy/Generate Code must work in EVERY tab, not just the first
       // one — a new tab or window (a link with target="_blank", a
       // window.open() call, Gmail/most real sites do this constantly) is
@@ -386,6 +414,7 @@ export class BrowserManager implements vscode.Disposable {
         this.context = undefined;
         this.page = undefined;
         this.pages.clear();
+        this.combinedInitScript = undefined;
         this.spyEnabled = false;
         this.recording = false;
         this.recordingPaused = false;
@@ -444,6 +473,7 @@ export class BrowserManager implements vscode.Disposable {
       this.context = undefined;
       this.page = undefined;
       this.pages.clear();
+      this.combinedInitScript = undefined;
       this.launchedProcess = undefined;
       this.spyEnabled = false;
       this.recording = false;
@@ -506,20 +536,14 @@ export class BrowserManager implements vscode.Disposable {
     this.pages.add(page);
     page.once('close', () => this.pages.delete(page));
 
-    await page.exposeFunction('__objectSpyCapture', (info: CapturedElement) => {
-      this.captureEmitter.fire(info);
-    });
-    await page.exposeFunction('__objectSpyAction', (info: RecordedActionEvent) => {
-      // Tracked for the 'load' handler below, to tell "the user just typed
-      // a new URL into the address bar" apart from "this navigation is the
-      // side effect of the action just recorded".
-      this.lastReportedActionAt = Date.now();
-      this.actionEmitter.fire(info);
-    });
-
-    await page.addInitScript({ content: PAGE_AGENT_SCRIPT });
-    await this.injectIntoAllFrames(page);
-
+    // Registered BEFORE any `await` below, synchronously, so a real
+    // navigation that's already racing ahead in this brand-new tab (Chrome
+    // opens the tab and starts loading its target URL immediately for a
+    // real <a target="_blank"> link — unlike a plain window.open('about:
+    // blank')) can never fire its 'framenavigated'/'load' event before we're
+    // listening for it. Everything after the first `await` in an async
+    // function only runs once that await resolves, so writing these two
+    // page.on() calls any later would leave exactly that gap.
     page.on('framenavigated', async (frame) => {
       try {
         await frame.evaluate(PAGE_AGENT_SCRIPT);
@@ -557,6 +581,74 @@ export class BrowserManager implements vscode.Disposable {
         this.recordNavigateIfNew(page.url());
       }
     });
+
+    // The main agent script and its desired-state seed are registered at
+    // the browser CONTEXT level (see start() and applyCombinedInitScript())
+    // — not here — precisely so they're already active for this page before
+    // this function even starts running, no matter how fast its navigation
+    // is. All that's left to do per-page is exposeFunction (Playwright has
+    // no context-level equivalent) and the live evaluate() safety net below
+    // for whatever document is *already* loaded on a pre-existing page.
+    await page.exposeFunction('__objectSpyCapture', (info: CapturedElement) => {
+      this.captureEmitter.fire(info);
+    });
+    await page.exposeFunction('__objectSpyAction', (info: RecordedActionEvent) => {
+      // Tracked for the 'load' handler above, to tell "the user just typed
+      // a new URL into the address bar" apart from "this navigation is the
+      // side effect of the action just recorded".
+      this.lastReportedActionAt = Date.now();
+      this.actionEmitter.fire(info);
+    });
+
+    await this.injectIntoAllFrames(page);
+  }
+
+  /** (Re-)registers the CONTEXT-level addInitScript that seeds
+   * window.__objectSpyDesiredState and then runs the page agent itself —
+   * see the `combinedInitScript` field comment for why the state seed and
+   * the agent script must be ONE script, generated fresh every time state
+   * changes, rather than two separately-registered ones (whichever was
+   * registered first always runs first for every future document — fine
+   * for the one-time initial registration, but wrong forever after the
+   * first state change once the agent script already "holds" the later
+   * position). Registered at the browser-context level, not per-page,
+   * specifically so it's active for a brand-new tab/window from the instant
+   * Chrome creates it, with no async setup call of ours to race against
+   * that page's own navigation — a per-page version of this (an earlier
+   * iteration of this fix) was confirmed via a real timing test to still
+   * lose that race for a fast redirect chain. Disposes the previous copy
+   * first (addInitScript has no "replace" — each call adds one more), so a
+   * long session doesn't accumulate one script per toggle for the life of
+   * the context. */
+  private async applyCombinedInitScript(): Promise<void> {
+    if (!this.context) {
+      return;
+    }
+    const previous = this.combinedInitScript;
+    const state = {
+      locatorType: this.locatorType,
+      enabled: this.spyEnabled,
+      recording: this.recording,
+      recordingPaused: this.recordingPaused
+    };
+    try {
+      this.combinedInitScript = await this.context.addInitScript(
+        (params) => {
+          (globalThis as any).__objectSpyDesiredState = params.state;
+          // eslint-disable-next-line no-new-func -- running our own trusted
+          // agent script text, not user input; Function avoids a literal
+          // `eval` call while doing the same thing.
+          new Function(params.script)();
+        },
+        { state, script: PAGE_AGENT_SCRIPT }
+      );
+    } catch {
+      // Context closed mid-call — nothing to recover from.
+      return;
+    }
+    if (previous) {
+      await previous.dispose().catch(() => undefined);
+    }
   }
 
   private refreshPageTitle(page: import('playwright-core').Page): void {
@@ -603,11 +695,19 @@ export class BrowserManager implements vscode.Disposable {
    * every tracked page (and every frame within each) — not just the primary
    * tab, so a new tab or window is never silently left out. */
   private async applySpyState(): Promise<void> {
+    // Live-apply to whatever's currently loaded in every tracked page
+    // (instant feedback in the tab you're looking at right now)...
     for (const page of this.pages) {
       for (const frame of page.frames()) {
         await this.applyStateToFrame(frame);
       }
     }
+    // ...and persist it, once, at the context level for whatever any page
+    // navigates to NEXT (including a tab that doesn't even exist yet) — a
+    // toggle made while a redirect chain is mid-flight still takes effect
+    // the instant that next document is created, rather than only once a
+    // live evaluate() call gets a chance to catch up with it.
+    await this.applyCombinedInitScript();
   }
 
   private async tryConnectExisting(

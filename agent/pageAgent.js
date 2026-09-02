@@ -70,17 +70,31 @@
   }
   window.__objectSpyInstalled = true;
 
+  // Seeded by a small companion addInitScript (see BrowserManager's
+  // applyDesiredStateInitScript()) that runs BEFORE this one and sets
+  // window.__objectSpyDesiredState to whatever locatorType/enabled/
+  // recording/recordingPaused was current at the time. This lets a brand
+  // new document — including the very first real navigation in a new tab
+  // Chrome opens for a link/window.open(), which can commit before the
+  // extension host ever gets a chance to evaluate() anything into it —
+  // start in the CORRECT state from its very first script execution,
+  // instead of always starting disabled and hoping a live evaluate() call
+  // wins a race against the navigation. Falls back to disabled/CSS when
+  // absent (e.g. the very first page.evaluate() safety-net install, which
+  // runs before any desired-state script existed).
+  var __desired = window.__objectSpyDesiredState || {};
+
   /** @type {{ locatorType: 'css' | 'xpath' }} */
-  window.__objectSpyConfig = window.__objectSpyConfig || { locatorType: 'css' };
-  window.__objectSpyEnabled = false;
-  window.__objectSpyRecording = false;
+  window.__objectSpyConfig = window.__objectSpyConfig || { locatorType: __desired.locatorType || 'css' };
+  window.__objectSpyEnabled = !!__desired.enabled;
+  window.__objectSpyRecording = !!__desired.recording;
   // True only while an ambiguous locator is awaiting resolution in the
   // panel. Deliberately does NOT block clicks (see onClick below) — the
   // whole point of this separate flag is that pausing must feel identical
   // to active recording from the page's perspective, never falling back to
   // Object Spy's own click-blocking capture mode just because a capture is
   // paused.
-  window.__objectSpyRecordingPaused = false;
+  window.__objectSpyRecordingPaused = !!__desired.recordingPaused;
 
   window.__objectSpySetConfig = function (cfg) {
     window.__objectSpyConfig = Object.assign({}, window.__objectSpyConfig, cfg || {});
