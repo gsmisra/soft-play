@@ -34,6 +34,9 @@ export class CodegenManager implements vscode.Disposable {
   private outputFile: string | undefined;
   private pollTimer: ReturnType<typeof setInterval> | undefined;
   private lastFileContent = '';
+  private lastEmittedContent = '';
+  private currentLanguage: Language = 'python';
+  private currentChannel: BrowserChannel = 'chrome';
 
   private status: CodegenStatus = { state: 'idle' };
 
@@ -41,9 +44,13 @@ export class CodegenManager implements vscode.Disposable {
   readonly onStatusChange = this.statusEmitter.event;
 
   private readonly codeEmitter = new vscode.EventEmitter<string>();
-  /** Fires the raw file content verbatim every time `codegen` writes a new
-   * version of it — no processing, no reformatting; this is deliberately
-   * "as-is" per the feature's whole point. */
+  /** Fires codegen's own file content every time it writes a new version —
+   * left otherwise untouched (no reformatting, no locator/action rewriting;
+   * that's deliberately "as-is" per the feature's whole point) with exactly
+   * one addition: the Chrome/Edge browser-channel launch override selected
+   * in Settings (see injectBrowserChannelConfig below), so code saved
+   * straight from this panel never falls back to Playwright's own bundled
+   * Chromium, whose download is blocked by company policy. */
   readonly onCodeUpdate = this.codeEmitter.event;
 
   private readonly logEmitter = new vscode.EventEmitter<string>();
@@ -76,6 +83,9 @@ export class CodegenManager implements vscode.Disposable {
     const ext = language === 'java' ? 'java' : 'py';
     this.outputFile = path.join(os.tmpdir(), `softplay-codegen-${Date.now()}.${ext}`);
     this.lastFileContent = '';
+    this.lastEmittedContent = '';
+    this.currentLanguage = language;
+    this.currentChannel = browserChannel;
 
     // Empty/blank stays genuinely absent from argv — codegen opens with a
     // blank page and the user types into its own address bar, exactly like
@@ -169,7 +179,11 @@ export class CodegenManager implements vscode.Disposable {
       const content = await fs.promises.readFile(this.outputFile, 'utf8');
       if (content !== this.lastFileContent) {
         this.lastFileContent = content;
-        this.codeEmitter.fire(content);
+        const augmented = injectBrowserChannelConfig(content, this.currentLanguage, this.currentChannel);
+        if (augmented !== this.lastEmittedContent) {
+          this.lastEmittedContent = augmented;
+          this.codeEmitter.fire(augmented);
+        }
       }
     } catch {
       // Not written yet (no action recorded in the codegen browser so far),
@@ -222,4 +236,84 @@ function normalizeUrl(input: string): string {
 
 function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * `playwright codegen --channel=...` only steers the browser codegen itself
+ * launches to record the flow — verified against Playwright's own
+ * `python-pytest`/`java-junit` templates, neither one writes a channel or
+ * any other launch config into the *generated test file* on its own (the
+ * fixture-based `pytest-playwright` plugin and the `@UsePlaywright` JUnit
+ * extension both default to downloading and launching Playwright's own
+ * bundled Chromium unless the test file itself says otherwise). Since a
+ * Chromium/Firefox/WebKit download is blocked by company policy here, this
+ * stitches in the idiomatic override for whichever browser is selected in
+ * Settings so the saved file runs against the real, already-installed
+ * Chrome/Edge with no download ever attempted — same override the AI
+ * refinement prompt is told to reproduce (see prompts/senior-qe-instructions.md).
+ */
+function injectBrowserChannelConfig(content: string, language: Language, browserChannel: BrowserChannel): string {
+  const channel = browserChannel === 'edge' ? 'msedge' : 'chrome';
+  return language === 'java' ? injectJavaChannel(content, channel) : injectPythonChannel(content, channel);
+}
+
+function injectPythonChannel(content: string, channel: string): string {
+  const lines = content.split('\n');
+  let importEnd = 0;
+  while (importEnd < lines.length && (/^\s*(import |from )/.test(lines[importEnd]) || lines[importEnd].trim() === '')) {
+    importEnd++;
+  }
+  const fixtureBlock = [
+    'import pytest',
+    '',
+    '',
+    '@pytest.fixture(scope="session")',
+    'def browser_type_launch_args(browser_type_launch_args):',
+    '    # Use the real, already-installed system browser channel selected in',
+    '    # softPlay Settings instead of Playwright\'s own bundled Chromium —',
+    '    # a Chromium/Firefox/WebKit download is blocked by company policy.',
+    `    return {**browser_type_launch_args, "channel": "${channel}"}`,
+    ''
+  ];
+  const hasPytestImport = lines.slice(0, importEnd).some((l) => /^\s*import pytest\s*$/.test(l));
+  const block = hasPytestImport ? fixtureBlock.slice(2) : fixtureBlock;
+  const result = [...lines.slice(0, importEnd), ...block, ...lines.slice(importEnd)];
+  return result.join('\n');
+}
+
+function injectJavaChannel(content: string, channel: string): string {
+  const classMatch = content.match(/public\s+class\s+(\w+)/);
+  if (!classMatch) {
+    return content;
+  }
+  const className = classMatch[1];
+  let result = content;
+
+  if (!result.includes('import com.microsoft.playwright.junit.Options;')) {
+    result = result.replace(
+      /import com\.microsoft\.playwright\.junit\.UsePlaywright;/,
+      `import com.microsoft.playwright.junit.UsePlaywright;\nimport com.microsoft.playwright.junit.Options;\nimport com.microsoft.playwright.junit.OptionsFactory;`
+    );
+  }
+
+  // Point @UsePlaywright at this class's own Options factory (added below)
+  // instead of the bare, browser-default-launching form codegen emits.
+  result = result.replace('@UsePlaywright', `@UsePlaywright(${className}.SoftPlayOptions.class)`);
+
+  const optionsClass =
+    `\n  /** Launches the real, already-installed system browser channel selected\n` +
+    `   * in softPlay Settings instead of Playwright's own bundled Chromium —\n` +
+    `   * a Chromium/Firefox/WebKit download is blocked by company policy. */\n` +
+    `  public static class SoftPlayOptions implements OptionsFactory {\n` +
+    `    @Override\n` +
+    `    public Options getOptions() {\n` +
+    `      return new Options().setLaunchOptions(new com.microsoft.playwright.BrowserType.LaunchOptions().setChannel("${channel}"));\n` +
+    `    }\n` +
+    `  }\n`;
+
+  const lastBraceIndex = result.lastIndexOf('}');
+  if (lastBraceIndex === -1) {
+    return result;
+  }
+  return result.slice(0, lastBraceIndex) + optionsClass + result.slice(lastBraceIndex);
 }

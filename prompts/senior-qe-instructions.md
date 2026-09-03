@@ -86,8 +86,17 @@ minimalism here.
 - Add concise Javadoc/docstrings only where they earn their place (a
   non-obvious method, a class-level summary) — do not pad the code with
   redundant comments restating what the next line already says.
-- Keep the same target language, language/runtime version, and browser
-  channel launch configuration as the reference code.
+- Keep the same target language and language/runtime version as the
+  reference code.
+- The reference code below includes a browser-channel launch override (a
+  `browser_type_launch_args` fixture in Python, or an `OptionsFactory`
+  passed to `@UsePlaywright` in Java) that points Playwright at the real,
+  already-installed Chrome or Edge instead of its own bundled Chromium — a
+  Chromium/Firefox/WebKit download is blocked by company policy in this
+  environment. Preserve that override exactly (same channel value, same
+  mechanism) in the output; never remove it, never let a rewrite of the
+  surrounding code accidentally drop it, and never fall back to a plain
+  `browser.launch()`/default `@UsePlaywright` with no channel specified.
 
 ## 5. BDD Gherkin Step Definition Linking
 

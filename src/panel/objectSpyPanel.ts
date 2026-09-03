@@ -457,6 +457,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     const prompt = buildLlmPrompt(
       settings.language,
       settings.languageVersion,
+      settings.browserChannel,
       builtIn,
       instructions,
       playwrightCode,
@@ -823,6 +824,7 @@ function languageVersionGuidance(language: 'java' | 'python', version: string): 
 function buildLlmPrompt(
   language: 'java' | 'python',
   languageVersion: string,
+  browserChannel: 'chrome' | 'edge',
   builtInInstructions: string,
   instructions: { path: string; content: string }[],
   playwrightCode: string,
@@ -831,6 +833,7 @@ function buildLlmPrompt(
 ): string {
   const languageName = language === 'java' ? 'Java (JUnit 5, Playwright for Java)' : 'Python (pytest, Playwright for Python)';
   const versionGuidance = languageVersionGuidance(language, languageVersion);
+  const channel = browserChannel === 'edge' ? 'msedge' : 'chrome';
 
   const parts: string[] = [
     `You are an expert Playwright test automation engineer working on an enterprise QA codebase.`,
@@ -847,6 +850,19 @@ function buildLlmPrompt(
   if (builtInInstructions) {
     parts.push(`\n## Mandatory refinement standard — apply every part of this\n${builtInInstructions}`);
   }
+
+  parts.push(
+    `\n## Browser channel requirement (non-negotiable)\n` +
+      `The user selected **${browserChannel === 'edge' ? 'Microsoft Edge' : 'Google Chrome'}** ` +
+      `(Playwright channel \`"${channel}"\`) in softPlay Settings. A Chromium/Firefox/WebKit download ` +
+      `is blocked by company policy in this environment, so the output must launch that real, ` +
+      `already-installed browser and must never trigger — or leave a code path that could trigger — ` +
+      `a Playwright browser download. The reference code below already carries this override ` +
+      `(a \`browser_type_launch_args\` pytest fixture for Python, or an \`OptionsFactory\` passed to ` +
+      `\`@UsePlaywright\` for Java); keep it in the output exactly as-is, with \`channel="${channel}"\` ` +
+      `(Python) / \`.setChannel("${channel}")\` (Java) unchanged, even as you restructure everything ` +
+      `else around it.`
+  );
 
   if (instructions.length) {
     parts.push(
