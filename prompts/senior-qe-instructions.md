@@ -83,6 +83,12 @@ minimalism here.
   reference code exactly (fluent methods returning the page object, a
   separate test class/function composing them in order, the same class and
   method names) — you are refining it, not redesigning its architecture.
+  **Exception:** if the prompt includes a "Restricted scope" / partial-step-
+  selection notice, this applies only to the subset of the reference code
+  that corresponds to a checked step — every other action in the reference
+  code (including one a checked step might otherwise seem to depend on) is
+  out of scope and must be left out entirely, never folded in as "setup" to
+  preserve the flow. That notice always wins over this bullet.
 - Add concise Javadoc/docstrings only where they earn their place (a
   non-obvious method, a class-level summary) — do not pad the code with
   redundant comments restating what the next line already says.

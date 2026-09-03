@@ -19,13 +19,26 @@
  */
 
 export interface GherkinStep {
-  /** The literal keyword as written: Given/When/Then/And/But/* (never
-   * resolved to its "effective" keyword here — see the prompt instructions
-   * in prompts/senior-qe-instructions.md for how the LLM resolves that). */
+  /** The literal keyword as written: Given/When/Then/And/But/*. */
   keyword: string;
   text: string;
   dataTable?: string[][];
   docString?: string;
+  /** `keyword` resolved to Given/When/Then per Gherkin's own rule (an
+   * And/But/* step takes the keyword of the nearest preceding Given/When/Then
+   * above it in the same block, or Given if it's the first step) — computed
+   * once here rather than left to the LLM, so a step still reads
+   * standalone-correct in buildFilteredScenarioText() below even when steps
+   * around it were deselected and never make it into the LLM prompt. Mirrors
+   * the resolution rule in prompts/senior-qe-instructions.md section 5. */
+  effectiveKeyword: 'Given' | 'When' | 'Then';
+  /** Exact original text of this step — its keyword line plus any data
+   * table/doc string lines that follow it, verbatim (leading indentation
+   * included, trailing blank lines trimmed). Used by featureFilePanel.ts to
+   * render one syntax-highlighted, individually checkable line per step, and
+   * by buildFilteredScenarioText() to reconstruct a scenario down to only
+   * the steps the user selected without hand-reformatting anything. */
+  rawText: string;
 }
 
 export interface GherkinExamples {
@@ -33,6 +46,9 @@ export interface GherkinExamples {
   tags: string[];
   header: string[];
   rows: string[][];
+  /** Exact original text of this Examples block (its own tag line(s), the
+   * `Examples:` line, and its full table), verbatim. */
+  rawText: string;
 }
 
 export interface GherkinScenario {
@@ -152,6 +168,7 @@ export function parseFeatureFile(content: string): GherkinFeature {
         i++;
         continue;
       }
+      const exBlockStart = i;
       let exampleTags: string[] = [];
       if (t.startsWith('@')) {
         // Tags directly before "Examples:" belong to that Examples block —
@@ -185,7 +202,8 @@ export function parseFeatureFile(content: string): GherkinFeature {
       const table = consumeTable(lines, i);
       i = table.nextIndex;
       if (table.rows.length > 0) {
-        examples.push({ name: exampleName, tags: exampleTags, header: table.rows[0], rows: table.rows.slice(1) });
+        const exRawText = lines.slice(exBlockStart, i).join('\n').trimEnd();
+        examples.push({ name: exampleName, tags: exampleTags, header: table.rows[0], rows: table.rows.slice(1), rawText: exRawText });
       }
     }
 
@@ -217,6 +235,10 @@ function isBlockStart(trimmed: string): boolean {
  * Returns the index just past the last consumed line. */
 function consumeSteps(lines: string[], start: number, out: GherkinStep[]): number {
   let i = start;
+  // Resets to Given at the start of every block (Background steps and each
+  // Scenario/Scenario Outline's steps resolve And/But/* independently) —
+  // matches the "or Given if it's the very first step" rule.
+  let lastEffective: 'Given' | 'When' | 'Then' = 'Given';
   while (i < lines.length) {
     const trimmed = lines[i].trim();
     if (!trimmed || trimmed.startsWith('#')) {
@@ -227,6 +249,7 @@ function consumeSteps(lines: string[], start: number, out: GherkinStep[]): numbe
     if (!stepMatch) {
       break;
     }
+    const stepStart = i;
     const keyword = stepMatch;
     const text = trimmed.slice(stepMatch.length).trim();
     i++;
@@ -250,9 +273,60 @@ function consumeSteps(lines: string[], start: number, out: GherkinStep[]): numbe
       docString = docLines.join('\n');
     }
 
-    out.push({ keyword, text, dataTable, docString });
+    const effectiveKeyword: 'Given' | 'When' | 'Then' =
+      keyword === 'Given' || keyword === 'When' || keyword === 'Then' ? keyword : lastEffective;
+    lastEffective = effectiveKeyword;
+    const rawText = lines.slice(stepStart, i).join('\n').trimEnd();
+
+    out.push({ keyword, text, dataTable, docString, effectiveKeyword, rawText });
   }
   return i;
+}
+
+/**
+ * Reconstructs a scenario down to only the steps the user checked in
+ * featureFilePanel.ts's per-step checkboxes — the exact text handed to the
+ * LLM as the "linked Gherkin scenario" (see objectSpyPanel.ts's
+ * buildLlmPrompt) so a deselected step never becomes part of the analysis
+ * context or gets a step definition generated for it, even though its
+ * matching Playwright Codegen action may still be sitting in the reference
+ * code above it. Every retained step is printed with its *effective*
+ * keyword (Given/When/Then — see GherkinStep.effectiveKeyword) rather than
+ * its literal one, so a kept "And"/"But"/"*" still reads correctly on its
+ * own even when the Given/When/Then it originally followed was deselected
+ * and is no longer present in this reconstruction to give it context.
+ */
+export function buildFilteredScenarioText(scenario: GherkinScenario, selectedStepIndices: readonly number[]): string {
+  const selected = new Set(selectedStepIndices);
+  const header: string[] = [];
+  if (scenario.tags.length) {
+    header.push(`@${scenario.tags.join(' @')}`);
+  }
+  header.push(`${scenario.kind}: ${scenario.name}`);
+
+  const stepBlocks = scenario.steps
+    .map((step, index) => (selected.has(index) ? withEffectiveKeyword(step) : undefined))
+    .filter((block): block is string => block !== undefined);
+
+  const exampleBlocks = scenario.examples.map((ex) => ex.rawText);
+
+  return [header.join('\n'), ...stepBlocks, ...exampleBlocks].filter((block) => block.trim().length > 0).join('\n\n');
+}
+
+/** Swaps a step's rawText's first line to print its resolved
+ * Given/When/Then instead of a literal And/But/* whose meaning depended on
+ * context that may no longer be present — see buildFilteredScenarioText().
+ * Left untouched when the literal keyword already IS the effective one. */
+function withEffectiveKeyword(step: GherkinStep): string {
+  if (step.keyword === step.effectiveKeyword) {
+    return step.rawText;
+  }
+  const newlineIndex = step.rawText.indexOf('\n');
+  const firstLine = newlineIndex === -1 ? step.rawText : step.rawText.slice(0, newlineIndex);
+  const rest = newlineIndex === -1 ? '' : step.rawText.slice(newlineIndex);
+  const indent = firstLine.match(/^\s*/)?.[0] ?? '';
+  const afterKeyword = firstLine.slice(indent.length + step.keyword.length);
+  return `${indent}${step.effectiveKeyword}${afterKeyword}${rest}`;
 }
 
 function consumeTable(lines: string[], start: number): { rows: string[][]; nextIndex: number } {

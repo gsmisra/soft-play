@@ -9,8 +9,12 @@ type InboundMessage =
 /**
  * The Settings menu — deliberately a separate webview panel from the main
  * UI, not a section bolted onto it. Controls the browser channel, the
- * generated code's language/runtime version, and GitHub Copilot linking,
- * all persisted via SettingsStore (context.globalState).
+ * generated code's language/runtime version, and which GitHub Copilot chat
+ * model to use, all persisted via SettingsStore (context.globalState). The
+ * "Link with GitHub Copilot LLM" on/off switch itself lives in the Control
+ * Panel (objectSpyPanel.ts) instead — this panel's model picker/status
+ * still reacts to that setting via the same shared SettingsStore, it just
+ * doesn't own the switch anymore.
  */
 export class SettingsPanel implements vscode.Disposable {
   private panel: vscode.WebviewPanel | undefined;
@@ -129,54 +133,6 @@ export class SettingsPanel implements vscode.Disposable {
       font-size: 0.85em;
       color: var(--vscode-descriptionForeground);
     }
-    /* Toggle switch, matching common editor styling — a styled checkbox.
-       Fixed: the track used to fall back to --vscode-dropdown-border, which
-       is unset (fully transparent) in several built-in themes — the switch
-       was there and functioned, but its "off" state was nearly invisible.
-       --vscode-checkbox-border is the variable VS Code itself defines
-       specifically for checkbox-like controls and always has real contrast,
-       so both states stay visible in every theme. */
-    .switch {
-      position: relative;
-      display: inline-block;
-      width: 36px;
-      height: 20px;
-      flex: none;
-    }
-    .switch input {
-      position: absolute;
-      inset: 0;
-      opacity: 0;
-      margin: 0;
-      cursor: pointer;
-      z-index: 1;
-    }
-    .switch-track {
-      position: absolute;
-      inset: 0;
-      background: var(--vscode-checkbox-border, #767676);
-      border: 1px solid var(--vscode-contrastBorder, transparent);
-      border-radius: 10px;
-      transition: background 0.15s;
-      pointer-events: none;
-    }
-    .switch-track::before {
-      content: '';
-      position: absolute;
-      width: 14px;
-      height: 14px;
-      left: 3px;
-      top: 2px;
-      background: #fff;
-      border-radius: 50%;
-      transition: transform 0.15s;
-    }
-    .switch input:checked + .switch-track {
-      background: var(--vscode-button-background, #0b6bb8);
-    }
-    .switch input:checked + .switch-track::before {
-      transform: translateX(16px);
-    }
     #copilotModelRow, #copilotStatus { display: none; }
     #copilotModelRow.visible, #copilotStatus.visible { display: flex; }
     .status-text {
@@ -218,16 +174,10 @@ export class SettingsPanel implements vscode.Disposable {
   </div>
 
   <h2>AI Assist</h2>
-  <div class="field">
-    <label>
-      Link with GitHub Copilot LLM
-      <span class="hint">Lets Generate Code send its output and captured locators to a Copilot chat model for a second, AI-generated version to compare side by side. Requires the GitHub Copilot Chat extension.</span>
-    </label>
-    <label class="switch">
-      <input type="checkbox" id="copilotEnabled" />
-      <span class="switch-track"></span>
-    </label>
-  </div>
+  <p class="note" style="margin-top: 0;">
+    The "Link with GitHub Copilot LLM" switch now lives in the Control Panel (softPlay's main sidebar view) — turn it
+    on there first. Once it's on, pick which model to use below.
+  </p>
   <div class="field" id="copilotModelRow">
     <label>Model</label>
     <select id="copilotModel"></select>
@@ -243,7 +193,6 @@ export class SettingsPanel implements vscode.Disposable {
       const vscode = acquireVsCodeApi();
       const languageSelect = document.getElementById('language');
       const versionSelect = document.getElementById('languageVersion');
-      const copilotEnabled = document.getElementById('copilotEnabled');
       const copilotModelRow = document.getElementById('copilotModelRow');
       const copilotModelSelect = document.getElementById('copilotModel');
       const copilotStatus = document.getElementById('copilotStatus');
@@ -265,17 +214,6 @@ export class SettingsPanel implements vscode.Disposable {
 
       versionSelect.addEventListener('change', () => {
         vscode.postMessage({ type: 'update', payload: { languageVersion: versionSelect.value } });
-      });
-
-      copilotEnabled.addEventListener('change', () => {
-        const enabled = copilotEnabled.checked;
-        copilotModelRow.classList.toggle('visible', enabled);
-        copilotStatus.classList.toggle('visible', enabled);
-        vscode.postMessage({ type: 'update', payload: { copilotEnabled: enabled } });
-        if (enabled) {
-          copilotStatusText.textContent = 'Looking for GitHub Copilot chat models…';
-          vscode.postMessage({ type: 'listModels' });
-        }
       });
 
       copilotModelSelect.addEventListener('change', () => {
@@ -339,7 +277,6 @@ export class SettingsPanel implements vscode.Disposable {
         languageSelect.value = settings.language;
         renderVersions(settings.language, settings.languageVersion);
 
-        copilotEnabled.checked = settings.copilotEnabled;
         pendingModelId = settings.copilotModelId;
         copilotModelRow.classList.toggle('visible', settings.copilotEnabled);
         copilotStatus.classList.toggle('visible', settings.copilotEnabled);

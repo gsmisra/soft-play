@@ -21,7 +21,8 @@ type InboundMessage =
   | { type: 'reopenFeatureFile' }
   | { type: 'unlinkFeatureFile' }
   | { type: 'selectedInstructionFiles'; payload: string[] }
-  | { type: 'currentCodeReport'; payload: string };
+  | { type: 'currentCodeReport'; payload: string }
+  | { type: 'setCopilotEnabled'; payload: boolean };
 
 /** Status shape the webview renders (status pill, Start/Stop enablement) —
  * translated 1:1 from CodegenStatus (see mapCodegenStatus()). Kept as its
@@ -52,10 +53,11 @@ export const OBJECT_SPY_VIEW_ID = 'objectSpy.mainView';
  * been removed entirely as redundant, per an explicit decision to keep
  * native `codegen` as the only path). "Generated Code" streams codegen's
  * output file verbatim; "Link Feature File" ties a Cucumber Gherkin
- * scenario to it (see featureFilePanel.ts); "Custom md files" sends
- * whatever's checked, plus the bundled senior-QE instructions, to GitHub
- * Copilot for an AI-refined second version, automatically as code is
- * recorded.
+ * scenario to it (see featureFilePanel.ts). AI processing (Copilot) never
+ * starts on its own — recording code, checking a "Custom md files" box, or
+ * typing in the chat composer only ever stages context; nothing is sent to
+ * the LLM until the user explicitly clicks "Start AI Processing", which
+ * bundles all of it together (see runLlmRefinement()/sendToLlm()).
  */
 export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
@@ -86,29 +88,29 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   // Workspace-relative paths of whichever "Custom md files" (.github/*.md)
   // checkboxes are currently checked in the webview — kept in sync via the
   // 'selectedInstructionFiles' message every time the user (un)checks one.
-  // There is no more "Send to Copilot"/"Send Anyway" button: checking a box
-  // IS the action now, folded automatically into the next AI refinement
-  // (manual chat send or the automatic post-recording pipeline) rather than
-  // requiring a separate explicit send.
+  // Purely staged context: checking a box does NOT itself trigger anything
+  // — it's folded in the next time "Start AI Processing" is clicked.
   private selectedInstructionFiles: string[] = [];
   // Resolves a pending requestCurrentPlaywrightCode() call (see
   // "Regenerate AI Code") once the sidebar webview reports its Playwright
   // Code editor's live content back via 'currentCodeReport'.
   private pendingCodeRequestResolve: ((code: string) => void) | undefined;
 
-  // Tracks the in-flight LLM refinement request, if any (manual chat send
-  // or the automatic pipeline), so a second one starting (or the view
-  // closing) can cancel the previous one cleanly instead of leaving two
-  // streams writing into the same AI code view.
+  // Tracks the in-flight LLM refinement request, if any, so a second one
+  // starting (or the view closing) can cancel the previous one cleanly
+  // instead of leaving two streams writing into the same AI code view.
   private llmCancellation: vscode.CancellationTokenSource | undefined;
 
-  // Debounces the automatic "refine with AI" pipeline (try/catch, logging,
-  // explicit waits, zero hardcoded values — see prompts/senior-qe-instructions.md)
-  // that fires whenever codegen's output file updates and Copilot is
-  // linked, so a burst of updates doesn't fire one Copilot request per
-  // update — only once activity settles for a moment.
-  private autoRefineTimer: ReturnType<typeof setTimeout> | undefined;
-  private static readonly AUTO_REFINE_DEBOUNCE_MS = 1500;
+  // How long to wait for the FIRST chunk of a Copilot response before
+  // giving up — this is "thinking" time on a genuinely large prompt (the
+  // bundled senior-QE instructions, browser-channel/class-name requirements,
+  // any linked Gherkin scenario, plus the reference Playwright code, easily
+  // several thousand tokens), not a stalled connection, so it gets a
+  // generous allowance. Once streaming has actually started, a real stall
+  // is far more likely than the model still "thinking" between tokens, so
+  // INTER_CHUNK_TIMEOUT_MS stays much tighter.
+  private static readonly FIRST_CHUNK_TIMEOUT_MS = 240_000;
+  private static readonly INTER_CHUNK_TIMEOUT_MS = 90_000;
 
   // Diagnostic/informational messages (codegen launch, etc.) go to a proper
   // VS Code Output channel rather than a panel of their own — frees up the
@@ -124,7 +126,8 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
         this.linkedScenario = scenario;
         this.postLinkedScenario();
         this.outputChannel.appendLine(
-          `Linked ${scenario.scenarioKind} "${scenario.scenarioName}" from ${scenario.featureFilePath}`
+          `Linked ${scenario.scenarioKind} "${scenario.scenarioName}" from ${scenario.featureFilePath} — ` +
+            `${scenario.selectedStepCount}/${scenario.totalStepCount} step(s) selected for AI analysis.`
         );
       },
       (filePath) => {
@@ -202,9 +205,6 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   }
 
   dispose(): void {
-    if (this.autoRefineTimer) {
-      clearTimeout(this.autoRefineTimer);
-    }
     this.llmCancellation?.cancel();
     this.llmCancellation?.dispose();
     this.codegenManager.dispose();
@@ -268,16 +268,23 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
         this.postLinkedScenario();
         break;
       case 'selectedInstructionFiles':
+        // Purely staged context — checking a box does not itself trigger
+        // anything; it's read fresh the next time "Start AI Processing" is
+        // clicked (sendToLlm()/runLlmRefinement()).
         this.selectedInstructionFiles = message.payload;
-        // Checking a box is itself the action now (no more "Send to
-        // Copilot" button) — if there's already some generated code, give
-        // immediate feedback rather than waiting for the next codegen
-        // output update to trigger a refinement.
-        this.scheduleAutoRefine();
         break;
       case 'currentCodeReport':
         this.pendingCodeRequestResolve?.(message.payload);
         this.pendingCodeRequestResolve = undefined;
+        break;
+      case 'setCopilotEnabled':
+        // The "Link with GitHub Copilot LLM" toggle now lives in the
+        // Control Panel (moved from the Settings menu — same setting,
+        // same SettingsStore, same behavior, just a different webview
+        // hosting the switch). Settings' own webview still owns the model
+        // picker/status and stays in sync via SettingsStore.onChange like
+        // any other settings change, regardless of which panel made it.
+        await this.settingsStore.update({ copilotEnabled: message.payload });
         break;
     }
   }
@@ -308,20 +315,16 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   }
 
   // -----------------------------------------------------------------------
-  // "Custom md files" (GitHub Copilot AI Assist). There is no "Send to
-  // Copilot"/"Send Anyway" button. Checking a .github/*.md file's checkbox
-  // is itself the action (sendToLlm() and autoRefineWithLlm() both read
-  // this.selectedInstructionFiles, kept in sync via the
-  // 'selectedInstructionFiles' message on every checkbox change) — it's
-  // folded automatically into the next refinement, either the chat
-  // composer's manual send (free-text instructions + whatever's checked) or
-  // the automatic pipeline debounced after codegen's output file updates
-  // (scheduleAutoRefine() -> autoRefineWithLlm()). Either way it only ever
-  // fires while "Link with GitHub Copilot LLM" is on and a model is picked
-  // in Settings, which is itself an explicit, one-time opt-in; VS Code's
-  // Language Model API separately shows its own one-time consent dialog the
-  // first time this extension calls sendRequest, regardless of which path
-  // triggers it.
+  // "Custom md files" (GitHub Copilot AI Assist). Checking a .github/*.md
+  // file's checkbox is purely staged context — this.selectedInstructionFiles
+  // is kept in sync via the 'selectedInstructionFiles' message on every
+  // checkbox change, but nothing is sent to the LLM until the user
+  // explicitly clicks "Start AI Processing" (sendToLlm(), below), same as
+  // the chat composer's free-text box. This only ever fires while "Link
+  // with GitHub Copilot LLM" is on and a model is picked in Settings, which
+  // is itself an explicit, one-time opt-in; VS Code's Language Model API
+  // separately shows its own one-time consent dialog the first time this
+  // extension calls sendRequest.
   // -----------------------------------------------------------------------
 
   private async refreshPromptFiles(): Promise<void> {
@@ -330,73 +333,40 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     this.webview?.postMessage({ type: 'promptFiles', payload: relPaths });
   }
 
+  /** "Start AI Processing" (Control Panel) — the ONLY way AI processing
+   * starts. Bundles everything currently staged: the Playwright Code
+   * editor's live content (`code`, including manual edits), whichever
+   * Custom md files are checked (`selectedFiles`), anything typed into the
+   * chat box (`customInstructions`), the linked scenario/selected steps
+   * (this.linkedScenario, read inside runLlmRefinement()), and the current
+   * Settings (browser channel, language, language version — also read
+   * inside runLlmRefinement()). Recording code, checking a box, or typing
+   * in chat never triggers this on their own. */
   private async sendToLlm(selectedFiles: string[], playwrightCode: string, customInstructions: string): Promise<void> {
     const instructions = await this.readInstructionFiles(selectedFiles);
     await this.runLlmRefinement(instructions, playwrightCode, customInstructions.trim());
-  }
-
-  /**
-   * Fires automatically whenever codegen's output file updates, with no
-   * button click required — the try/catch + logger + explicit-wait +
-   * zero-hardcoded-values refinement (prompts/senior-qe-instructions.md) is
-   * meant to keep the AI Generated Code panel current as the recording
-   * grows, not require the user to remember to re-click Send. Debounced
-   * (see AUTO_REFINE_DEBOUNCE_MS) so a burst of updates fires one Copilot
-   * request once things settle, not one per update. Silently does nothing
-   * if Copilot isn't linked.
-   */
-  private scheduleAutoRefine(): void {
-    const settings = this.settingsStore.get();
-    if (!settings.copilotEnabled || !settings.copilotModelId) {
-      return;
-    }
-    if (this.autoRefineTimer) {
-      clearTimeout(this.autoRefineTimer);
-    }
-    this.autoRefineTimer = setTimeout(() => {
-      this.autoRefineTimer = undefined;
-      void this.autoRefineWithLlm();
-    }, ObjectSpyPanel.AUTO_REFINE_DEBOUNCE_MS);
-  }
-
-  private async autoRefineWithLlm(): Promise<void> {
-    const settings = this.settingsStore.get();
-    if (!settings.copilotEnabled || !settings.copilotModelId) {
-      return;
-    }
-    const playwrightCode = this.nativeGeneratedCode;
-    if (!playwrightCode.trim()) {
-      return; // nothing recorded yet -- nothing to refine
-    }
-    // Uses whichever "Custom md files" checkboxes are currently checked in
-    // the webview (see the 'selectedInstructionFiles' handler) — there is
-    // no more "Send to Copilot" button to separately opt files in, so
-    // automatic refinement respects exactly what's checked, same as a
-    // manual chat send does. Proceeds fine with none checked too — the
-    // bundled senior-QE instructions (readSeniorQeInstructions()) always
-    // apply regardless.
-    const instructions = await this.readInstructionFiles(this.selectedInstructionFiles);
-    await this.runLlmRefinement(instructions, playwrightCode, '');
   }
 
   /** "Regenerate AI Code" (AI Generated Code panel) — re-runs the same
    * refinement with everything read fresh at click time: the Playwright
    * Code editor's live content (including manual edits — see
    * requestCurrentPlaywrightCode()), Settings (language/version/browser),
-   * the linked Gherkin scenario, and the checked Custom md files. Unlike
-   * autoRefineWithLlm(), this always runs regardless of debounce/timing —
-   * it's an explicit, on-demand click, not a reaction to a codegen update. */
+   * the linked Gherkin scenario, and the checked Custom md files. An
+   * explicit, on-demand click, same as "Start AI Processing" — just from
+   * the AI Generated Code panel instead of the Control Panel, and without
+   * whatever's currently sitting in the chat box (that's specific to
+   * "Start AI Processing"). */
   private async regenerateAiCode(): Promise<void> {
     const settings = this.settingsStore.get();
     if (!settings.copilotEnabled || !settings.copilotModelId) {
-      this.postLlmError('Enable "Link with GitHub Copilot LLM" and pick a model in Settings first.');
+      this.postLlmError('Enable "Link with GitHub Copilot LLM" (Control Panel) and pick a model in Settings first.');
       return;
     }
+    // Empty/no-op guard (and its warning alert) lives centrally in
+    // runLlmRefinement() — reached below regardless of whether anything was
+    // actually recorded, so every trigger path (this button, manual chat
+    // send, the automatic pipeline) enforces it the same way.
     const playwrightCode = await this.requestCurrentPlaywrightCode();
-    if (!playwrightCode.trim()) {
-      this.postLlmError('Nothing recorded yet — start Playwright codegen and record something first.');
-      return;
-    }
     const instructions = await this.readInstructionFiles(this.selectedInstructionFiles);
     await this.runLlmRefinement(instructions, playwrightCode, '');
   }
@@ -442,7 +412,15 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   ): Promise<void> {
     const settings = this.settingsStore.get();
     if (!settings.copilotEnabled || !settings.copilotModelId) {
-      this.postLlmError('Enable "Link with GitHub Copilot LLM" and pick a model in Settings first.');
+      this.postLlmError('Enable "Link with GitHub Copilot LLM" (Control Panel) and pick a model in Settings first.');
+      return;
+    }
+    // Single choke point for every path into this method (manual chat send,
+    // the automatic post-recording pipeline, and "Regenerate AI Code") —
+    // never send an empty/no-op context to the LLM, and tell the user why
+    // instead of silently doing nothing.
+    if (!playwrightCode.trim()) {
+      void vscode.window.showWarningMessage('Record some user action first before triggering AI analysis');
       return;
     }
 
@@ -462,7 +440,8 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
       instructions,
       playwrightCode,
       customInstructions,
-      this.linkedScenario
+      this.linkedScenario,
+      this.currentSuggestedBaseName()
     );
     // Diagnostic trail for exactly the question "was X actually sent, and
     // did a response come back?" — check the softPlay Output channel
@@ -479,26 +458,41 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
 
     try {
       let accumulated = '';
+      let receivedAnyChunk = false;
       // No case observed so far where the Language Model API's own promise
       // neither resolves nor rejects — but nothing in its contract
       // *guarantees* that either, and a silent hang there would otherwise
       // show "(generating…)" forever with zero feedback. This timeout is a
       // last-resort safety net, not a substitute for whatever the real
-      // per-request latency should be; it fires (and reports an explicit,
-      // actionable error) only if NOTHING — not even the first
-      // chunk — arrives within two minutes; each chunk received resets it.
+      // per-request latency should be — see FIRST_CHUNK_TIMEOUT_MS /
+      // INTER_CHUNK_TIMEOUT_MS for why the two phases get different
+      // allowances; each chunk received re-arms it for the next one.
       let timeoutHandle: ReturnType<typeof setTimeout>;
       const armTimeout = (onTimeout: () => void) => {
         clearTimeout(timeoutHandle);
-        timeoutHandle = setTimeout(onTimeout, 120_000);
+        const ms = receivedAnyChunk ? ObjectSpyPanel.INTER_CHUNK_TIMEOUT_MS : ObjectSpyPanel.FIRST_CHUNK_TIMEOUT_MS;
+        timeoutHandle = setTimeout(onTimeout, ms);
       };
       await new Promise<void>((resolve, reject) => {
-        armTimeout(() => reject(new Error('Copilot did not respond within 2 minutes — no chunk of the response arrived in that window.')));
+        armTimeout(() =>
+          reject(
+            new Error(
+              `Copilot did not respond within ${ObjectSpyPanel.FIRST_CHUNK_TIMEOUT_MS / 60_000} minutes — no chunk of the response arrived in that window. A large prompt (a big linked scenario, a lot of reference code, or several Custom md files checked) can genuinely take a while — try again, or trim what's being sent.`
+            )
+          )
+        );
         sendPrompt(
           settings.copilotModelId,
           prompt,
           (chunk) => {
-            armTimeout(() => reject(new Error('Copilot stopped responding mid-stream — no further chunk arrived within 2 minutes.')));
+            receivedAnyChunk = true;
+            armTimeout(() =>
+              reject(
+                new Error(
+                  `Copilot stopped responding mid-stream — no further chunk arrived within ${ObjectSpyPanel.INTER_CHUNK_TIMEOUT_MS / 1000} seconds.`
+                )
+              )
+            );
             accumulated += chunk;
             this.postLlmChunk(chunk);
           },
@@ -523,6 +517,19 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
         this.postLlmError(message);
       }
     }
+  }
+
+  /** The class name (Java) / module base name (Python) the linked
+   * scenario's own name derives into (see testNaming.ts) for whichever
+   * language is currently selected — undefined when no scenario is linked,
+   * in which case callers fall back to their own generic default. */
+  private currentSuggestedBaseName(): string | undefined {
+    if (!this.linkedScenario) {
+      return undefined;
+    }
+    return this.settingsStore.get().language === 'java'
+      ? this.linkedScenario.javaClassName
+      : this.linkedScenario.pythonModuleName;
   }
 
   private async readInstructionFiles(relPaths: string[]): Promise<{ path: string; content: string }[]> {
@@ -551,7 +558,13 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     this.webview?.postMessage({
       type: 'linkedScenario',
       payload: this.linkedScenario
-        ? { featureName: this.linkedScenario.featureName, scenarioName: this.linkedScenario.scenarioName, scenarioKind: this.linkedScenario.scenarioKind }
+        ? {
+            featureName: this.linkedScenario.featureName,
+            scenarioName: this.linkedScenario.scenarioName,
+            scenarioKind: this.linkedScenario.scenarioKind,
+            selectedStepCount: this.linkedScenario.selectedStepCount,
+            totalStepCount: this.linkedScenario.totalStepCount
+          }
         : null
     });
   }
@@ -569,6 +582,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   // panel isn't open.
   private postLlmStart(): void {
     this.aiCodePanel.setLanguage(this.settingsStore.get().language);
+    this.aiCodePanel.setSuggestedFileName(this.currentSuggestedBaseName());
     this.aiCodePanel.startGenerating();
     this.webview?.postMessage({ type: 'aiStatus', payload: { state: 'generating' } });
   }
@@ -593,16 +607,15 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
 
   /** `isNewRecording` flags a genuinely new codegen output update just
    * arrived (vs. a refresh triggered by, say, a Settings change) — the
-   * panel uses it to flash the "New code recorded." indicator. */
+   * panel uses it to flash the "New code recorded." indicator. Purely
+   * informational: a new recording never triggers AI processing on its
+   * own — only "Start AI Processing" does. */
   private postCode(isNewRecording = false): void {
     const settings = this.settingsStore.get();
     this.webview?.postMessage({
       type: 'code',
       payload: { code: this.nativeGeneratedCode, language: settings.language, languageVersion: settings.languageVersion, isNewRecording }
     });
-    if (isNewRecording) {
-      this.scheduleAutoRefine();
-    }
   }
 
   private getVersion(): string {
@@ -655,6 +668,16 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
         <button id="killAllBtn" class="btn btn-danger" title="Close the codegen browser this extension launched and clear the generated code">Kill All Browsers</button>
         <span id="statusPill" class="status-pill status-idle">Idle</span>
       </div>
+      <div class="toolbar-row copilot-toggle-row">
+        <span class="copilot-toggle-label">
+          Link with GitHub Copilot LLM
+          <span class="hint">Lets Generate Code send its output and captured locators to a Copilot chat model for a second, AI-generated version to compare side by side. Requires the GitHub Copilot Chat extension. Pick a model in Settings.</span>
+        </span>
+        <label class="switch">
+          <input type="checkbox" id="copilotEnabledToggle" />
+          <span class="switch-track"></span>
+        </label>
+      </div>
     </div>
   </details>
 
@@ -681,13 +704,14 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
               <div id="chatMessages" class="chat-messages"></div>
               <div class="chat-input-row">
                 <textarea id="chatInput" class="chat-input" rows="1" placeholder="Add any details for the AI to follow…"></textarea>
-                <button id="chatSendBtn" class="chat-send-btn" title="Send" aria-label="Send">➤</button>
+                <button id="chatSendBtn" class="chat-send-btn" title="Add to the request — click 'Start AI Processing' below to actually send" aria-label="Add">➤</button>
               </div>
             </div>
           </div>
         </details>
         <div class="toolbar-row ai-open-row">
-          <button id="openAiCodeBtn" class="btn">Open AI Generated Code</button>
+          <button id="startAiProcessingBtn" class="btn btn-silver" title="Send the current Playwright Code, Settings (browser/language/version), linked scenario or selected steps, checked Custom md files, and anything in the chat box below to the LLM for AI code generation">Start AI Processing</button>
+          <button id="openAiCodeBtn" class="btn btn-silver">Open AI Generated Code</button>
           <span id="aiStatusLabel" class="llm-status"></span>
         </div>
       </div>
@@ -829,11 +853,13 @@ function buildLlmPrompt(
   instructions: { path: string; content: string }[],
   playwrightCode: string,
   customInstructions: string,
-  linkedScenario?: LinkedScenario
+  linkedScenario?: LinkedScenario,
+  suggestedClassName?: string
 ): string {
   const languageName = language === 'java' ? 'Java (JUnit 5, Playwright for Java)' : 'Python (pytest, Playwright for Python)';
   const versionGuidance = languageVersionGuidance(language, languageVersion);
   const channel = browserChannel === 'edge' ? 'msedge' : 'chrome';
+  const isPartialSelection = !!linkedScenario && linkedScenario.selectedStepCount < linkedScenario.totalStepCount;
 
   const parts: string[] = [
     `You are an expert Playwright test automation engineer working on an enterprise QA codebase.`,
@@ -846,6 +872,43 @@ function buildLlmPrompt(
       `exact locators it already found — do not invent new ones or guess at different ones. ` +
       `Respond with ONLY the final code in a single fenced code block and no other commentary.`
   ];
+
+  if (isPartialSelection && linkedScenario) {
+    // Stated up front (primacy) AND repeated as the very last instruction
+    // right before the reference code (recency) — see the "Linked Gherkin"
+    // section below. A single mention easily loses to the mandatory
+    // refinement standard's own "preserve the reference code's structure"
+    // and "produce a complete, runnable file" instructions, which — left
+    // unqualified — pull the model toward reproducing the FULL recorded
+    // flow (hooks, Background, every step) regardless of what was checked.
+    //
+    // A partial selection means the user explicitly wants a BARE SNIPPET —
+    // not the usual complete, standalone-runnable file — to paste into
+    // their own existing framework. This is a deliberate, explicit product
+    // decision (not the default "Generated Code" behavior, which still
+    // produces a full file when every step is checked) — see the parallel
+    // list this overrides, below.
+    parts.push(
+      `\n## ⚠ Restricted scope for this request — OVERRIDES the mandatory refinement standard below wherever they conflict\n` +
+        `The user checked only ${linkedScenario.selectedStepCount} of ${linkedScenario.totalStepCount} steps in the ` +
+        `linked scenario (see the "Linked Gherkin" section near the end of this prompt) and wants a bare, minimal ` +
+        `snippet — NOT a complete runnable file. Output ONLY:\n` +
+        `  (a) one BDD step definition method for each checked step, and\n` +
+        `  (b) whatever page-object method(s) that step definition directly calls — the specific Playwright ` +
+        `action(s)/assertion(s) it needs in order to do its job — reusing the reference code's own locators/actions ` +
+        `for exactly those methods.\n` +
+        `Do NOT include, even though the mandatory refinement standard below would otherwise call for them: a class ` +
+        `declaration/wrapper around the output, \`@Before\`/\`@After\` hooks or any other browser/Playwright launch ` +
+        `or teardown code, a step definition for the Background, imports/constants/locators for anything unrelated ` +
+        `to (a)/(b) above, or a step/page-object method for any step the user left unchecked — even indirectly (e.g. ` +
+        `a prior navigation/click a checked step might seem to depend on to reach the right page state; leave it ` +
+        `out and let the checked step stand on its own, incomplete as a standalone runnable test). The refinement ` +
+        `standard's STYLE rules still apply to whatever you DO output (naming, explicit visible+enabled waits before ` +
+        `each interaction, real logging, zero hardcoded values, try/catch around the method itself) — only its ` +
+        `single-complete-file, hook, and Background-related instructions are overridden here. Necessary imports for ` +
+        `exactly what you output are expected; nothing beyond that.`
+    );
+  }
 
   if (builtInInstructions) {
     parts.push(`\n## Mandatory refinement standard — apply every part of this\n${builtInInstructions}`);
@@ -877,6 +940,18 @@ function buildLlmPrompt(
     parts.push(`\n## Additional instructions from the user — follow these too\n${customInstructions}`);
   }
 
+  // Placed BEFORE the "Linked Gherkin" section on purpose: the Gherkin
+  // section (and its exclusion instruction, when only some steps are
+  // checked) is deliberately the LAST thing the model reads before it has
+  // to start generating — a model weighs what it read most recently more
+  // heavily, and this reference block is large enough that ending on it
+  // instead would drown out the exclusion instruction (observed in
+  // practice: unchecked steps' click/navigation actions got folded back in
+  // as "setup" even when no step definition was generated for them).
+  parts.push(
+    `\n## Reference Playwright-generated code (real, unmodified \`codegen\` output) — match this structure and style, reuse its locators as-is\n\`\`\`${language}\n${playwrightCode}\n\`\`\``
+  );
+
   // "Link Feature file" (Control Panel) — a Gherkin Scenario/Scenario
   // Outline the user picked in the Feature File view. Present only when
   // one is currently linked; see the "BDD Gherkin Step Definition Linking"
@@ -887,23 +962,54 @@ function buildLlmPrompt(
   // ever captures the first fenced block in the response, so asking for a
   // separate step-definitions file here would silently lose it.
   if (linkedScenario) {
-    const gherkinBlock = [linkedScenario.backgroundRawText, linkedScenario.rawText].filter(Boolean).join('\n\n');
+    // Background is never individually selectable and a bare snippet must
+    // not get a step definition for it either (see the "Restricted scope"
+    // override above) — leaving it out of the Gherkin block entirely is a
+    // stronger guarantee than relying on the model to notice it wasn't a
+    // "checked" step.
+    const gherkinBlock = isPartialSelection
+      ? linkedScenario.rawText
+      : [linkedScenario.backgroundRawText, linkedScenario.rawText].filter(Boolean).join('\n\n');
     parts.push(
       `\n## Linked Gherkin ${linkedScenario.scenarioKind} — "${linkedScenario.scenarioName}" (from ${linkedScenario.featureName})`,
-      `The user has linked this exact Cucumber ${linkedScenario.scenarioKind} to the recorded flow above via ` +
-        `"Link Feature file". Every Given/When/Then/And/But/* line below must get its own properly linked BDD ` +
-        `step definition per the "BDD Gherkin Step Definition Linking" instructions — do not just append the ` +
-        `Gherkin as a comment. Produce exactly ONE file, in exactly ONE fenced code block: the refined page ` +
-        `object/test code AND its BDD step definitions together, correctly organized and imported as idiomatic ` +
-        `for the target language's real BDD framework (Cucumber-JVM for Java, pytest-bdd for Python) — never ` +
-        `split this into multiple files or code blocks.`,
+      `The user has linked this Cucumber ${linkedScenario.scenarioKind} to the recorded flow above via ` +
+        `"Link Feature file"` +
+        (isPartialSelection
+          ? `, and explicitly checked only ${linkedScenario.selectedStepCount} of its ${linkedScenario.totalStepCount} ` +
+            `steps to include — the Gherkin block below is ONLY those checked steps (Background deliberately left ` +
+            `out; do not generate a step definition for it). **This is a hard scope boundary, restated from earlier ` +
+            `in this prompt:** the reference Playwright-generated code above is the full recorded flow — treat it ` +
+            `purely as a pool of already-correct locators/actions to match against the steps below. Use ONLY ` +
+            `whichever of its actions correspond to a step below; silently drop every other action, INCLUDING one a ` +
+            `checked step might seem to need in order to reach the right page state (e.g. a prior navigation/click ` +
+            `that belongs to a step the user did NOT check) — do not reintroduce it as a "setup" helper, a hook, or ` +
+            `anything else. Output ONLY a step definition method per checked step below plus the page-object ` +
+            `method(s) each one directly calls — no class wrapper, no hooks, nothing for an unchecked step, even ` +
+            `indirectly, per the "Restricted scope" section above.`
+          : `. Every Given/When/Then/And/But/* line below must get its own properly linked BDD step definition per ` +
+            `the "BDD Gherkin Step Definition Linking" instructions — do not just append the Gherkin as a comment. ` +
+            `Produce exactly ONE file, in exactly ONE fenced code block: the refined page object/test code AND its ` +
+            `BDD step definitions together, correctly organized and imported as idiomatic for the target language's ` +
+            `real BDD framework (Cucumber-JVM for Java, pytest-bdd for Python) — never split this into multiple ` +
+            `files or code blocks.`),
       `\`\`\`gherkin\n${gherkinBlock}\n\`\`\``
     );
+    // A snippet has no class of its own to name — this requirement only
+    // makes sense for the full-file case.
+    if (suggestedClassName && !isPartialSelection) {
+      parts.push(
+        `\n## Required ${language === 'java' ? 'class' : 'module/file'} name (non-negotiable)\n` +
+          (language === 'java'
+            ? `Name the primary public class exactly \`${suggestedClassName}\` (and its file \`${suggestedClassName}.java\`) — ` +
+              `derived from this scenario's own name, so it stays recognizable as the test for THIS scenario. ` +
+              `Any nested/step-definition class may be named sensibly relative to it, but the primary class itself ` +
+              `must use exactly this name, unchanged.`
+            : `Name the module (test file, without the \`.py\` extension) exactly \`${suggestedClassName}\` and its ` +
+              `top-level test function(s) accordingly (e.g. \`test_${suggestedClassName}\` or similarly derived) — ` +
+              `derived from this scenario's own name, so it stays recognizable as the test for THIS scenario.`)
+      );
+    }
   }
-
-  parts.push(
-    `\n## Reference Playwright-generated code (real, unmodified \`codegen\` output) — match this structure and style, reuse its locators as-is\n\`\`\`${language}\n${playwrightCode}\n\`\`\``
-  );
 
   return parts.join('\n');
 }

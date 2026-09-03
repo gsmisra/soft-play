@@ -157,6 +157,62 @@ body.vscode-light .code-editor-wrap {
   background: var(--vscode-button-hoverBackground);
 }
 
+/* "Link with GitHub Copilot LLM" toggle row — moved here from the Settings
+   panel (settingsPanel.ts still owns the model picker/status that appear
+   once this is on). Styling matches that panel's own switch exactly, for
+   visual consistency between the two. */
+.copilot-toggle-row .copilot-toggle-label {
+  flex: 1;
+  min-width: 0;
+}
+.copilot-toggle-row .hint {
+  display: block;
+  font-size: 0.8em;
+  color: var(--vscode-descriptionForeground);
+  margin-top: 2px;
+}
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  flex: none;
+}
+.switch input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  margin: 0;
+  cursor: pointer;
+  z-index: 1;
+}
+.switch-track {
+  position: absolute;
+  inset: 0;
+  background: var(--vscode-checkbox-border, #767676);
+  border: 1px solid var(--vscode-contrastBorder, transparent);
+  border-radius: 10px;
+  transition: background 0.15s;
+  pointer-events: none;
+}
+.switch-track::before {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  left: 3px;
+  top: 2px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.15s;
+}
+.switch input:checked + .switch-track {
+  background: var(--vscode-button-background, #0b6bb8);
+}
+.switch input:checked + .switch-track::before {
+  transform: translateX(16px);
+}
+
 .linked-scenario-badge {
   display: inline-flex;
   align-items: center;
@@ -207,6 +263,18 @@ body.vscode-light .code-editor-wrap {
   background: #a1260d;
   color: #fff;
   box-shadow: none;
+}
+
+/* "Start AI Processing" / "Open AI Generated Code" — silver/dark-grey with
+   white text, deliberately distinct from the button palette elsewhere (not
+   tied to a VS Code theme variable) so this pair always reads the same
+   regardless of theme, matching the explicit ask. */
+.btn-silver {
+  background: #5a5d63;
+  color: #ffffff;
+}
+.btn-silver:hover:not(:disabled) {
+  background: #6c6f76;
 }
 
 #urlInput {

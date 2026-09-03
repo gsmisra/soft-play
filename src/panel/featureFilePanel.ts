@@ -1,12 +1,16 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { parseFeatureFile, GherkinFeature, GherkinScenario } from '../bdd/gherkinParser';
+import { parseFeatureFile, buildFilteredScenarioText, GherkinFeature, GherkinScenario } from '../bdd/gherkinParser';
 import { highlightGherkin, escapeHtml } from '../bdd/gherkinHighlight';
+import { deriveJavaClassName, derivePythonModuleName } from '../bdd/testNaming';
 
 /** What gets handed back to ObjectSpyPanel when the user picks a scenario —
  * everything the LLM prompt (and the Control Panel's "linked scenario"
- * badge) need, with `rawText` being the exact, unmodified Gherkin text
- * that's actually sent to the LLM. */
+ * badge) need. `rawText` is the scenario reconstructed down to only the
+ * steps the user left checked in the per-step checkboxes (see
+ * gherkinParser.ts's buildFilteredScenarioText) — the exact Gherkin text
+ * that's actually sent to the LLM, never the full scenario when some steps
+ * were deselected. */
 export interface LinkedScenario {
   featureName: string;
   featureFilePath: string;
@@ -15,11 +19,28 @@ export interface LinkedScenario {
   rawText: string;
   /** The feature's Background steps, if any — prepended when building the
    * LLM prompt, since a scenario's steps alone don't include setup that
-   * Background implies but every scenario in the file still runs. */
+   * Background implies but every scenario in the file still runs. Always
+   * sent in full — Background steps aren't individually selectable, only a
+   * scenario's own steps are. */
   backgroundRawText: string | undefined;
+  /** How many of the scenario's own steps the user left checked / how many
+   * it has in total — surfaced in the Control Panel badge and the Output
+   * channel log so it's always visible when the AI context is a subset. */
+  selectedStepCount: number;
+  totalStepCount: number;
+  /** Scenario name transformed into a valid class name — PascalCase for
+   * Java (`SearchTermOpenFirstResult`), snake_case for Python
+   * (`search_term_open_first_result`) — see testNaming.ts. Resolved to
+   * both up front since which one applies depends on the target language in
+   * Settings, which can change after this scenario was linked. */
+  javaClassName: string;
+  pythonModuleName: string;
 }
 
-type InboundMessage = { type: 'select'; payload: { index: number } } | { type: 'close' } | { type: 'browseNew' };
+type InboundMessage =
+  | { type: 'select'; payload: { index: number; selectedStepIndices: number[] } }
+  | { type: 'close' }
+  | { type: 'browseNew' };
 
 /**
  * "Link Feature file" (Control Panel) — browses to a .feature file, parses
@@ -161,13 +182,24 @@ export class FeatureFilePanel implements vscode.Disposable {
       if (!scenario) {
         return;
       }
+      // Defensive against a stale/tampered payload (e.g. an out-of-range or
+      // duplicated index): clamp to this scenario's actual step indices
+      // rather than trusting the webview's list verbatim.
+      const validIndices = new Set(scenario.steps.map((_, idx) => idx));
+      const selectedStepIndices = Array.from(new Set(message.payload.selectedStepIndices)).filter((idx) =>
+        validIndices.has(idx)
+      );
       this.onScenarioSelected({
         featureName: this.feature.name,
         featureFilePath: this.filePath,
         scenarioName: scenario.name,
         scenarioKind: scenario.kind,
-        rawText: scenario.rawText,
-        backgroundRawText: this.feature.background?.rawText
+        rawText: buildFilteredScenarioText(scenario, selectedStepIndices),
+        backgroundRawText: this.feature.background?.rawText,
+        selectedStepCount: selectedStepIndices.length,
+        totalStepCount: scenario.steps.length,
+        javaClassName: deriveJavaClassName(scenario.name),
+        pythonModuleName: derivePythonModuleName(scenario.name)
       });
     }
   }
@@ -183,6 +215,42 @@ export class FeatureFilePanel implements vscode.Disposable {
     }
     this.panel.webview.html = getHtml(this.feature, this.filePath);
   }
+}
+
+/**
+ * Renders one scenario's tags/name line, then every one of its own steps as
+ * its own syntax-highlighted, individually checkable row (checked by
+ * default — "By default all steps will be selected, but user can deselect
+ * any step"), then its Examples table(s) if it's a Scenario Outline
+ * (not individually selectable — an Outline's steps only make sense
+ * together with the placeholders their Examples table fills in). Each
+ * checkbox's `data-step` is that step's index into `scenario.steps`,
+ * exactly what buildFilteredScenarioText() (gherkinParser.ts) expects back
+ * from the 'select' message's `selectedStepIndices`.
+ */
+function renderScenarioBody(scenario: GherkinScenario, scenarioIndex: number): string {
+  const headerLines: string[] = [];
+  if (scenario.tags.length) {
+    headerLines.push(`@${scenario.tags.join(' @')}`);
+  }
+  headerLines.push(`${scenario.kind}: ${scenario.name}`);
+  const headerHtml = `<pre class="gk-scenario-headline">${highlightGherkin(headerLines.join('\n'))}</pre>`;
+
+  const stepsHtml = scenario.steps
+    .map(
+      (step, stepIndex) => `
+      <label class="gk-step-row">
+        <input type="checkbox" class="gk-step-check" data-scenario="${scenarioIndex}" data-step="${stepIndex}" checked />
+        <pre class="gk-step-line">${highlightGherkin(step.rawText)}</pre>
+      </label>`
+    )
+    .join('\n');
+
+  const examplesHtml = scenario.examples
+    .map((ex) => `<pre class="gk-examples-block">${highlightGherkin(ex.rawText)}</pre>`)
+    .join('\n');
+
+  return `<div class="gk-text gk-scenario-body">${headerHtml}${stepsHtml}${examplesHtml}</div>`;
 }
 
 function getHtml(feature: GherkinFeature, filePath: string): string {
@@ -209,7 +277,7 @@ function getHtml(feature: GherkinFeature, filePath: string): string {
           <span class="gk-block-label">${escapeHtml(scenario.kind)}: ${escapeHtml(scenario.name)}</span>
           ${meta}
         </label>
-        <pre class="gk-text">${highlightGherkin(scenario.rawText)}</pre>
+        ${renderScenarioBody(scenario, index)}
       </div>`;
     })
     .join('\n');
@@ -326,6 +394,28 @@ function getHtml(feature: GherkinFeature, filePath: string): string {
     .gk-pipe { color: #808080; }
     .gk-table-cell { color: #ffe600; font-weight: 600; }
     .gk-docstring-fence { color: #808080; }
+    .gk-scenario-headline, .gk-step-line, .gk-examples-block {
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      font: inherit;
+      white-space: pre;
+    }
+    .gk-scenario-headline { margin-bottom: 4px; }
+    .gk-examples-block { margin-top: 6px; }
+    .gk-step-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 2px 0;
+      cursor: pointer;
+    }
+    .gk-step-check {
+      flex: none;
+      margin: 0.35em 0 0;
+      cursor: pointer;
+    }
+    .gk-step-line { flex: 1; overflow-x: auto; }
   </style>
 </head>
 <body>
@@ -350,16 +440,41 @@ function getHtml(feature: GherkinFeature, filePath: string): string {
       const browseNewBtn = document.getElementById('browseNewBtn');
       let selectedIndex = null;
 
+      // "Use Selected Scenario" needs both a scenario picked AND at least
+      // one of its steps still checked — sending zero steps would mean
+      // nothing at all gets analyzed or generated, which is never useful.
+      function updateUseButtonState() {
+        if (selectedIndex === null) {
+          useBtn.disabled = true;
+          return;
+        }
+        const anyStepChecked =
+          document.querySelector('.gk-step-check[data-scenario="' + selectedIndex + '"]:checked') !== null;
+        useBtn.disabled = !anyStepChecked;
+      }
+
       document.querySelectorAll('input[name="scenarioPick"]').forEach((radio) => {
         radio.addEventListener('change', () => {
           selectedIndex = Number(radio.value);
-          useBtn.disabled = false;
+          updateUseButtonState();
         });
+      });
+
+      // Each checkbox lives inside a <label class="gk-step-row">, so
+      // clicking anywhere on the row (not just the small checkbox itself)
+      // toggles it via the browser's normal label behavior — no extra
+      // wiring needed for that, just react to the resulting 'change'.
+      document.querySelectorAll('.gk-step-check').forEach((checkbox) => {
+        checkbox.addEventListener('change', updateUseButtonState);
       });
 
       useBtn.addEventListener('click', () => {
         if (selectedIndex === null) return;
-        vscode.postMessage({ type: 'select', payload: { index: selectedIndex } });
+        const selectedStepIndices = Array.from(
+          document.querySelectorAll('.gk-step-check[data-scenario="' + selectedIndex + '"]:checked')
+        ).map((cb) => Number(cb.getAttribute('data-step')));
+        if (selectedStepIndices.length === 0) return;
+        vscode.postMessage({ type: 'select', payload: { index: selectedIndex, selectedStepIndices } });
       });
 
       closeBtn.addEventListener('click', () => {

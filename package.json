@@ -2,7 +2,7 @@
   "name": "object-spy-playwright",
   "displayName": "softPlay",
   "description": "Drive Playwright's own real codegen tool from a VS Code sidebar, link a Cucumber Gherkin scenario to what it records, and get an AI-refined, enterprise-grade Java or Python test — with proper waits, logging, and BDD step definitions — via GitHub Copilot.",
-  "version": "0.1.29",
+  "version": "0.1.32",
   "publisher": "local-dev",
   "private": true,
   "icon": "media/icon.png",

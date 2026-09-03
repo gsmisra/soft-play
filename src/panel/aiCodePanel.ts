@@ -25,6 +25,12 @@ export class AiCodePanel implements vscode.Disposable {
   private code = '';
   private status: 'idle' | 'generating' | 'error' = 'idle';
   private errorMessage = '';
+  // Base name (no extension) for the Save dialog's default filename —
+  // derived from the linked scenario's name (see testNaming.ts) when one is
+  // linked, so a saved file reads as "the test for THIS scenario" rather
+  // than a generic GeneratedTestAI/test_recorded_flow_ai. undefined falls
+  // back to that generic default (no scenario linked).
+  private suggestedBaseName: string | undefined;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -72,6 +78,12 @@ export class AiCodePanel implements vscode.Disposable {
     this.panel?.webview.postMessage({ type: 'setLanguage', payload: language });
   }
 
+  /** See `suggestedBaseName` — call with `undefined` when nothing's linked
+   * (or the link was removed) to fall back to the generic default name. */
+  setSuggestedFileName(baseName: string | undefined): void {
+    this.suggestedBaseName = baseName;
+  }
+
   startGenerating(): void {
     this.status = 'generating';
     this.code = '';
@@ -99,7 +111,8 @@ export class AiCodePanel implements vscode.Disposable {
   private async handleMessage(message: InboundMessage): Promise<void> {
     if (message.type === 'saveCode') {
       const isJava = this.language === 'java';
-      const defaultName = isJava ? 'GeneratedTestAI.java' : 'test_recorded_flow_ai.py';
+      const base = this.suggestedBaseName ?? (isJava ? 'GeneratedTestAI' : 'test_recorded_flow_ai');
+      const defaultName = `${base}.${isJava ? 'java' : 'py'}`;
       const uri = await vscode.window.showSaveDialog({
         defaultUri: vscode.Uri.file(defaultName),
         filters: isJava ? { Java: ['java'] } : { Python: ['py'] }

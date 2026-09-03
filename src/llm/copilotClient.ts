@@ -48,7 +48,7 @@ export class CopilotUnavailableError extends Error {
  * own gate; callers here (the chat composer's manual send, and the
  * automatic post-recording refinement pipeline — see objectSpyPanel.ts's
  * runLlmRefinement()) both only ever fire while the user has explicitly
- * turned on "Link with GitHub Copilot LLM" and picked a model in Settings.
+ * turned on "Link with GitHub Copilot LLM" (Control Panel) and picked a model in Settings.
  */
 export async function sendPrompt(
   modelId: string,

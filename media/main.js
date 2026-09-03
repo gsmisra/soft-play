@@ -29,9 +29,11 @@
   const chatInput = document.getElementById('chatInput');
   const chatSendBtn = document.getElementById('chatSendBtn');
   const refreshPromptFilesBtn = document.getElementById('refreshPromptFilesBtn');
+  const startAiProcessingBtn = document.getElementById('startAiProcessingBtn');
   const openAiCodeBtn = document.getElementById('openAiCodeBtn');
   const aiStatusLabel = document.getElementById('aiStatusLabel');
   const aiGeneratingBanner = document.getElementById('aiGeneratingBanner');
+  const copilotEnabledToggle = document.getElementById('copilotEnabledToggle');
 
   let killConfirmPending = false;
   let killConfirmTimer = null;
@@ -114,32 +116,29 @@
     return Array.from(promptFilesList.querySelectorAll('input[type="checkbox"]:checked')).map((cb) => cb.value);
   }
 
-  function dispatchToLlm(customInstructions) {
-    vscode.postMessage({
-      type: 'sendToLlm',
-      payload: { selectedFiles: selectedPromptFiles(), code: playwrightEditor.getValue(), customInstructions }
-    });
-  }
+  // AI processing never starts on its own — checking a .md file below,
+  // typing in the chat composer, or a fresh Playwright recording all only
+  // ever stage context. Nothing reaches the LLM until "Start AI Processing"
+  // is explicitly clicked (see below), which bundles: the current
+  // Playwright Code, whichever .md files are checked (selectedPromptFiles()
+  // below, read fresh at click time), the linked scenario/selected steps
+  // and current Settings (both read on the extension-host side), and
+  // everything staged in the chat composer.
+  let stagedInstructions = [];
 
-  // No "Send to Copilot"/"Send Anyway" buttons: checking a .md file below is
-  // itself the action -- the extension host tracks the current checkbox
-  // selection (see the 'change' listener in renderPromptFiles()) and folds
-  // it into every AI refinement automatically, manual or the automatic
-  // post-recording pipeline, so there's nothing left to separately "send".
-  // The chat composer below is still a genuinely separate, deliberate
-  // action: free-text instructions typed there and sent explicitly.
-
-  // Messenger-style composer: Enter sends, Shift+Enter inserts a newline,
-  // and the textarea grows with content up to a few lines (see main.css).
-  function sendChatMessage() {
+  // Messenger-style composer: Enter/the ➤ button stages the message as a
+  // bubble (does NOT send anything to the LLM), Shift+Enter inserts a
+  // newline, and the textarea grows with content up to a few lines (see
+  // main.css).
+  function stageChatMessage() {
     const text = chatInput.value.trim();
     if (!text) {
       return;
     }
     appendChatBubble(text);
+    stagedInstructions.push(text);
     chatInput.value = '';
     autoResizeChatInput();
-    dispatchToLlm(text);
   }
 
   function appendChatBubble(text) {
@@ -155,15 +154,38 @@
     chatInput.style.height = Math.min(chatInput.scrollHeight, 90) + 'px';
   }
 
-  chatSendBtn.addEventListener('click', sendChatMessage);
+  chatSendBtn.addEventListener('click', stageChatMessage);
 
   chatInput.addEventListener('input', autoResizeChatInput);
 
   chatInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      sendChatMessage();
+      stageChatMessage();
     }
+  });
+
+  // "Start AI Processing" — the ONLY trigger for AI code generation.
+  // Bundles every staged chat bubble plus whatever's still sitting unsent
+  // in the input box (so the user doesn't have to remember to hit ➤ first)
+  // into one customInstructions string, along with the current Playwright
+  // Code and checked .md files; the extension host adds Settings and the
+  // linked scenario/selected steps on its own. Stages are cleared after
+  // sending so the next run starts fresh.
+  startAiProcessingBtn.addEventListener('click', () => {
+    const unsent = chatInput.value.trim();
+    const allInstructions = unsent ? [...stagedInstructions, unsent] : stagedInstructions;
+    const customInstructions = allInstructions.join('\n\n');
+
+    vscode.postMessage({
+      type: 'sendToLlm',
+      payload: { selectedFiles: selectedPromptFiles(), code: playwrightEditor.getValue(), customInstructions }
+    });
+
+    stagedInstructions = [];
+    chatMessages.innerHTML = '';
+    chatInput.value = '';
+    autoResizeChatInput();
   });
 
   // Kill All Browsers needs a confirmation, but VS Code webviews don't
@@ -197,6 +219,13 @@
     vscode.postMessage({ type: 'linkFeatureFile' });
   });
 
+  // "Link with GitHub Copilot LLM" — moved here from the Settings menu; the
+  // Settings panel still owns the model picker, kept in sync via the shared
+  // SettingsStore regardless of which webview flips this switch.
+  copilotEnabledToggle.addEventListener('change', () => {
+    vscode.postMessage({ type: 'setCopilotEnabled', payload: copilotEnabledToggle.checked });
+  });
+
   unlinkScenarioBtn.addEventListener('click', (e) => {
     e.stopPropagation(); // don't also trigger the badge's own reopen click below
     vscode.postMessage({ type: 'unlinkFeatureFile' });
@@ -215,7 +244,16 @@
       return;
     }
     linkedScenarioBadge.hidden = false;
-    linkedScenarioText.textContent = scenario.featureName + ' › ' + scenario.scenarioKind + ': ' + scenario.scenarioName;
+    // Only worth calling out when it's actually a subset — a full
+    // selection is the common case and needs no extra noise in the badge.
+    var stepSuffix =
+      typeof scenario.selectedStepCount === 'number' &&
+      typeof scenario.totalStepCount === 'number' &&
+      scenario.selectedStepCount < scenario.totalStepCount
+        ? ' (' + scenario.selectedStepCount + '/' + scenario.totalStepCount + ' steps)'
+        : '';
+    linkedScenarioText.textContent =
+      scenario.featureName + ' › ' + scenario.scenarioKind + ': ' + scenario.scenarioName + stepSuffix;
     linkedScenarioText.title = linkedScenarioText.textContent + ' — click to pick a different scenario from this file';
   }
 
@@ -296,6 +334,11 @@
   });
 
   function applyCopilotEnabledState(enabled) {
+    // Setting .checked programmatically does not fire 'change', so this
+    // never loops back into the listener above — safe to always sync it
+    // here, whether this update originated from this toggle, the Settings
+    // panel, or extension activation.
+    copilotEnabledToggle.checked = enabled;
     // aiAssistSection nests chatComposer, so hiding it here already hides
     // the composer too -- no need to separately toggle chatComposer.hidden.
     aiAssistSection.hidden = !enabled;
@@ -304,6 +347,7 @@
     } else {
       chatMessages.innerHTML = '';
       chatInput.value = '';
+      stagedInstructions = [];
     }
   }
 
