@@ -69,14 +69,16 @@ confirmed to work with zero downloads and zero leftover processes.
 
 Streams `codegen`'s output file's content verbatim as it updates — this is
 deliberately raw, unmodified `codegen` output, not a custom template. It's a
-real, editable, syntax-highlighted code editor; a manual edit is never
-silently overwritten by the next update — a small banner offers **Refresh**
-instead. **Save Code** writes the current editor contents to a file; **Copy
-Code** copies it to the clipboard (falling back to a hidden-textarea copy if
-the browser Clipboard API is unavailable in the webview). A **▾/▸** button
-in its header collapses the panel to just its header, so the **AI Generated
-Code** panel next to it can be viewed at full size without this one still
-taking up space — and vice versa, independently.
+real, editable code editor: syntax-highlighted, with line numbers down its
+left margin, Tab/Shift+Tab indenting the current line or selection, and all
+the native text-editing behavior a `<textarea>` already gives for free
+(cut/copy/paste, undo/redo, find-in-page via the browser). A manual edit is
+never silently overwritten by the next update — a small banner offers
+**Refresh** instead. **Save Code** writes the current editor contents to a
+file; **Copy Code** copies it to the clipboard (falling back to a
+hidden-textarea copy if the browser Clipboard API is unavailable in the
+webview). A **▾/▸** button in its header collapses the panel down to just
+its header.
 
 ## Link Feature File (BDD)
 
@@ -171,8 +173,8 @@ subscription/extension version exposes are what show up.
 1. Open **Settings**, turn on **Link with GitHub Copilot LLM**, and pick a
    model from the dropdown (populated live from Copilot — "No Copilot chat
    models found" means Copilot Chat isn't installed or you're not signed
-   in). This reveals a collapsible **Custom md files** section and a second
-   **AI Generated Code** view in the main panel.
+   in). This reveals a collapsible **Custom md files** section and an **Open
+   AI Generated Code** button in the main panel.
 2. Expand **Custom md files**. It auto-detects every `.github/**/*.md` file
    in your workspace (instructions, skills, custom prompts). **There is no
    separate send button** — checking a file's checkbox is itself the
@@ -187,14 +189,33 @@ subscription/extension version exposes are what show up.
    something and press Enter (or click ➤) to trigger an immediate
    refinement request combining that text, whatever `.md` files are
    currently checked, the linked Gherkin scenario (if any), and the current
-   **Generated Code** view's content as a style reference. The response
-   streams into the **AI Generated Code** view live as it arrives.
-4. Both code views are independently editable, syntax-highlighted, and
-   independently scrollable (side by side when the panel is wide enough —
-   drag the Activity Bar view wider, or drag it into the editor area, to see
-   both at once; they stack on a narrow sidebar). **Save Code** on either
-   view works the same way. Each also has its own ▾/▸ collapse toggle in
-   its header — collapse one to view the other at its full, unchanged size.
+   **Generated Code** view's content as a style reference. Sending a message
+   this way also opens the AI panel automatically, since asking is a
+   deliberate "show me the result" action.
+4. **AI Generated Code opens as its own full-size panel** — click **Open AI
+   Generated Code** (or send a chat message) to open it beside the sidebar,
+   the same way **Settings** does, rather than sharing cramped sidebar space
+   with the Playwright Code view. It's a real editor with the same
+   line-numbered gutter, syntax highlighting, and Tab-indenting as the
+   Playwright Code view, plus its own **Copy Code**/**Save Code**. The
+   response streams into it live as it arrives. A small status next to
+   **Open AI Generated Code** ("(generating…)"/"Error") keeps you informed
+   even while that panel is closed; opening it (or just leaving it open
+   across requests) always shows the current/latest state. While a request
+   is in flight, the **Generated Code** section also shows a bright-green
+   "Generating AI code…" label with a sliding progress bar, visible even if
+   the AI panel itself is closed.
+5. **Regenerate AI Code** — the AI Generated Code panel has its own
+   **Regenerate AI Code** button that re-runs the same refinement without
+   needing to re-record anything. It re-fetches the Playwright Code editor's
+   *current* content (including any manual edits you've made since the last
+   generation), plus the current Settings (language, language/runtime
+   version, browser), the linked Gherkin scenario, and whichever Custom
+   `.md` files are checked — then sends that fresh combination to the LLM.
+   Use it after switching, say, Python to Java, bumping a language version,
+   editing the Playwright Code by hand, re-recording, or (un)checking
+   instruction files, to get an updated AI Generated Code without leaving
+   the panel.
 
 **Consent:** the first time any extension calls the Language Model API in a
 session, VS Code shows a one-time permission dialog — that's Copilot's own
@@ -279,11 +300,16 @@ away. Look for the softPlay icon and click it to open the sidebar panel.
 The panel is organized into two independently expandable/collapsible
 sections (native `<details>`, click the header to toggle):
 
-- **Control Panel** — Start/Stop, the URL field, Kill All Browsers, and
-  Link Feature File.
-- **Generated Code** — Custom md files (when Copilot is linked) and the
-  code editor(s). The Settings gear lives at the very top of the panel,
-  outside both sections, always reachable.
+- **Control Panel**, top to bottom: **Link Feature File**, the URL field,
+  then **Start**/**Stop**/**Kill All Browsers** together with the status
+  pill.
+- **Generated Code** — Custom md files (when Copilot is linked, with **Open
+  AI Generated Code** underneath it) and the Playwright Code editor.
+
+The Settings gear lives at the very top of the panel, outside both
+sections, always reachable. **AI Generated Code** itself opens as its own
+full-size panel beside the sidebar (like **Settings**) rather than sharing
+sidebar space — see "Custom md files" above.
 
 Diagnostic/informational messages (codegen launch progress, feature-file
 linking) go to a dedicated **softPlay** Output channel — **View → Output**,

@@ -5,6 +5,7 @@ import { CodegenManager, CodegenStatus } from '../browser/codegenManager';
 import { SettingsStore } from '../settings/settingsStore';
 import { SettingsPanel } from './settingsPanel';
 import { FeatureFilePanel, LinkedScenario } from './featureFilePanel';
+import { AiCodePanel } from './aiCodePanel';
 import { CopilotUnavailableError, extractCodeBlock, sendPrompt } from '../llm/copilotClient';
 
 type InboundMessage =
@@ -15,11 +16,12 @@ type InboundMessage =
   | { type: 'killAllBrowsers' }
   | { type: 'refreshPromptFiles' }
   | { type: 'sendToLlm'; payload: { selectedFiles: string[]; code: string; customInstructions: string } }
-  | { type: 'saveLlmCode'; payload: string }
+  | { type: 'openAiCodePanel' }
   | { type: 'linkFeatureFile' }
   | { type: 'reopenFeatureFile' }
   | { type: 'unlinkFeatureFile' }
-  | { type: 'selectedInstructionFiles'; payload: string[] };
+  | { type: 'selectedInstructionFiles'; payload: string[] }
+  | { type: 'currentCodeReport'; payload: string };
 
 /** Status shape the webview renders (status pill, Start/Stop enablement) —
  * translated 1:1 from CodegenStatus (see mapCodegenStatus()). Kept as its
@@ -66,6 +68,11 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
 
   private readonly settingsPanel: SettingsPanel;
   private readonly featureFilePanel: FeatureFilePanel;
+  // "AI Generated Code" — its own full-size editor-area panel, not a
+  // cramped half of the sidebar. ObjectSpyPanel still owns the actual
+  // Copilot request/response lifecycle (runLlmRefinement()); this is purely
+  // where the result gets displayed.
+  private readonly aiCodePanel: AiCodePanel;
   // The Gherkin Scenario/Scenario Outline currently linked via "Link
   // Feature file" (Control Panel) — folded into every LLM refinement
   // request (manual or automatic) so the generated step definitions are
@@ -84,6 +91,10 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   // (manual chat send or the automatic post-recording pipeline) rather than
   // requiring a separate explicit send.
   private selectedInstructionFiles: string[] = [];
+  // Resolves a pending requestCurrentPlaywrightCode() call (see
+  // "Regenerate AI Code") once the sidebar webview reports its Playwright
+  // Code editor's live content back via 'currentCodeReport'.
+  private pendingCodeRequestResolve: ((code: string) => void) | undefined;
 
   // Tracks the in-flight LLM refinement request, if any (manual chat send
   // or the automatic pipeline), so a second one starting (or the view
@@ -107,6 +118,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
 
   constructor(private readonly context: vscode.ExtensionContext, private readonly settingsStore: SettingsStore) {
     this.settingsPanel = new SettingsPanel(context, settingsStore);
+    this.aiCodePanel = new AiCodePanel(context, () => void this.regenerateAiCode());
     this.featureFilePanel = new FeatureFilePanel(
       (scenario) => {
         this.linkedScenario = scenario;
@@ -197,6 +209,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     this.llmCancellation?.dispose();
     this.codegenManager.dispose();
     this.settingsPanel.dispose();
+    this.aiCodePanel.dispose();
     this.featureFilePanel.dispose();
     this.outputChannel.dispose();
     this.disposables.forEach((d) => d.dispose());
@@ -227,10 +240,11 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
         await this.refreshPromptFiles();
         break;
       case 'sendToLlm':
+        this.aiCodePanel.show(); // a manual send is a deliberate "show me the result" action
         await this.sendToLlm(message.payload.selectedFiles, message.payload.code, message.payload.customInstructions);
         break;
-      case 'saveLlmCode':
-        await this.saveLlmCode(message.payload);
+      case 'openAiCodePanel':
+        this.aiCodePanel.show();
         break;
       case 'linkFeatureFile':
         // Once a file has been linked, this button reopens that SAME
@@ -260,6 +274,10 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
         // immediate feedback rather than waiting for the next codegen
         // output update to trigger a refinement.
         this.scheduleAutoRefine();
+        break;
+      case 'currentCodeReport':
+        this.pendingCodeRequestResolve?.(message.payload);
+        this.pendingCodeRequestResolve = undefined;
         break;
     }
   }
@@ -361,6 +379,56 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     await this.runLlmRefinement(instructions, playwrightCode, '');
   }
 
+  /** "Regenerate AI Code" (AI Generated Code panel) — re-runs the same
+   * refinement with everything read fresh at click time: the Playwright
+   * Code editor's live content (including manual edits — see
+   * requestCurrentPlaywrightCode()), Settings (language/version/browser),
+   * the linked Gherkin scenario, and the checked Custom md files. Unlike
+   * autoRefineWithLlm(), this always runs regardless of debounce/timing —
+   * it's an explicit, on-demand click, not a reaction to a codegen update. */
+  private async regenerateAiCode(): Promise<void> {
+    const settings = this.settingsStore.get();
+    if (!settings.copilotEnabled || !settings.copilotModelId) {
+      this.postLlmError('Enable "Link with GitHub Copilot LLM" and pick a model in Settings first.');
+      return;
+    }
+    const playwrightCode = await this.requestCurrentPlaywrightCode();
+    if (!playwrightCode.trim()) {
+      this.postLlmError('Nothing recorded yet — start Playwright codegen and record something first.');
+      return;
+    }
+    const instructions = await this.readInstructionFiles(this.selectedInstructionFiles);
+    await this.runLlmRefinement(instructions, playwrightCode, '');
+  }
+
+  /** Asks the sidebar webview for its Playwright Code editor's CURRENT
+   * content — which may include manual edits the user made, unlike
+   * `this.nativeGeneratedCode` (only ever what `codegen` itself last
+   * wrote) — so "Regenerate AI Code" reflects hand edits the same way a
+   * manual chat send already does. Falls back to `this.nativeGeneratedCode`
+   * if the sidebar view isn't currently resolved (rare — a WebviewView
+   * normally stays alive once first shown) or doesn't answer within a
+   * couple of seconds, so this can never hang the Regenerate button. */
+  private requestCurrentPlaywrightCode(): Promise<string> {
+    if (!this.webview) {
+      return Promise.resolve(this.nativeGeneratedCode);
+    }
+    return new Promise<string>((resolve) => {
+      let settled = false;
+      const finish = (code: string) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        this.pendingCodeRequestResolve = undefined;
+        resolve(code);
+      };
+      this.pendingCodeRequestResolve = finish;
+      this.webview?.postMessage({ type: 'requestCurrentCode' });
+      setTimeout(() => finish(this.nativeGeneratedCode), 3000);
+    });
+  }
+
   /** Shared by the chat composer's manual send and the automatic
    * post-recording refinement — always folds in the bundled senior-QE
    * instructions (try/catch, logger.info/warn/error, explicit visible+enabled
@@ -388,6 +456,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     const builtIn = readSeniorQeInstructions();
     const prompt = buildLlmPrompt(
       settings.language,
+      settings.languageVersion,
       builtIn,
       instructions,
       playwrightCode,
@@ -399,7 +468,8 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     // (View -> Output -> softPlay) rather than needing to guess from a
     // stuck "(generating…)" label with no other visible signal.
     this.outputChannel.appendLine(
-      `Sending to Copilot model "${settings.copilotModelId}": senior-QE instructions ` +
+      `Sending to Copilot model "${settings.copilotModelId}": target ${settings.language} ${settings.languageVersion}, ` +
+        `senior-QE instructions ` +
         `${builtIn ? `(${builtIn.length} chars)` : '(MISSING — prompts/senior-qe-instructions.md failed to load)'}, ` +
         `${instructions.length} project .md file(s), ` +
         `${this.linkedScenario ? `linked scenario "${this.linkedScenario.scenarioName}"` : 'no linked scenario'}, ` +
@@ -472,21 +542,6 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     return results;
   }
 
-  private async saveLlmCode(code: string): Promise<void> {
-    const settings = this.settingsStore.get();
-    const isJava = settings.language === 'java';
-    const defaultName = isJava ? 'GeneratedTestAI.java' : 'test_recorded_flow_ai.py';
-    const uri = await vscode.window.showSaveDialog({
-      defaultUri: vscode.Uri.file(defaultName),
-      filters: isJava ? { Java: ['java'] } : { Python: ['py'] }
-    });
-    if (!uri) {
-      return;
-    }
-    await vscode.workspace.fs.writeFile(uri, Buffer.from(code, 'utf8'));
-    void vscode.window.showInformationMessage(`softPlay: saved ${path.basename(uri.fsPath)}`);
-  }
-
   private postCopilotEnabledState(enabled: boolean): void {
     this.webview?.postMessage({ type: 'copilotEnabledState', payload: enabled });
   }
@@ -507,20 +562,28 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     this.webview?.postMessage({ type: 'featureFileAvailable', payload: available });
   }
 
+  // The actual code streams into AiCodePanel (its own full-size editor-area
+  // panel — see "Open AI Generated Code"), not the sidebar; the sidebar
+  // only gets a lightweight status so there's still feedback when that
+  // panel isn't open.
   private postLlmStart(): void {
-    this.webview?.postMessage({ type: 'llmStart' });
+    this.aiCodePanel.setLanguage(this.settingsStore.get().language);
+    this.aiCodePanel.startGenerating();
+    this.webview?.postMessage({ type: 'aiStatus', payload: { state: 'generating' } });
   }
 
   private postLlmChunk(chunk: string): void {
-    this.webview?.postMessage({ type: 'llmChunk', payload: chunk });
+    this.aiCodePanel.appendChunk(chunk);
   }
 
   private postLlmDone(finalCode: string): void {
-    this.webview?.postMessage({ type: 'llmDone', payload: finalCode });
+    this.aiCodePanel.finish(finalCode);
+    this.webview?.postMessage({ type: 'aiStatus', payload: { state: 'idle' } });
   }
 
   private postLlmError(message: string): void {
-    this.webview?.postMessage({ type: 'llmError', payload: message });
+    this.aiCodePanel.showError(message);
+    this.webview?.postMessage({ type: 'aiStatus', payload: { state: 'error', message } });
   }
 
   private postStatus(status: PanelStatus): void {
@@ -550,6 +613,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   private getHtml(webview: vscode.Webview): string {
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'main.js'));
     const highlightUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'highlight.js'));
+    const codeEditorUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'codeEditor.js'));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'main.css'));
     const nonce = getNonce();
 
@@ -575,29 +639,20 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     <summary>Control Panel</summary>
     <div class="section-body">
       <div class="toolbar-row">
-        <button id="startBtn" class="btn btn-primary">Start</button>
-        <button id="stopBtn" class="btn" disabled>Stop</button>
-        <span id="statusPill" class="status-pill status-idle">Idle</span>
-      </div>
-      <div class="native-mode-note">
-        Start launches Playwright's own <code>codegen</code> tool in its own browser
-        window. Interact with that window normally — clicks, typing, navigation — and
-        the generated code appears below as you go. The URL below is only used as the
-        page it opens to; leave it blank to open on a blank page and type your own
-        starting URL into codegen's own address bar instead.
-      </div>
-      <div class="toolbar-row">
-        <input id="urlInput" type="text" placeholder="https://example.com (opened when you click Start)" />
-      </div>
-      <div class="toolbar-row">
-        <button id="killAllBtn" class="btn btn-danger" title="Close the codegen browser this extension launched and clear the generated code">Kill All Browsers</button>
-      </div>
-      <div class="toolbar-row">
         <button id="linkFeatureBtn" class="btn" title="Browse to a Cucumber .feature file and pick a Scenario/Scenario Outline to link to the generated code">Link Feature File</button>
         <span id="linkedScenarioBadge" class="linked-scenario-badge" hidden>
           <span id="linkedScenarioText"></span>
           <button id="unlinkScenarioBtn" class="btn-icon-small" title="Unlink this scenario">✕</button>
         </span>
+      </div>
+      <div class="toolbar-row">
+        <input id="urlInput" type="text" placeholder="https://example.com" />
+      </div>
+      <div class="toolbar-row">
+        <button id="startBtn" class="btn btn-primary">Start</button>
+        <button id="stopBtn" class="btn" disabled>Stop</button>
+        <button id="killAllBtn" class="btn btn-danger" title="Close the codegen browser this extension launched and clear the generated code">Kill All Browsers</button>
+        <span id="statusPill" class="status-pill status-idle">Idle</span>
       </div>
     </div>
   </details>
@@ -605,11 +660,15 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   <details class="section" id="generatedCodeSection" open>
     <summary>Generated Code</summary>
     <div class="section-body">
+      <div id="aiGeneratingBanner" class="ai-generating-banner" hidden>
+        <span class="ai-generating-text">Generating AI code…</span>
+        <span class="ai-generating-track"><span class="ai-generating-fill"></span></span>
+      </div>
       <div id="aiAssistSection" class="ai-assist" hidden>
         <details>
           <summary>Custom md files</summary>
           <div class="ai-assist-body">
-            <div class="ai-files-header">Instruction / skill / prompt files (<code>.github/*.md</code>) — check any to include them automatically</div>
+            <div class="ai-files-header">Instruction / skill / prompt files (<code>.github/*.md</code>)</div>
             <div id="promptFilesList" class="prompt-files-list">
               <div class="prompt-files-empty">No .md files found yet — click Refresh.</div>
             </div>
@@ -626,6 +685,10 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
             </div>
           </div>
         </details>
+        <div class="toolbar-row ai-open-row">
+          <button id="openAiCodeBtn" class="btn">Open AI Generated Code</button>
+          <span id="aiStatusLabel" class="llm-status"></span>
+        </div>
       </div>
 
       <div class="code-panels">
@@ -641,21 +704,9 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
             New code recorded. <button id="codeRefreshBtn" class="btn btn-small">Refresh (discards manual edits)</button>
           </div>
           <div class="code-editor-wrap">
+            <div id="codeGutter" class="code-gutter"></div>
             <pre id="codeHighlight" class="code-highlight" aria-hidden="true"><code></code></pre>
-            <textarea id="codeEditArea" class="code-edit-area" spellcheck="false">// Click "Start" and interact with the codegen browser window.</textarea>
-          </div>
-        </div>
-
-        <div class="code-panel" id="llmCodePanel" hidden>
-          <div class="code-header">
-            <button id="collapseLlmCodeBtn" class="btn-icon-small code-collapse-btn" title="Collapse this panel">▾</button>
-            <h3 class="section-title">AI Generated Code <span id="llmStatusLabel" class="llm-status"></span></h3>
-            <button id="copyLlmCodeBtn" class="btn btn-small">Copy Code</button>
-            <button id="saveLlmCodeBtn" class="btn">Save Code</button>
-          </div>
-          <div class="code-editor-wrap">
-            <pre id="llmCodeHighlight" class="code-highlight" aria-hidden="true"><code></code></pre>
-            <textarea id="llmCodeEditArea" class="code-edit-area" spellcheck="false">// Enable "Link with GitHub Copilot LLM" in Settings and pick a model, then check a .md file below or type instructions in the chat — the AI Generated Code view fills in automatically as code is recorded.</textarea>
+            <textarea id="codeEditArea" class="code-edit-area" spellcheck="false">// Click Start and interact with the codegen browser window.</textarea>
           </div>
         </div>
       </div>
@@ -663,6 +714,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   </details>
 
   <script nonce="${nonce}" src="${highlightUri}"></script>
+  <script nonce="${nonce}" src="${codeEditorUri}"></script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
@@ -722,6 +774,42 @@ function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** A short, concrete nudge toward the syntax that's actually idiomatic for
+ * the selected language/runtime version — stating the version number alone
+ * leans on the model already knowing that history correctly, which a
+ * capable model usually does, but a couple of the most test-code-relevant
+ * landmarks spelled out here removes any doubt rather than leaving it to
+ * inference. Not exhaustive by design — a full language changelog would
+ * bloat the prompt for little marginal benefit. */
+function languageVersionGuidance(language: 'java' | 'python', version: string): string {
+  if (language === 'java') {
+    const major = parseInt(version, 10);
+    if (major >= 17) {
+      return (
+        `Java ${version} is a modern LTS release: text blocks (\`"""..."""\`) for any multi-line string, ` +
+        `\`var\` for local variables with an inline initializer, and records are all safe to use where they ` +
+        `genuinely improve readability.`
+      );
+    }
+    return (
+      `Java 11 predates text blocks, records, and pattern matching (all Java 15+) — do not use any of them. ` +
+      `\`var\` for local variables is fine (available since Java 10); explicit types everywhere else.`
+    );
+  }
+  const [minorRaw] = version.split('.').slice(1);
+  const minor = parseInt(minorRaw ?? '0', 10);
+  if (minor >= 10) {
+    return (
+      `Python ${version} supports the \`match\`/\`case\` statement and \`X | Y\` union type hints natively — ` +
+      `use them where they read better than the older equivalents.`
+    );
+  }
+  return (
+    `Python ${version} predates the \`match\`/\`case\` statement and native \`X | Y\` union syntax (both Python ` +
+    `3.10+) — do not use either; use \`Union[X, Y]\` from \`typing\` for union hints instead.`
+  );
+}
+
 /**
  * Builds the single user message sent to the Copilot model — explicitly
  * asks for the same enterprise Page-Object style/structure/language the
@@ -734,6 +822,7 @@ function describeError(err: unknown): string {
  */
 function buildLlmPrompt(
   language: 'java' | 'python',
+  languageVersion: string,
   builtInInstructions: string,
   instructions: { path: string; content: string }[],
   playwrightCode: string,
@@ -741,13 +830,17 @@ function buildLlmPrompt(
   linkedScenario?: LinkedScenario
 ): string {
   const languageName = language === 'java' ? 'Java (JUnit 5, Playwright for Java)' : 'Python (pytest, Playwright for Python)';
+  const versionGuidance = languageVersionGuidance(language, languageVersion);
 
   const parts: string[] = [
     `You are an expert Playwright test automation engineer working on an enterprise QA codebase.`,
-    `Generate ${languageName} automation code that follows the SAME enterprise Page-Object style described ` +
-      `in the mandatory refinement standard below, based on the reference "Playwright-generated code" — real, ` +
-      `unmodified output from Playwright's own \`codegen\` tool. Reuse the exact locators it already found — ` +
-      `do not invent new ones or guess at different ones. ` +
+    `Generate ${languageName} automation code, targeting exactly **${language === 'java' ? 'Java' : 'Python'} ${languageVersion}** ` +
+      `— this is the specific language/runtime version the user selected in Settings and it must compile/run correctly ` +
+      `under it, using only language features actually available in that version (never a newer version's syntax, ` +
+      `and no need to stay compatible with anything older either). ${versionGuidance} ` +
+      `Follow the SAME enterprise Page-Object style described in the mandatory refinement standard below, based on the ` +
+      `reference "Playwright-generated code" — real, unmodified output from Playwright's own \`codegen\` tool. Reuse the ` +
+      `exact locators it already found — do not invent new ones or guess at different ones. ` +
       `Respond with ONLY the final code in a single fenced code block and no other commentary.`
   ];
 

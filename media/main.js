@@ -17,11 +17,11 @@
   const newCodeFlash = document.getElementById('newCodeFlash');
   const codeEditArea = document.getElementById('codeEditArea');
   const codeHighlightPre = document.getElementById('codeHighlight');
+  const codeGutter = document.getElementById('codeGutter');
   const codeRefreshBanner = document.getElementById('codeRefreshBanner');
   const codeRefreshBtn = document.getElementById('codeRefreshBtn');
-  const playwrightCodePanel = document.getElementById('playwrightCodePanel');
   const collapseCodeBtn = document.getElementById('collapseCodeBtn');
-  const collapseLlmCodeBtn = document.getElementById('collapseLlmCodeBtn');
+  const playwrightCodePanel = document.getElementById('playwrightCodePanel');
   const aiAssistSection = document.getElementById('aiAssistSection');
   const promptFilesList = document.getElementById('promptFilesList');
   const chatComposer = document.getElementById('chatComposer');
@@ -29,14 +29,9 @@
   const chatInput = document.getElementById('chatInput');
   const chatSendBtn = document.getElementById('chatSendBtn');
   const refreshPromptFilesBtn = document.getElementById('refreshPromptFilesBtn');
-  const llmCodePanel = document.getElementById('llmCodePanel');
-  const llmStatusLabel = document.getElementById('llmStatusLabel');
-  const saveLlmCodeBtn = document.getElementById('saveLlmCodeBtn');
-  const copyLlmCodeBtn = document.getElementById('copyLlmCodeBtn');
-  const llmCodeEditArea = document.getElementById('llmCodeEditArea');
-  const llmCodeHighlightPre = document.getElementById('llmCodeHighlight');
-  const LLM_PLACEHOLDER =
-    '// Enable "Link with GitHub Copilot LLM" in Settings and pick a model, then check a .md file below or type instructions in the chat — the AI Generated Code view fills in automatically as code is recorded.';
+  const openAiCodeBtn = document.getElementById('openAiCodeBtn');
+  const aiStatusLabel = document.getElementById('aiStatusLabel');
+  const aiGeneratingBanner = document.getElementById('aiGeneratingBanner');
 
   let killConfirmPending = false;
   let killConfirmTimer = null;
@@ -60,8 +55,8 @@
     vscode.postMessage({ type: 'saveCode', payload: playwrightEditor.getValue() });
   });
 
-  saveLlmCodeBtn.addEventListener('click', () => {
-    vscode.postMessage({ type: 'saveLlmCode', payload: llmEditor.getValue() });
+  openAiCodeBtn.addEventListener('click', () => {
+    vscode.postMessage({ type: 'openAiCodePanel' });
   });
 
   function flashCopyBtn(btn, label) {
@@ -102,21 +97,14 @@
     copyToClipboard(playwrightEditor.getValue(), copyCodeBtn);
   });
 
-  copyLlmCodeBtn.addEventListener('click', () => {
-    copyToClipboard(llmEditor.getValue(), copyLlmCodeBtn);
+  // Collapse the Playwright Code panel down to just its header -- useful
+  // once the AI Generated Code panel is open beside this sidebar and this
+  // half of the picture isn't needed for a moment.
+  collapseCodeBtn.addEventListener('click', () => {
+    const collapsed = playwrightCodePanel.classList.toggle('collapsed');
+    collapseCodeBtn.textContent = collapsed ? '▸' : '▾';
+    collapseCodeBtn.title = collapsed ? 'Expand this panel' : 'Collapse this panel';
   });
-
-  // Collapse either code panel independently -- lets one be viewed at full
-  // height without the other (in its default, uncollapsed size) still
-  // taking up sidebar space alongside it.
-  function toggleCollapse(panel, btn) {
-    const collapsed = panel.classList.toggle('collapsed');
-    btn.textContent = collapsed ? '▸' : '▾';
-    btn.title = collapsed ? 'Expand this panel' : 'Collapse this panel';
-  }
-
-  collapseCodeBtn.addEventListener('click', () => toggleCollapse(playwrightCodePanel, collapseCodeBtn));
-  collapseLlmCodeBtn.addEventListener('click', () => toggleCollapse(llmCodePanel, collapseLlmCodeBtn));
 
   refreshPromptFilesBtn.addEventListener('click', () => {
     vscode.postMessage({ type: 'refreshPromptFiles' });
@@ -244,54 +232,10 @@
       : 'Browse and select a Cucumber .feature file and pick a Scenario/Scenario Outline to link to the generated code';
   }
 
-  // ---------------------------------------------------------------------
-  // Code editor: a transparent, editable <textarea> stacked exactly over a
-  // syntax-highlighted <pre>, kept in sync on every keystroke and scroll —
-  // see main.css's .code-editor-wrap for the overlay technique. Shared
-  // factory since both the Playwright codegen view and the AI (Copilot)
-  // view need the identical, independently-scrollable behavior.
-  function createCodeEditor(textarea, pre) {
-    const codeEl = pre.querySelector('code');
-    let language = 'java';
-
-    function render() {
-      codeEl.innerHTML = window.softPlayHighlight(textarea.value, language);
-    }
-
-    textarea.addEventListener('scroll', () => {
-      pre.scrollTop = textarea.scrollTop;
-      pre.scrollLeft = textarea.scrollLeft;
-    });
-
-    render(); // placeholder text present in the markup on first load
-
-    return {
-      setLanguage(lang) {
-        language = lang;
-      },
-      setValue(text) {
-        textarea.value = text;
-        render();
-      },
-      appendValue(text) {
-        textarea.value += text;
-        render();
-        textarea.scrollTop = textarea.scrollHeight;
-      },
-      getValue() {
-        return textarea.value;
-      },
-      onEdit(handler) {
-        textarea.addEventListener('input', () => {
-          render();
-          handler();
-        });
-      }
-    };
-  }
-
-  const playwrightEditor = createCodeEditor(codeEditArea, codeHighlightPre);
-  const llmEditor = createCodeEditor(llmCodeEditArea, llmCodeHighlightPre);
+  // See media/codeEditor.js for the shared editor factory (line-number
+  // gutter, Tab-indent, syntax highlighting) used here and by the
+  // standalone AI Generated Code panel.
+  const playwrightEditor = window.createCodeEditor(codeEditArea, codeHighlightPre, codeGutter);
 
   // Once the user hand-edits the code, a newly recorded action must not
   // silently clobber their edits -- offer a refresh instead.
@@ -314,9 +258,6 @@
     userEditedCode = false;
     playwrightEditor.setLanguage(payload.language);
     playwrightEditor.setValue(payload.code);
-    // AI-generated code is asked to match the same language -- keep its
-    // highlighting in sync with whatever's currently selected in Settings.
-    llmEditor.setLanguage(payload.language);
   }
 
   window.addEventListener('message', (event) => {
@@ -343,17 +284,13 @@
       case 'promptFiles':
         renderPromptFiles(message.payload);
         break;
-      case 'llmStart':
-        llmStart();
+      case 'aiStatus':
+        applyAiStatus(message.payload);
         break;
-      case 'llmChunk':
-        llmEditor.appendValue(message.payload);
-        break;
-      case 'llmDone':
-        llmDone(message.payload);
-        break;
-      case 'llmError':
-        llmError(message.payload);
+      case 'requestCurrentCode':
+        // "Regenerate AI Code" (AI Generated Code panel) asking for the
+        // Playwright Code editor's live content, manual edits included.
+        vscode.postMessage({ type: 'currentCodeReport', payload: playwrightEditor.getValue() });
         break;
     }
   });
@@ -362,12 +299,28 @@
     // aiAssistSection nests chatComposer, so hiding it here already hides
     // the composer too -- no need to separately toggle chatComposer.hidden.
     aiAssistSection.hidden = !enabled;
-    llmCodePanel.hidden = !enabled;
     if (enabled) {
       vscode.postMessage({ type: 'refreshPromptFiles' });
     } else {
       chatMessages.innerHTML = '';
       chatInput.value = '';
+    }
+  }
+
+  function applyAiStatus(status) {
+    aiGeneratingBanner.hidden = status.state !== 'generating';
+    if (status.state === 'generating') {
+      aiStatusLabel.textContent = '';
+      aiStatusLabel.className = 'llm-status';
+      aiStatusLabel.title = '';
+    } else if (status.state === 'error') {
+      aiStatusLabel.textContent = 'Error';
+      aiStatusLabel.className = 'llm-status llm-status-error';
+      aiStatusLabel.title = status.message || '';
+    } else {
+      aiStatusLabel.textContent = '';
+      aiStatusLabel.className = 'llm-status';
+      aiStatusLabel.title = '';
     }
   }
 
@@ -404,24 +357,6 @@
     postSelectedInstructionFiles();
   }
 
-  function llmStart() {
-    llmStatusLabel.textContent = '(generating…)';
-    llmStatusLabel.className = 'llm-status llm-status-active';
-    llmEditor.setValue('');
-  }
-
-  function llmDone(finalCode) {
-    llmStatusLabel.textContent = '';
-    llmStatusLabel.className = 'llm-status';
-    llmEditor.setValue(finalCode);
-  }
-
-  function llmError(message) {
-    llmStatusLabel.textContent = 'Error';
-    llmStatusLabel.className = 'llm-status llm-status-error';
-    llmEditor.setValue('// ' + message);
-  }
-
   function applyCode(payload) {
     codeLanguageLabel.textContent =
       '(' + payload.language[0].toUpperCase() + payload.language.slice(1) + ' ' + payload.languageVersion + ')';
@@ -452,8 +387,7 @@
     userEditedCode = false;
     pendingFreshCode = null;
     codeRefreshBanner.hidden = true;
-    playwrightEditor.setValue('// Click "Start" and interact with the codegen browser window.');
-    llmEditor.setValue(LLM_PLACEHOLDER);
+    playwrightEditor.setValue('// Click Start and interact with the codegen browser window.');
     clearTimeout(newCodeFlashTimer);
     newCodeFlash.hidden = true;
   }

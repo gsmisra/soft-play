@@ -1,34 +1,52 @@
+/* Claymorphic theme: soft, rounded, puffy surfaces with paired light/dark
+   shadows (rather than a flat single drop-shadow) for that gentle
+   "pressed into clay" depth — inspired by the softer, quieter feel of
+   Apple's own system UI rather than VS Code's default flat, boxy look.
+   Built on top of VS Code's own theme variables (never hardcoded colors for
+   text/surfaces), so it still looks right in both light and dark themes;
+   VS Code stamps `vscode-light`/`vscode-dark`/`vscode-high-contrast` on
+   <body> automatically, which is what the shadow-direction rules below key
+   off of. */
+
+:root {
+  --clay-radius: 14px;
+  --clay-radius-sm: 10px;
+}
+
 body {
-  font-family: var(--vscode-font-family);
+  font-family: -apple-system, BlinkMacSystemFont, var(--vscode-font-family), 'Segoe UI', sans-serif;
   color: var(--vscode-foreground);
   background-color: var(--vscode-editor-background);
   padding: 0;
   margin: 0;
 }
 
+/* Paired soft shadow — light source top-left. Dark theme: a darker shadow
+   below-right, a faint highlight above-left. Light theme: softer, lower
+   contrast versions of the same pairing (a heavy dark shadow reads as
+   dirty, not clay, against a bright background). Applied directly to each
+   card-like surface's own selector below, rather than via a separate
+   marker class, so no HTML changes are needed to keep it consistent. */
+body.vscode-dark .section,
+body.vscode-dark .ai-assist,
+body.vscode-dark .code-editor-wrap {
+  box-shadow: 6px 6px 14px rgba(0, 0, 0, 0.35), -4px -4px 10px rgba(255, 255, 255, 0.03);
+}
+body.vscode-light .section,
+body.vscode-light .ai-assist,
+body.vscode-light .code-editor-wrap {
+  box-shadow: 5px 5px 12px rgba(0, 0, 0, 0.10), -4px -4px 10px rgba(255, 255, 255, 0.7);
+}
+
 .app-title-row {
-  padding: 10px 14px;
+  padding: 14px 16px;
   border-bottom: 1px solid var(--vscode-panel-border);
 }
 
 .toolbar-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-}
-
-.native-mode-note {
-  margin: 4px 0 10px;
-  padding: 8px 10px;
-  font-size: 0.85em;
-  line-height: 1.4;
-  color: var(--vscode-descriptionForeground);
-  background: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.1));
-  border-left: 3px solid var(--vscode-textLink-foreground, #3794ff);
-  border-radius: 2px;
-}
-.native-mode-note code {
-  font-family: var(--vscode-editor-font-family, monospace);
+  gap: 10px;
 }
 
 .title-row {
@@ -45,34 +63,53 @@ body {
   min-width: 0;
 }
 
-/* Settings gear, moved to the top of the UI (the title row) and enlarged —
-   it used to sit as a small icon button among the Control Panel's other
-   buttons; there's only one button of real consequence left there now
-   (Start), so Settings gets top billing instead. */
+.title {
+  font-weight: 700;
+  font-size: 1.1em;
+  letter-spacing: 0.01em;
+  line-height: 1.3;
+}
+
+.version-badge {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.75em;
+  color: var(--vscode-descriptionForeground);
+  background: var(--vscode-badge-background);
+  padding: 1px 9px;
+  border-radius: 10px;
+}
+
+/* Settings gear, at the top of the UI, enlarged — the one thing on the
+   panel that's always reachable regardless of what else is going on. */
 .btn-icon-top {
   flex: none;
   font-size: 1.5em;
   line-height: 1;
-  padding: 4px 10px;
-  border: 1px solid var(--vscode-button-border, transparent);
-  border-radius: 4px;
+  padding: 5px 12px;
+  border: none;
+  border-radius: var(--clay-radius-sm);
   background: var(--vscode-button-secondaryBackground);
   color: var(--vscode-button-secondaryForeground);
   cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
 }
+.btn-icon-top:hover { transform: translateY(-1px); }
+.btn-icon-top:active { transform: translateY(0); }
 
-.btn-icon-top:hover {
-  background: var(--vscode-button-secondaryHoverBackground);
-}
-
-/* Two collapsible sections (Control Panel / Generated Code) — native
-   <details>/<summary>, no JS needed for expand/collapse. */
+/* Two collapsible sections (Control Panel / Generated Code) — each its own
+   soft, rounded "clay" card with breathing room between them, rather than
+   a shared hairline divider running the width of the sidebar. */
 .section {
-  border-bottom: 1px solid var(--vscode-panel-border);
+  margin: 12px 12px 0;
+  border-radius: var(--clay-radius);
+  background: var(--vscode-editor-background); /* fallback if color-mix() is unsupported */
+  background: color-mix(in srgb, var(--vscode-editor-background) 96%, var(--vscode-foreground) 4%);
+  overflow: hidden;
 }
+.section:last-of-type { margin-bottom: 12px; }
 
 .section > summary {
-  padding: 10px 14px;
+  padding: 12px 16px;
   cursor: pointer;
   font-weight: 600;
   font-size: 0.95em;
@@ -84,41 +121,27 @@ body {
 }
 
 .section > .section-body {
-  padding: 4px 14px 14px;
+  padding: 6px 16px 16px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-}
-
-.title {
-  font-weight: 800;
-  font-size: 1.2em;
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
-  line-height: 1.3;
-}
-
-.version-badge {
-  font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 0.75em;
-  color: var(--vscode-descriptionForeground);
-  background: var(--vscode-badge-background);
-  padding: 1px 8px;
-  border-radius: 10px;
+  gap: 10px;
 }
 
 .btn {
-  padding: 4px 12px;
-  border: 1px solid var(--vscode-button-border, transparent);
-  border-radius: 2px;
+  padding: 6px 14px;
+  border: none;
+  border-radius: var(--clay-radius-sm);
   background: var(--vscode-button-secondaryBackground);
   color: var(--vscode-button-secondaryForeground);
   cursor: pointer;
+  transition: transform 0.12s ease, opacity 0.12s ease;
 }
 
 .btn:hover:not(:disabled) {
   background: var(--vscode-button-secondaryHoverBackground);
+  transform: translateY(-1px);
 }
+.btn:active:not(:disabled) { transform: translateY(0); }
 
 .btn:disabled {
   opacity: 0.5;
@@ -138,10 +161,9 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 8px;
-  border-radius: 3px;
+  padding: 4px 10px;
+  border-radius: 999px;
   background: rgba(78, 201, 176, 0.15);
-  border: 1px solid #4ec9b0;
   color: var(--vscode-foreground);
   font-size: 0.82em;
   max-width: 100%;
@@ -167,36 +189,38 @@ body {
 }
 
 .btn-small {
-  padding: 2px 8px;
+  padding: 3px 10px;
   font-size: 0.85em;
 }
 
 .btn-danger {
-  border-color: #a1260d;
+  background: transparent;
   color: #ff8a80;
+  box-shadow: inset 0 0 0 1px rgba(161, 38, 13, 0.4);
 }
 
 .btn-danger:hover:not(:disabled) {
-  background: rgba(161, 38, 13, 0.2);
+  background: rgba(161, 38, 13, 0.15);
 }
 
 .btn-danger-confirm {
   background: #a1260d;
   color: #fff;
+  box-shadow: none;
 }
 
 #urlInput {
   flex: 1;
-  padding: 4px 8px;
+  padding: 7px 12px;
   background: var(--vscode-input-background);
   color: var(--vscode-input-foreground);
-  border: 1px solid var(--vscode-input-border, transparent);
-  border-radius: 2px;
+  border: none;
+  border-radius: var(--clay-radius-sm);
 }
 
 .status-pill {
-  padding: 2px 10px;
-  border-radius: 10px;
+  padding: 3px 12px;
+  border-radius: 999px;
   font-size: 0.85em;
   font-weight: 600;
 }
@@ -207,7 +231,7 @@ body {
 .status-error { background: #a1260d; color: #fff; }
 
 .section-title {
-  margin: 20px 0 8px;
+  margin: 0;
   font-size: 0.85em;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -224,17 +248,15 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-top: 20px;
 }
 
 .code-header .section-title {
-  margin: 0;
   flex: 1;
 }
 
-/* Blinking attention-getter (#2) — separate from .code-refresh-banner,
-   which only appears when a manual edit would otherwise be overwritten;
-   this one just flashes briefly whenever a new action is recorded. */
+/* Blinking attention-getter — separate from .code-refresh-banner, which
+   only appears when a manual edit would otherwise be overwritten; this one
+   just flashes briefly whenever new code arrives. */
 @keyframes objectSpyBlinkGreen {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.15; }
@@ -251,41 +273,61 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 6px 0;
-  padding: 4px 10px;
+  padding: 6px 12px;
   background: rgba(11, 107, 184, 0.15);
-  border: 1px solid #0b6bb8;
-  border-radius: 3px;
+  border-radius: var(--clay-radius-sm);
   font-size: 0.82em;
 }
 
 /* Editable, syntax-highlighted code editor: a transparent <textarea> with a
    visible caret stacked exactly over a highlighted <pre>, kept in sync on
-   input/scroll (see main.js). Fixed dark "editor" palette regardless of the
-   host VS Code theme, similar to how most embedded code blocks render, so
-   the token colors below (chosen to match VS Code's own Dark+ theme) always
-   have the contrast they were designed for. */
+   input/scroll (see codeEditor.js). Fixed dark "editor" palette regardless
+   of the host VS Code theme, similar to how most embedded code blocks
+   render, so the token colors below (chosen to match VS Code's own Dark+
+   theme) always have the contrast they were designed for. */
 .code-editor-wrap {
   position: relative;
   height: 68vh;
   min-height: 360px;
-  margin-top: 6px;
-  border: 1px solid var(--vscode-panel-border);
-  border-radius: 3px;
+  border-radius: var(--clay-radius);
   background: #1e1e1e;
+  overflow: hidden;
+}
+
+/* Line-number gutter — a real code editor's left margin, kept in lockstep
+   with the textarea's scroll position (see codeEditor.js's syncScroll()).
+   Not interactive (no line-click-to-select, no clickable breakpoints —
+   this is a display-only gutter, not a full editor gutter). */
+.code-gutter {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 42px;
+  overflow: hidden;
+  margin: 0;
+  padding: 12px 8px 12px 0;
+  font-family: var(--vscode-editor-font-family, 'Courier New', monospace);
+  font-size: 0.85em;
+  line-height: 1.5;
+  text-align: right;
+  color: #6e7681;
+  background: rgba(255, 255, 255, 0.03);
+  white-space: pre;
+  box-sizing: border-box;
+  user-select: none;
+  pointer-events: none;
 }
 
 .code-highlight,
 .code-edit-area {
   position: absolute;
-  inset: 0;
+  inset: 0 0 0 42px;
   margin: 0;
-  padding: 10px 12px;
+  padding: 12px 14px;
   font-family: var(--vscode-editor-font-family, 'Courier New', monospace);
   font-size: 0.85em;
   line-height: 1.5;
   white-space: pre;
-  tab-size: 2;
+  tab-size: 4;
   box-sizing: border-box;
 }
 
@@ -313,11 +355,6 @@ body {
 .tok-method { color: #dcdcaa; }
 .tok-class { color: #4ec9b0; }
 
-/* Two code panels (Playwright codegen + AI/Copilot), each independently
-   scrollable (see .code-editor-wrap). Side by side when there's room —
-   wrap onto its own row on a narrow sidebar, which is the common case for
-   an Activity Bar view; drag the view wider (or pop it into the editor
-   area) to see them side by side. */
 .code-panels {
   display: flex;
   flex-wrap: wrap;
@@ -327,13 +364,15 @@ body {
 .code-panel {
   flex: 1 1 320px;
   min-width: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
-/* Collapse either code panel independently (Playwright Code / AI Generated
-   Code) — the header (title, Copy/Save, etc.) stays visible; everything
-   below it just isn't rendered, so the OTHER panel is free to be viewed at
-   its full, unchanged height without this one still reserving space next
-   to or above it. */
+/* Collapse the Playwright Code panel down to just its header — the header
+   (title, Copy/Save, etc.) stays visible; everything below it just isn't
+   rendered. Useful once the AI Generated Code panel is open beside this
+   sidebar and this half of the picture isn't needed for a moment. */
 .code-panel.collapsed .code-editor-wrap,
 .code-panel.collapsed .code-refresh-banner {
   display: none;
@@ -348,6 +387,7 @@ body {
   letter-spacing: normal;
   font-weight: 400;
   font-style: italic;
+  font-size: 0.85em;
 }
 
 .llm-status-active {
@@ -360,38 +400,91 @@ body {
   font-weight: 600;
 }
 
-/* AI Assist collapsible section — native <details>/<summary>, no extra JS
-   needed for the expand/collapse itself. */
+.ai-open-row {
+  justify-content: flex-start;
+}
+
+/* Prominent "Generating AI code…" indicator at the top of the Generated
+   Code section — bright green text plus a slim, indeterminate progress bar
+   (a soft highlight sliding across a track, not tied to real percent-done
+   since streaming token count isn't a meaningful "done-ness" measure). */
+.ai-generating-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 4px;
+}
+
+/* [hidden] and .ai-generating-banner{display:flex} otherwise tie on CSS
+   specificity, and this rule comes later in the cascade — without this
+   override the banner stays visible (and animating) even when JS sets
+   the hidden attribute, i.e. whenever nothing is actually generating. */
+.ai-generating-banner[hidden] {
+  display: none;
+}
+
+.ai-generating-text {
+  color: #3fb950;
+  font-weight: 700;
+  font-size: 0.9em;
+  animation: objectSpyBlinkGreen 1.2s ease-in-out infinite;
+}
+
+.ai-generating-track {
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(63, 185, 80, 0.15);
+  overflow: hidden;
+}
+
+.ai-generating-fill {
+  display: block;
+  height: 100%;
+  width: 40%;
+  border-radius: 999px;
+  background: #3fb950;
+  animation: aiGeneratingSlide 1.1s ease-in-out infinite;
+}
+
+@keyframes aiGeneratingSlide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+
+/* "Custom md files" collapsible sub-section — its own soft card nested
+   inside the Generated Code section. */
 .ai-assist {
-  margin-top: 20px;
-  border: 1px solid var(--vscode-panel-border);
-  border-radius: 3px;
+  border-radius: var(--clay-radius-sm);
+  background: var(--vscode-editor-background);
+  background: color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-foreground) 8%);
+  overflow: hidden;
 }
 
 .ai-assist summary {
-  padding: 8px 12px;
+  padding: 9px 14px;
   cursor: pointer;
   font-weight: 600;
   font-size: 0.9em;
 }
 
 .ai-assist-body {
-  padding: 4px 12px 12px;
-  border-top: 1px solid var(--vscode-panel-border);
+  padding: 6px 14px 14px;
 }
 
 .ai-files-header {
   font-size: 0.85em;
   color: var(--vscode-descriptionForeground);
-  margin: 8px 0 4px;
+  margin: 4px 0 6px;
 }
 
 .prompt-files-list {
   max-height: 120px;
   overflow-y: auto;
-  border: 1px solid var(--vscode-panel-border);
-  border-radius: 3px;
-  padding: 4px 8px;
+  border-radius: var(--clay-radius-sm);
+  background: var(--vscode-editor-background);
+  background: color-mix(in srgb, var(--vscode-editor-background) 88%, var(--vscode-foreground) 12%);
+  padding: 6px 10px;
 }
 
 .prompt-file-item {
@@ -416,12 +509,11 @@ body {
   margin-top: 10px;
 }
 
-/* Messenger-style chat composer for ad-hoc LLM instructions (item #2) — a
-   distinct look/font from the rest of the VS Code-themed UI on purpose, so
-   it visually reads as "compose a message" rather than another form field. */
+/* Messenger-style chat composer for ad-hoc LLM instructions — a distinct
+   look/font from the rest of the VS Code-themed UI on purpose, so it
+   visually reads as "compose a message" rather than another form field. */
 .chat-composer {
   margin-top: 10px;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
 }
 
 .chat-messages {
@@ -435,7 +527,7 @@ body {
 
 .chat-bubble {
   max-width: 85%;
-  padding: 8px 12px;
+  padding: 8px 14px;
   border-radius: 18px;
   font-size: 0.88em;
   line-height: 1.35;
@@ -460,9 +552,9 @@ body {
   flex: 1;
   resize: none;
   max-height: 90px;
-  padding: 8px 14px;
+  padding: 9px 16px;
   border-radius: 18px;
-  border: 1px solid var(--vscode-input-border, transparent);
+  border: none;
   background: var(--vscode-input-background);
   color: var(--vscode-input-foreground);
   font-family: inherit;
@@ -488,9 +580,10 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  transition: transform 0.12s ease;
 }
 
 .chat-send-btn:hover {
   background: #006fd6;
+  transform: translateY(-1px);
 }
-
