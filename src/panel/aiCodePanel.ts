@@ -2,7 +2,11 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { Language } from '../settings/settingsStore';
 
-type InboundMessage = { type: 'saveCode'; payload: string } | { type: 'regenerate' };
+type InboundMessage =
+  | { type: 'saveCode'; payload: string }
+  | { type: 'regenerate' }
+  | { type: 'verifyCode' }
+  | { type: 'currentCodeReport'; payload: string };
 
 /**
  * "AI Generated Code" as its own full-size editor-area panel (ViewColumn.Beside),
@@ -31,6 +35,16 @@ export class AiCodePanel implements vscode.Disposable {
   // than a generic GeneratedTestAI/test_recorded_flow_ai. undefined falls
   // back to that generic default (no scenario linked).
   private suggestedBaseName: string | undefined;
+  // "Verify & Fix Code" — a separate status line from generation's own
+  // (`status`/`errorMessage` above), since verifying can be in progress (or
+  // have just finished, green or red) independently of whether a fresh
+  // generation is also happening.
+  private verifyStatusText = '';
+  private verifyStatusKind: 'info' | 'success' | 'error' = 'info';
+  // Resolves a pending requestCurrentCode() call once the webview reports
+  // its editor's live content back via 'currentCodeReport' — mirrors
+  // ObjectSpyPanel's requestCurrentPlaywrightCode()/pendingCodeRequestResolve.
+  private pendingCodeRequestResolve: ((code: string) => void) | undefined;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -42,7 +56,9 @@ export class AiCodePanel implements vscode.Disposable {
      * reusing anything cached from the last run, so a language/version
      * switch, a manual code edit, a fresh re-recording, or a change to
      * which instructions are checked all take effect on the next click. */
-    private readonly onRegenerate: () => void
+    private readonly onRegenerate: () => void,
+    /** "Verify & Fix Code" — see ObjectSpyPanel.verifyAndFixCode(). */
+    private readonly onVerify: () => void
   ) {}
 
   isOpen(): boolean {
@@ -88,6 +104,9 @@ export class AiCodePanel implements vscode.Disposable {
     this.status = 'generating';
     this.code = '';
     this.errorMessage = '';
+    // Fresh content is coming — any prior "Verified"/"Verification failed"
+    // status was about a now-superseded version of the code.
+    this.setVerifyStatus('', 'info');
     this.panel?.webview.postMessage({ type: 'start' });
   }
 
@@ -108,7 +127,53 @@ export class AiCodePanel implements vscode.Disposable {
     this.panel?.webview.postMessage({ type: 'error', payload: message });
   }
 
+  /** "Verify & Fix Code" status line — separate from generation's own
+   * status (see `verifyStatusText`). `kind` picks the color: 'info' while
+   * an attempt is running, 'success'/'error' once it settles. */
+  setVerifyStatus(text: string, kind: 'info' | 'success' | 'error'): void {
+    this.verifyStatusText = text;
+    this.verifyStatusKind = kind;
+    this.panel?.webview.postMessage({ type: 'verifyStatus', payload: { text, kind } });
+  }
+
+  setVerifyButtonEnabled(enabled: boolean): void {
+    this.panel?.webview.postMessage({ type: 'verifyButtonEnabled', payload: enabled });
+  }
+
+  /** Asks the webview for its editor's CURRENT content (manual edits
+   * included) — mirrors ObjectSpyPanel.requestCurrentPlaywrightCode().
+   * Falls back to the last-known `this.code` if the panel isn't open or
+   * doesn't answer in time, so this can never hang the caller. */
+  requestCurrentCode(): Promise<string> {
+    if (!this.panel) {
+      return Promise.resolve(this.code);
+    }
+    return new Promise<string>((resolve) => {
+      let settled = false;
+      const finish = (code: string) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        this.pendingCodeRequestResolve = undefined;
+        resolve(code);
+      };
+      this.pendingCodeRequestResolve = finish;
+      this.panel?.webview.postMessage({ type: 'requestCurrentCode' });
+      setTimeout(() => finish(this.code), 3000);
+    });
+  }
+
   private async handleMessage(message: InboundMessage): Promise<void> {
+    if (message.type === 'verifyCode') {
+      this.onVerify();
+      return;
+    }
+    if (message.type === 'currentCodeReport') {
+      this.pendingCodeRequestResolve?.(message.payload);
+      this.pendingCodeRequestResolve = undefined;
+      return;
+    }
     if (message.type === 'saveCode') {
       const isJava = this.language === 'java';
       const base = this.suggestedBaseName ?? (isJava ? 'GeneratedTestAI' : 'test_recorded_flow_ai');
@@ -173,6 +238,19 @@ export class AiCodePanel implements vscode.Disposable {
       color: var(--vscode-descriptionForeground);
     }
     .status.error { color: #e06c75; font-style: normal; font-weight: 600; }
+    .verify-row { flex: none; margin-bottom: 10px; display: flex; align-items: center; gap: 12px; }
+    .verify-status { font-size: 0.85em; }
+    .verify-status.info { color: var(--vscode-descriptionForeground); font-style: italic; }
+    .verify-status.error { color: #e06c75; font-weight: 600; }
+    /* "Code Correctness Confirmed" — a loud, unmissable green banner (this
+       panel's own copy; the sidebar's Control Panel gets the same one). */
+    .verify-status.success {
+      color: #ffffff;
+      background: #1e8e3e;
+      font-weight: 700;
+      padding: 6px 14px;
+      border-radius: 8px;
+    }
     button.btn {
       padding: 6px 16px;
       border: none;
@@ -263,6 +341,10 @@ export class AiCodePanel implements vscode.Disposable {
     <button id="copyBtn" class="btn">Copy Code</button>
     <button id="saveBtn" class="btn">Save Code</button>
   </div>
+  <div class="verify-row">
+    <button id="verifyBtn" class="btn btn-primary" title="Run this code headless in a scratch project and, on error, ask the LLM to fix it — you'll be asked to confirm before every attempt">Verify &amp; Fix Code</button>
+    <span id="verifyStatusEl" class="verify-status ${this.verifyStatusKind}">${escapeHtml(this.verifyStatusText)}</span>
+  </div>
   <div class="editor-wrap">
     <div id="gutter" class="gutter"></div>
     <pre id="highlight" class="highlight" aria-hidden="true"><code></code></pre>
@@ -278,6 +360,8 @@ export class AiCodePanel implements vscode.Disposable {
       const regenerateBtn = document.getElementById('regenerateBtn');
       const copyBtn = document.getElementById('copyBtn');
       const saveBtn = document.getElementById('saveBtn');
+      const verifyBtn = document.getElementById('verifyBtn');
+      const verifyStatusEl = document.getElementById('verifyStatusEl');
       const editArea = document.getElementById('editArea');
       const highlightPre = document.getElementById('highlight');
       const gutter = document.getElementById('gutter');
@@ -320,6 +404,13 @@ export class AiCodePanel implements vscode.Disposable {
         vscode.postMessage({ type: 'regenerate' });
       });
 
+      // "Verify & Fix Code" — runs the code headless in a scratch project;
+      // the extension host owns the whole confirm/run/fix loop and reports
+      // progress back via 'verifyStatus'/'verifyButtonEnabled' below.
+      verifyBtn.addEventListener('click', () => {
+        vscode.postMessage({ type: 'verifyCode' });
+      });
+
       window.addEventListener('message', (event) => {
         const message = event.data;
         switch (message.type) {
@@ -346,6 +437,16 @@ export class AiCodePanel implements vscode.Disposable {
             statusEl.className = 'status error';
             regenerateBtn.disabled = false;
             editor.setValue('// ' + message.payload);
+            break;
+          case 'verifyStatus':
+            verifyStatusEl.textContent = message.payload.text;
+            verifyStatusEl.className = 'verify-status ' + message.payload.kind;
+            break;
+          case 'verifyButtonEnabled':
+            verifyBtn.disabled = !message.payload;
+            break;
+          case 'requestCurrentCode':
+            vscode.postMessage({ type: 'currentCodeReport', payload: editor.getValue() });
             break;
         }
       });

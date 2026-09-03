@@ -79,6 +79,25 @@ body.vscode-light .code-editor-wrap {
   border-radius: 10px;
 }
 
+/* "Code Correctness Confirmed" — a loud, unmissable green banner shown
+   after "Verify & Fix Code" (AI Generated Code panel) actually runs the
+   AI-generated code headless and it executes without error. Deliberately
+   NOT a theme-derived color (a real "everything is fine" green, not a
+   VS Code accent that might not read as clearly "good") and pinned right
+   under the title so it's visible regardless of which section below is
+   expanded/collapsed. */
+.code-correctness-banner {
+  margin: 10px 12px 0;
+  padding: 10px 16px;
+  border-radius: var(--clay-radius-sm);
+  background: #1e8e3e;
+  color: #ffffff;
+  font-weight: 700;
+  font-size: 0.95em;
+  text-align: center;
+  letter-spacing: 0.01em;
+}
+
 /* Settings gear, at the top of the UI, enlarged — the one thing on the
    panel that's always reachable regardless of what else is going on. */
 .btn-icon-top {

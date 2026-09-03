@@ -32,6 +32,7 @@
   const startAiProcessingBtn = document.getElementById('startAiProcessingBtn');
   const openAiCodeBtn = document.getElementById('openAiCodeBtn');
   const generateFeatureFileBtn = document.getElementById('generateFeatureFileBtn');
+  const codeCorrectnessBanner = document.getElementById('codeCorrectnessBanner');
   const aiStatusLabel = document.getElementById('aiStatusLabel');
   const aiGeneratingBanner = document.getElementById('aiGeneratingBanner');
   const copilotEnabledToggle = document.getElementById('copilotEnabledToggle');
@@ -351,6 +352,9 @@
         // "Regenerate AI Code" (AI Generated Code panel) asking for the
         // Playwright Code editor's live content, manual edits included.
         vscode.postMessage({ type: 'currentCodeReport', payload: playwrightEditor.getValue() });
+        break;
+      case 'codeCorrectness':
+        codeCorrectnessBanner.hidden = !message.payload;
         break;
     }
   });

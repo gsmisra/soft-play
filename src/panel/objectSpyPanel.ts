@@ -8,6 +8,8 @@ import { FeatureFilePanel, LinkedScenario } from './featureFilePanel';
 import { AiCodePanel } from './aiCodePanel';
 import { GeneratedFeaturePanel } from './generatedFeaturePanel';
 import { CopilotUnavailableError, extractCodeBlock, sendPrompt } from '../llm/copilotClient';
+import { checkEnvironment, checkPythonEnvironment } from '../execution/environmentCheck';
+import { executeGeneratedCode } from '../execution/testExecutor';
 
 type InboundMessage =
   | { type: 'start'; payload?: string }
@@ -137,7 +139,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
 
   constructor(private readonly context: vscode.ExtensionContext, private readonly settingsStore: SettingsStore) {
     this.settingsPanel = new SettingsPanel(context, settingsStore);
-    this.aiCodePanel = new AiCodePanel(context, () => void this.regenerateAiCode());
+    this.aiCodePanel = new AiCodePanel(context, () => void this.regenerateAiCode(), () => void this.verifyAndFixCode());
     this.generatedFeaturePanel = new GeneratedFeaturePanel(context, () => void this.regenerateFeatureFile());
     this.featureFilePanel = new FeatureFilePanel(
       (scenario) => {
@@ -454,6 +456,140 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     await this.generateFeatureFile(playwrightCode, '');
   }
 
+  private static readonly MAX_VERIFY_ATTEMPTS = 5;
+
+  /**
+   * "Verify & Fix Code" (AI Generated Code panel) — actually EXECUTES the
+   * AI-generated code, headless, in a disposable scratch project (never the
+   * user's workspace), and loops: run -> if it fails, hand the error (plus
+   * the ORIGINAL Playwright Codegen output, kept in context on every
+   * attempt so the LLM can always re-derive the correct locator/action —
+   * per the explicit ask) to the LLM for a fix -> confirm with the user
+   * (modal Yes/No) before every single run, including the first -> repeat,
+   * up to MAX_VERIFY_ATTEMPTS. "No" at any confirmation stops immediately
+   * and leaves the current errors visible for manual fixing. A clean run
+   * shows a big green "Code Correctness Confirmed" banner on the sidebar
+   * (see postCodeCorrectness()) — never shown for a BDD-mode compile-only
+   * check, since that isn't actually proof the flow runs (see
+   * executeGeneratedCode()'s doc comment in testExecutor.ts for why).
+   */
+  private async verifyAndFixCode(): Promise<void> {
+    const settings = this.settingsStore.get();
+    if (!settings.copilotEnabled || !settings.copilotModelId) {
+      this.aiCodePanel.setVerifyStatus('Enable "Link with GitHub Copilot LLM" (Control Panel) and pick a model in Settings first.', 'error');
+      return;
+    }
+
+    const initialCode = await this.aiCodePanel.requestCurrentCode();
+    if (!initialCode.trim()) {
+      void vscode.window.showWarningMessage('Nothing to verify — generate some AI code first.');
+      return;
+    }
+
+    this.aiCodePanel.setVerifyButtonEnabled(false);
+    this.postCodeCorrectness(false);
+    try {
+      this.aiCodePanel.setVerifyStatus('Checking the local environment…', 'info');
+      const env = await checkEnvironment(settings.language);
+      this.outputChannel.appendLine(`Verify & Fix Code — environment check (${settings.language}): ${env.ok ? 'OK' : 'FAILED'} — ${env.message}`);
+      if (!env.ok) {
+        this.aiCodePanel.setVerifyStatus(env.message, 'error');
+        void vscode.window.showErrorMessage(`softPlay: ${env.message}`);
+        return;
+      }
+      const pythonCommand =
+        settings.language === 'python' ? (await checkPythonEnvironment()).pythonCommand ?? 'python' : '';
+
+      // Kept fresh on every attempt (re-read, not snapshotted once) so a
+      // recording made WHILE the fix loop is running still counts — but in
+      // practice this is whatever was last recorded, exactly the "keep the
+      // Playwright Codegen output in context" ask.
+      const scratchDir = path.join(this.context.globalStorageUri.fsPath, 'test-runner', settings.language);
+      await fs.promises.mkdir(scratchDir, { recursive: true });
+
+      let code = initialCode;
+      for (let attempt = 1; attempt <= ObjectSpyPanel.MAX_VERIFY_ATTEMPTS; attempt++) {
+        const choice = await vscode.window.showWarningMessage(
+          attempt === 1
+            ? 'Run the AI-generated code now, headless, to verify it executes without errors?'
+            : `Attempt ${attempt} of ${ObjectSpyPanel.MAX_VERIFY_ATTEMPTS}: re-run the LLM-fixed code, headless, to verify it now executes without errors?`,
+          { modal: true },
+          'Yes',
+          'No'
+        );
+        if (choice !== 'Yes') {
+          this.aiCodePanel.setVerifyStatus(
+            `Stopped before attempt ${attempt} — current code's errors are shown in the softPlay Output channel for manual fixing.`,
+            'error'
+          );
+          return;
+        }
+
+        this.aiCodePanel.setVerifyStatus(`Running attempt ${attempt} of ${ObjectSpyPanel.MAX_VERIFY_ATTEMPTS} (headless)…`, 'info');
+        const result = await executeGeneratedCode(settings.language, code, scratchDir, this.linkedScenario?.featureFilePath, pythonCommand);
+        this.outputChannel.appendLine(
+          `Verify & Fix Code — attempt ${attempt}: ${result.success ? 'PASSED' : 'FAILED'}` +
+            `${result.compileOnly ? ' (compile/collect-only check)' : ''}\n${result.output}`
+        );
+
+        if (result.success) {
+          if (result.compileOnly) {
+            this.aiCodePanel.setVerifyStatus(
+              'Compiled successfully — BDD step definitions have no generated runner to fully execute yet, so this is a compile check, not a confirmed headless run.',
+              'success'
+            );
+          } else {
+            this.aiCodePanel.setVerifyStatus('Code Correctness Confirmed — ran headless without errors.', 'success');
+            this.postCodeCorrectness(true);
+          }
+          return;
+        }
+
+        if (attempt === ObjectSpyPanel.MAX_VERIFY_ATTEMPTS) {
+          this.aiCodePanel.setVerifyStatus(
+            `Still failing after ${ObjectSpyPanel.MAX_VERIFY_ATTEMPTS} attempts — see the softPlay Output channel for the exact error and fix manually.`,
+            'error'
+          );
+          return;
+        }
+
+        this.aiCodePanel.setVerifyStatus(`Attempt ${attempt} failed — asking the LLM to fix it…`, 'info');
+        const fixPrompt = buildFixPrompt(readSeniorQeInstructions(), this.nativeGeneratedCode, code, result.output, settings.language);
+        this.outputChannel.appendLine(
+          `Verify & Fix Code — sending fix request to Copilot model "${settings.copilotModelId}": prompt is ${fixPrompt.length} chars.`
+        );
+        this.aiCodePanel.startGenerating();
+        const cts = new vscode.CancellationTokenSource();
+        try {
+          const fixed = await this.streamCopilotResponse(fixPrompt, settings.copilotModelId, cts, (chunk) =>
+            this.aiCodePanel.appendChunk(chunk)
+          );
+          code = extractCodeBlock(fixed);
+          this.aiCodePanel.finish(code);
+        } catch (err) {
+          const message = err instanceof CopilotUnavailableError ? err.message : describeError(err);
+          this.outputChannel.appendLine(`Verify & Fix Code — Copilot fix request failed: ${message}`);
+          this.aiCodePanel.showError(message);
+          this.aiCodePanel.setVerifyStatus(`Could not get a fix from Copilot: ${message}`, 'error');
+          return;
+        } finally {
+          cts.dispose();
+        }
+      }
+    } finally {
+      this.aiCodePanel.setVerifyButtonEnabled(true);
+    }
+  }
+
+  /** Big green "Code Correctness Confirmed" banner on the sidebar's main UI
+   * — shown only after a genuine headless run passed (never for a
+   * compile-only BDD check). Cleared (`false`) the moment the AI-generated
+   * code changes again — a fresh generation, a fix-loop attempt, or a
+   * verification failure — since a stale "confirmed" would be misleading. */
+  private postCodeCorrectness(confirmed: boolean): void {
+    this.webview?.postMessage({ type: 'codeCorrectness', payload: confirmed });
+  }
+
   /** Asks the sidebar webview for its Playwright Code editor's CURRENT
    * content — which may include manual edits the user made, unlike
    * `this.nativeGeneratedCode` (only ever what `codegen` itself last
@@ -685,6 +821,9 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     this.aiCodePanel.setSuggestedFileName(this.currentSuggestedBaseName());
     this.aiCodePanel.startGenerating();
     this.webview?.postMessage({ type: 'aiStatus', payload: { state: 'generating' } });
+    // Fresh generation incoming — any prior "Code Correctness Confirmed"
+    // was about a now-superseded version of the code.
+    this.postCodeCorrectness(false);
   }
 
   private postLlmChunk(chunk: string): void {
@@ -748,6 +887,8 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     </span>
     <button id="settingsBtn" class="btn-icon-top" title="Settings (language, browser, GitHub Copilot)">⚙</button>
   </div>
+
+  <div id="codeCorrectnessBanner" class="code-correctness-banner" hidden>✓ Code Correctness Confirmed</div>
 
   <details class="section" id="controlPanelSection" open>
     <summary>Control Panel</summary>
@@ -927,6 +1068,53 @@ function buildFeatureFilePrompt(builtInInstructions: string, playwrightCode: str
 
   parts.push(
     `\n## Playwright Codegen output to analyze\n\`\`\`\n${playwrightCode}\n\`\`\``
+  );
+
+  return parts.join('\n');
+}
+
+/**
+ * Builds the fix-up request sent to the LLM after a "Verify & Fix Code"
+ * attempt actually failed to execute — deliberately keeps the ORIGINAL,
+ * unmodified Playwright Codegen output in context on every single attempt
+ * (per the explicit ask), so the LLM can always re-derive the correct
+ * locator/action if the failure turns out to be a wrong one, no matter how
+ * many fix iterations have already happened to the AI-refined code since.
+ */
+function buildFixPrompt(
+  builtInInstructions: string,
+  originalCodegenCode: string,
+  brokenCode: string,
+  errorOutput: string,
+  language: 'java' | 'python'
+): string {
+  const languageName = language === 'java' ? 'Java' : 'Python';
+  const parts: string[] = [
+    `You are an expert Playwright test automation engineer working on an enterprise QA codebase. The following ` +
+      `${languageName} code was AI-generated and just FAILED when actually executed, headless, in a real test run. ` +
+      `Fix it so it compiles and runs cleanly — respond with ONLY the corrected, complete code in a single fenced ` +
+      `code block, no commentary.`
+  ];
+
+  if (builtInInstructions) {
+    parts.push(`\n## Mandatory refinement standard — the fixed code must still follow every part of this\n${builtInInstructions}`);
+  }
+
+  parts.push(
+    `\n## Original Playwright Codegen output (real, unmodified recording — the ground truth for which locators and ` +
+      `actions are actually correct; refer back to this if the error suggests one was used incorrectly)\n` +
+      `\`\`\`${language}\n${originalCodegenCode}\n\`\`\``
+  );
+
+  parts.push(`\n## AI-generated code that failed to execute\n\`\`\`${language}\n${brokenCode}\n\`\`\``);
+
+  parts.push(`\n## Exact error output from the failed headless run\n\`\`\`\n${errorOutput}\n\`\`\``);
+
+  parts.push(
+    `\n## Task\nFix ONLY what's necessary to resolve this specific error. Do not restructure or rewrite parts of ` +
+      `the code that aren't implicated by it. Keep the same class/file name, the same target language/runtime ` +
+      `version, the same browser-executable launch override (never remove or weaken it), and the overall structure ` +
+      `— this is a targeted fix, not a rewrite.`
   );
 
   return parts.join('\n');
