@@ -31,6 +31,7 @@
   const refreshPromptFilesBtn = document.getElementById('refreshPromptFilesBtn');
   const startAiProcessingBtn = document.getElementById('startAiProcessingBtn');
   const openAiCodeBtn = document.getElementById('openAiCodeBtn');
+  const generateFeatureFileBtn = document.getElementById('generateFeatureFileBtn');
   const aiStatusLabel = document.getElementById('aiStatusLabel');
   const aiGeneratingBanner = document.getElementById('aiGeneratingBanner');
   const copilotEnabledToggle = document.getElementById('copilotEnabledToggle');
@@ -165,27 +166,48 @@
     }
   });
 
-  // "Start AI Processing" — the ONLY trigger for AI code generation.
   // Bundles every staged chat bubble plus whatever's still sitting unsent
   // in the input box (so the user doesn't have to remember to hit ➤ first)
-  // into one customInstructions string, along with the current Playwright
-  // Code and checked .md files; the extension host adds Settings and the
-  // linked scenario/selected steps on its own. Stages are cleared after
-  // sending so the next run starts fresh.
-  startAiProcessingBtn.addEventListener('click', () => {
+  // into one customInstructions string, then clears the stage so the next
+  // run starts fresh. Shared by both "Start AI Processing" and "Generate
+  // Gherkin Feature File" — the two only differ in which message type they
+  // post and which extension-host method picks it up from there.
+  function collectAndClearStagedInstructions() {
     const unsent = chatInput.value.trim();
     const allInstructions = unsent ? [...stagedInstructions, unsent] : stagedInstructions;
     const customInstructions = allInstructions.join('\n\n');
-
-    vscode.postMessage({
-      type: 'sendToLlm',
-      payload: { selectedFiles: selectedPromptFiles(), code: playwrightEditor.getValue(), customInstructions }
-    });
 
     stagedInstructions = [];
     chatMessages.innerHTML = '';
     chatInput.value = '';
     autoResizeChatInput();
+
+    return customInstructions;
+  }
+
+  // "Start AI Processing" — the ONLY trigger for AI code generation.
+  // Bundles staged chat instructions, the current Playwright Code, and
+  // checked .md files; the extension host adds Settings and the linked
+  // scenario/selected steps on its own.
+  startAiProcessingBtn.addEventListener('click', () => {
+    const customInstructions = collectAndClearStagedInstructions();
+    vscode.postMessage({
+      type: 'sendToLlm',
+      payload: { selectedFiles: selectedPromptFiles(), code: playwrightEditor.getValue(), customInstructions }
+    });
+  });
+
+  // "Generate Gherkin Feature File" — for when no .feature file has been
+  // linked yet: turns whatever Playwright Codegen recorded (plus staged
+  // chat instructions) into a brand-new BDD feature file instead of
+  // refined automation code. No Custom md files / Settings / linked
+  // scenario involved — see generateFeatureFile() on the extension host.
+  generateFeatureFileBtn.addEventListener('click', () => {
+    const customInstructions = collectAndClearStagedInstructions();
+    vscode.postMessage({
+      type: 'generateFeatureFile',
+      payload: { code: playwrightEditor.getValue(), customInstructions }
+    });
   });
 
   // Kill All Browsers needs a confirmation, but VS Code webviews don't

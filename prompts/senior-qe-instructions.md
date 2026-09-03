@@ -37,22 +37,36 @@ minimalism here.
 ## 2. Explicit synchronization — no flaky tests
 
 - Before every single interaction with an element (click, fill, select,
-  check/uncheck, press, hover, drag), explicitly wait for that element to be
-  **visible**, and then explicitly confirm it is **enabled**, before acting
-  on it. Playwright's own action methods auto-wait for actionability
-  internally, but an explicit wait here still matters: it fails fast with a
-  clear, element-specific timeout message instead of a generic action
-  timeout, and it is the correct place to also confirm "enabled" state,
-  which a plain `.click()`/`.fill()` auto-wait does not check on its own.
+  check/uncheck, press, hover, drag), explicitly wait for that element
+  first, using ONLY conditions from this exact set — never a different
+  condition, and never a wait with no specific condition at all:
+  - element to be **visible**
+  - element to be **clickable**
+  - element to be **enabled**
+  - element to be **present on the DOM**
+  - element to be **interactable**
+  Pick whichever of these the interaction actually needs (typically
+  **visible** + **enabled**, or the single **interactable**/**clickable**
+  check where the target framework offers one directly, as the practical
+  equivalent of confirming both at once) — implemented with whatever the
+  target language/framework's own idiomatic API for that condition is
+  (e.g. Playwright Java's `Locator.waitFor(WaitForOptions)` +
+  `assertThat(locator).isEnabled()`, or Playwright Python's
+  `locator.wait_for(state=...)` + `expect(locator).to_be_enabled()`).
+  Playwright's own action methods auto-wait for actionability internally,
+  but an explicit wait here still matters: it fails fast with a clear,
+  element-specific timeout message naming exactly which element and which
+  condition failed, instead of a generic action timeout.
 - Never use a fixed `Thread.sleep` / `time.sleep` / arbitrary delay anywhere.
-  Every wait must be condition-based (visible/enabled/attached/detached, a
-  network idle state, a URL change, or a web-first assertion that itself
-  retries) — never time-based.
+  Every wait must be one of the five element conditions above, or — for a
+  page-level transition rather than a single element — a network idle
+  state, a URL change, or a web-first assertion that itself retries — never
+  time-based.
 - After any action that can trigger navigation or a page transition (a
   submit-like click, pressing Enter in a search box, etc.), explicitly wait
-  for the resulting state (load state, URL, or the next expected element)
-  before the flow continues — never assume the previous action already
-  settled everything.
+  for the resulting state (load state, URL, or the next expected element —
+  using one of the conditions above for that next element) before the flow
+  continues — never assume the previous action already settled everything.
 
 ## 3. Error handling and logging — production-grade, not decorative
 
@@ -94,15 +108,41 @@ minimalism here.
   redundant comments restating what the next line already says.
 - Keep the same target language and language/runtime version as the
   reference code.
-- The reference code below includes a browser-channel launch override (a
-  `browser_type_launch_args` fixture in Python, or an `OptionsFactory`
-  passed to `@UsePlaywright` in Java) that points Playwright at the real,
-  already-installed Chrome or Edge instead of its own bundled Chromium — a
-  Chromium/Firefox/WebKit download is blocked by company policy in this
-  environment. Preserve that override exactly (same channel value, same
-  mechanism) in the output; never remove it, never let a rewrite of the
-  surrounding code accidentally drop it, and never fall back to a plain
-  `browser.launch()`/default `@UsePlaywright` with no channel specified.
+- **Never launch Playwright's own bundled Chromium, and never let the
+  browser navigate to the target URL on it.** A Chromium/Firefox/WebKit
+  download is blocked by company policy in this environment — the output
+  must always launch the real browser executable already installed on the
+  local machine, found on disk by `executablePath` (never by `channel`,
+  which still depends on Playwright's own resolution of the install rather
+  than a direct filesystem check). Which executable to look for is exactly
+  whichever the user picked in softPlay Settings under Browser — **Chrome or
+  Edge only** — this extension never downloads or bundles a browser of its
+  own:
+  - **Chrome selected** — look for `chrome.exe` in, in this order: a
+    `CHROME_EXECUTABLE_PATH` environment-variable override, then
+    `C:\Program Files\Google\Chrome\Application\chrome.exe`, then
+    `C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`, then the
+    per-user `%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe`.
+  - **Edge selected** — look for `msedge.exe` in, in this order: an
+    `EDGE_EXECUTABLE_PATH` environment-variable override, then
+    `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`, then
+    `C:\Program Files\Microsoft\Edge\Application\msedge.exe`, then the
+    per-user `%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe`.
+  - If none of a browser's candidate paths exist, raise/throw a clear,
+    actionable error naming the missing executable and the override
+    env var — never silently fall back to a default `browser.launch()`/
+    `@UsePlaywright` with no `executablePath`, and never fall back to the
+    *other* browser than the one selected in Settings.
+  The reference code below, when present, already carries this exact
+  override (a `browser_type_launch_args` pytest fixture in Python wiring a
+  `_resolve_chrome_executable()`/`_resolve_edge_executable()` helper into
+  `"executable_path"`; an `OptionsFactory` passed to `@UsePlaywright` in
+  Java wiring an equivalent `resolveChromeExecutable()`/
+  `resolveEdgeExecutable()` helper into `.setExecutablePath(Paths.get(...))`)
+  — preserve it exactly (same candidate paths, same order, same env-var
+  name, same error-on-not-found behavior) rather than rewriting it; if the
+  reference code doesn't already have it for some reason, add it yourself
+  exactly as specified above.
 
 ## 5. BDD Gherkin Step Definition Linking
 

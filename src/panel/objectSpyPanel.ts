@@ -6,6 +6,7 @@ import { SettingsStore } from '../settings/settingsStore';
 import { SettingsPanel } from './settingsPanel';
 import { FeatureFilePanel, LinkedScenario } from './featureFilePanel';
 import { AiCodePanel } from './aiCodePanel';
+import { GeneratedFeaturePanel } from './generatedFeaturePanel';
 import { CopilotUnavailableError, extractCodeBlock, sendPrompt } from '../llm/copilotClient';
 
 type InboundMessage =
@@ -17,6 +18,7 @@ type InboundMessage =
   | { type: 'refreshPromptFiles' }
   | { type: 'sendToLlm'; payload: { selectedFiles: string[]; code: string; customInstructions: string } }
   | { type: 'openAiCodePanel' }
+  | { type: 'generateFeatureFile'; payload: { code: string; customInstructions: string } }
   | { type: 'linkFeatureFile' }
   | { type: 'reopenFeatureFile' }
   | { type: 'unlinkFeatureFile' }
@@ -53,11 +55,16 @@ export const OBJECT_SPY_VIEW_ID = 'objectSpy.mainView';
  * been removed entirely as redundant, per an explicit decision to keep
  * native `codegen` as the only path). "Generated Code" streams codegen's
  * output file verbatim; "Link Feature File" ties a Cucumber Gherkin
- * scenario to it (see featureFilePanel.ts). AI processing (Copilot) never
- * starts on its own — recording code, checking a "Custom md files" box, or
- * typing in the chat composer only ever stages context; nothing is sent to
- * the LLM until the user explicitly clicks "Start AI Processing", which
- * bundles all of it together (see runLlmRefinement()/sendToLlm()).
+ * scenario to it (see featureFilePanel.ts); "Generate Gherkin Feature File"
+ * is the reverse direction for when no .feature file exists yet — it turns
+ * a Playwright Codegen recording alone into a brand-new BDD feature file
+ * (see generateFeatureFile()/prompts/generate-feature-file.md). AI
+ * processing (Copilot) never starts on its own — recording code, checking a
+ * "Custom md files" box, or typing in the chat composer only ever stages
+ * context; nothing is sent to the LLM until the user explicitly clicks
+ * "Start AI Processing" or "Generate Gherkin Feature File", each of which
+ * bundles its own relevant context together (see
+ * runLlmRefinement()/sendToLlm() and generateFeatureFile()).
  */
 export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
@@ -75,6 +82,12 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   // Copilot request/response lifecycle (runLlmRefinement()); this is purely
   // where the result gets displayed.
   private readonly aiCodePanel: AiCodePanel;
+  // "Generate Gherkin Feature File" — the OPPOSITE direction of the above:
+  // recorded Playwright Codegen code alone (no linked .feature file
+  // needed) turned into a NEW BDD feature file. Its own full-size
+  // editor-area panel, same shape as aiCodePanel; see
+  // generateFeatureFile()/prompts/generate-feature-file.md.
+  private readonly generatedFeaturePanel: GeneratedFeaturePanel;
   // The Gherkin Scenario/Scenario Outline currently linked via "Link
   // Feature file" (Control Panel) — folded into every LLM refinement
   // request (manual or automatic) so the generated step definitions are
@@ -100,6 +113,10 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   // starting (or the view closing) can cancel the previous one cleanly
   // instead of leaving two streams writing into the same AI code view.
   private llmCancellation: vscode.CancellationTokenSource | undefined;
+  // Same, but for an in-flight "Generate Gherkin Feature File" request —
+  // kept separate from llmCancellation so starting one kind of generation
+  // never cancels an unrelated one already in flight for the other panel.
+  private featureGenCancellation: vscode.CancellationTokenSource | undefined;
 
   // How long to wait for the FIRST chunk of a Copilot response before
   // giving up — this is "thinking" time on a genuinely large prompt (the
@@ -121,6 +138,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   constructor(private readonly context: vscode.ExtensionContext, private readonly settingsStore: SettingsStore) {
     this.settingsPanel = new SettingsPanel(context, settingsStore);
     this.aiCodePanel = new AiCodePanel(context, () => void this.regenerateAiCode());
+    this.generatedFeaturePanel = new GeneratedFeaturePanel(context, () => void this.regenerateFeatureFile());
     this.featureFilePanel = new FeatureFilePanel(
       (scenario) => {
         this.linkedScenario = scenario;
@@ -207,9 +225,12 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   dispose(): void {
     this.llmCancellation?.cancel();
     this.llmCancellation?.dispose();
+    this.featureGenCancellation?.cancel();
+    this.featureGenCancellation?.dispose();
     this.codegenManager.dispose();
     this.settingsPanel.dispose();
     this.aiCodePanel.dispose();
+    this.generatedFeaturePanel.dispose();
     this.featureFilePanel.dispose();
     this.outputChannel.dispose();
     this.disposables.forEach((d) => d.dispose());
@@ -245,6 +266,10 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
         break;
       case 'openAiCodePanel':
         this.aiCodePanel.show();
+        break;
+      case 'generateFeatureFile':
+        this.generatedFeaturePanel.show(); // a manual send is a deliberate "show me the result" action
+        await this.generateFeatureFile(message.payload.code, message.payload.customInstructions);
         break;
       case 'linkFeatureFile':
         // Once a file has been linked, this button reopens that SAME
@@ -371,6 +396,64 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     await this.runLlmRefinement(instructions, playwrightCode, '');
   }
 
+  /** "Generate Gherkin Feature File" (Control Panel) — the counterpart to
+   * "Start AI Processing" for when the user has NOT linked a .feature file:
+   * sends whatever Playwright Codegen recorded (plus anything currently in
+   * the chat box) to the LLM with prompts/generate-feature-file.md's
+   * instructions, producing a brand-new BDD .feature file in the Generated
+   * Feature File panel instead of refined automation code. */
+  private async generateFeatureFile(playwrightCode: string, customInstructions: string): Promise<void> {
+    const settings = this.settingsStore.get();
+    if (!settings.copilotEnabled || !settings.copilotModelId) {
+      this.generatedFeaturePanel.showError('Enable "Link with GitHub Copilot LLM" (Control Panel) and pick a model in Settings first.');
+      return;
+    }
+    // Same empty/no-op guard as runLlmRefinement() — never send an
+    // empty/no-op context to the LLM.
+    if (!playwrightCode.trim()) {
+      void vscode.window.showWarningMessage('Record some user action first before generating a feature file');
+      return;
+    }
+
+    this.featureGenCancellation?.cancel();
+    this.featureGenCancellation?.dispose();
+    const cts = new vscode.CancellationTokenSource();
+    this.featureGenCancellation = cts;
+
+    this.generatedFeaturePanel.startGenerating();
+
+    const builtIn = readFeatureFileGenInstructions();
+    const prompt = buildFeatureFilePrompt(builtIn, playwrightCode, customInstructions.trim());
+    this.outputChannel.appendLine(
+      `Sending to Copilot model "${settings.copilotModelId}" for feature-file generation: ` +
+        `${builtIn ? `instructions (${builtIn.length} chars)` : '(MISSING — prompts/generate-feature-file.md failed to load)'}, ` +
+        `${playwrightCode.length} chars of reference code — prompt is ${prompt.length} chars total.`
+    );
+
+    try {
+      const accumulated = await this.streamCopilotResponse(prompt, settings.copilotModelId, cts, (chunk) =>
+        this.generatedFeaturePanel.appendChunk(chunk)
+      );
+      this.outputChannel.appendLine(`Copilot response received: ${accumulated.length} chars.`);
+      this.generatedFeaturePanel.finish(extractCodeBlock(accumulated));
+    } catch (err) {
+      if (!cts.token.isCancellationRequested) {
+        const message = err instanceof CopilotUnavailableError ? err.message : describeError(err);
+        this.outputChannel.appendLine(`Copilot feature-file request failed: ${message}`);
+        this.generatedFeaturePanel.showError(message);
+      }
+    }
+  }
+
+  /** "Regenerate" (Generated Feature File panel) — re-runs with the
+   * Playwright Code editor's live content at click time; no chat-box text
+   * (that's specific to the Control Panel's "Generate Gherkin Feature
+   * File" button — same asymmetry as regenerateAiCode() vs. sendToLlm()). */
+  private async regenerateFeatureFile(): Promise<void> {
+    const playwrightCode = await this.requestCurrentPlaywrightCode();
+    await this.generateFeatureFile(playwrightCode, '');
+  }
+
   /** Asks the sidebar webview for its Playwright Code editor's CURRENT
    * content — which may include manual edits the user made, unlike
    * `this.nativeGeneratedCode` (only ever what `codegen` itself last
@@ -457,57 +540,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     );
 
     try {
-      let accumulated = '';
-      let receivedAnyChunk = false;
-      // No case observed so far where the Language Model API's own promise
-      // neither resolves nor rejects — but nothing in its contract
-      // *guarantees* that either, and a silent hang there would otherwise
-      // show "(generating…)" forever with zero feedback. This timeout is a
-      // last-resort safety net, not a substitute for whatever the real
-      // per-request latency should be — see FIRST_CHUNK_TIMEOUT_MS /
-      // INTER_CHUNK_TIMEOUT_MS for why the two phases get different
-      // allowances; each chunk received re-arms it for the next one.
-      let timeoutHandle: ReturnType<typeof setTimeout>;
-      const armTimeout = (onTimeout: () => void) => {
-        clearTimeout(timeoutHandle);
-        const ms = receivedAnyChunk ? ObjectSpyPanel.INTER_CHUNK_TIMEOUT_MS : ObjectSpyPanel.FIRST_CHUNK_TIMEOUT_MS;
-        timeoutHandle = setTimeout(onTimeout, ms);
-      };
-      await new Promise<void>((resolve, reject) => {
-        armTimeout(() =>
-          reject(
-            new Error(
-              `Copilot did not respond within ${ObjectSpyPanel.FIRST_CHUNK_TIMEOUT_MS / 60_000} minutes — no chunk of the response arrived in that window. A large prompt (a big linked scenario, a lot of reference code, or several Custom md files checked) can genuinely take a while — try again, or trim what's being sent.`
-            )
-          )
-        );
-        sendPrompt(
-          settings.copilotModelId,
-          prompt,
-          (chunk) => {
-            receivedAnyChunk = true;
-            armTimeout(() =>
-              reject(
-                new Error(
-                  `Copilot stopped responding mid-stream — no further chunk arrived within ${ObjectSpyPanel.INTER_CHUNK_TIMEOUT_MS / 1000} seconds.`
-                )
-              )
-            );
-            accumulated += chunk;
-            this.postLlmChunk(chunk);
-          },
-          cts.token
-        )
-          .then(() => {
-            clearTimeout(timeoutHandle);
-            resolve();
-          })
-          .catch((err) => {
-            clearTimeout(timeoutHandle);
-            reject(err);
-          });
-      });
-
+      const accumulated = await this.streamCopilotResponse(prompt, settings.copilotModelId, cts, (chunk) => this.postLlmChunk(chunk));
       this.outputChannel.appendLine(`Copilot response received: ${accumulated.length} chars.`);
       this.postLlmDone(extractCodeBlock(accumulated));
     } catch (err) {
@@ -517,6 +550,73 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
         this.postLlmError(message);
       }
     }
+  }
+
+  /**
+   * The actual streaming request/timeout/cancellation core, shared by
+   * runLlmRefinement() (AI Generated Code) and generateFeatureFile()
+   * (Generated Feature File) — the two differ only in which prompt they
+   * build and which panel/status sink the result goes to, both handled by
+   * the caller. Returns the full accumulated response text, or rejects with
+   * the same errors sendPrompt()/the timeouts above would.
+   */
+  private async streamCopilotResponse(
+    prompt: string,
+    copilotModelId: string,
+    cts: vscode.CancellationTokenSource,
+    onChunk: (chunk: string) => void
+  ): Promise<string> {
+    let accumulated = '';
+    let receivedAnyChunk = false;
+    // No case observed so far where the Language Model API's own promise
+    // neither resolves nor rejects — but nothing in its contract
+    // *guarantees* that either, and a silent hang there would otherwise
+    // show "(generating…)" forever with zero feedback. This timeout is a
+    // last-resort safety net, not a substitute for whatever the real
+    // per-request latency should be — see FIRST_CHUNK_TIMEOUT_MS /
+    // INTER_CHUNK_TIMEOUT_MS for why the two phases get different
+    // allowances; each chunk received re-arms it for the next one.
+    let timeoutHandle: ReturnType<typeof setTimeout>;
+    const armTimeout = (onTimeout: () => void) => {
+      clearTimeout(timeoutHandle);
+      const ms = receivedAnyChunk ? ObjectSpyPanel.INTER_CHUNK_TIMEOUT_MS : ObjectSpyPanel.FIRST_CHUNK_TIMEOUT_MS;
+      timeoutHandle = setTimeout(onTimeout, ms);
+    };
+    await new Promise<void>((resolve, reject) => {
+      armTimeout(() =>
+        reject(
+          new Error(
+            `Copilot did not respond within ${ObjectSpyPanel.FIRST_CHUNK_TIMEOUT_MS / 60_000} minutes — no chunk of the response arrived in that window. A large prompt (a big linked scenario, a lot of reference code, or several Custom md files checked) can genuinely take a while — try again, or trim what's being sent.`
+          )
+        )
+      );
+      sendPrompt(
+        copilotModelId,
+        prompt,
+        (chunk) => {
+          receivedAnyChunk = true;
+          armTimeout(() =>
+            reject(
+              new Error(
+                `Copilot stopped responding mid-stream — no further chunk arrived within ${ObjectSpyPanel.INTER_CHUNK_TIMEOUT_MS / 1000} seconds.`
+              )
+            )
+          );
+          accumulated += chunk;
+          onChunk(chunk);
+        },
+        cts.token
+      )
+        .then(() => {
+          clearTimeout(timeoutHandle);
+          resolve();
+        })
+        .catch((err) => {
+          clearTimeout(timeoutHandle);
+          reject(err);
+        });
+    });
+    return accumulated;
   }
 
   /** The class name (Java) / module base name (Python) the linked
@@ -714,6 +814,9 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
           <button id="openAiCodeBtn" class="btn btn-silver">Open AI Generated Code</button>
           <span id="aiStatusLabel" class="llm-status"></span>
         </div>
+        <div class="toolbar-row ai-open-row">
+          <button id="generateFeatureFileBtn" class="btn" title="No feature file to link yet? Record a flow with Start above, then send the recorded Playwright Code (plus anything in the chat box) to the LLM to generate a brand-new BDD Gherkin feature file">Generate Gherkin Feature File</button>
+        </div>
       </div>
 
       <div class="code-panels">
@@ -778,6 +881,57 @@ function readSeniorQeInstructions(): string {
     cachedSeniorQeInstructions = '';
   }
   return cachedSeniorQeInstructions;
+}
+
+// Same pattern as readSeniorQeInstructions() above, for the "Generate
+// Gherkin Feature File" prompt (prompts/generate-feature-file.md) instead.
+let cachedFeatureFileGenInstructions: string | undefined;
+function readFeatureFileGenInstructions(): string {
+  if (cachedFeatureFileGenInstructions !== undefined) {
+    return cachedFeatureFileGenInstructions;
+  }
+  try {
+    cachedFeatureFileGenInstructions = fs.readFileSync(
+      path.join(__dirname, '..', '..', 'prompts', 'generate-feature-file.md'),
+      'utf8'
+    );
+  } catch {
+    cachedFeatureFileGenInstructions = '';
+  }
+  return cachedFeatureFileGenInstructions;
+}
+
+/**
+ * Builds the single user message sent to the Copilot model for "Generate
+ * Gherkin Feature File" — the bundled instructions (see
+ * prompts/generate-feature-file.md) plus, when present, any free-text the
+ * user typed into the chat box, plus the raw Playwright Codegen output to
+ * analyze. Deliberately much simpler than buildLlmPrompt(): no linked
+ * scenario, no Settings (language/version/browser are irrelevant to
+ * producing a Gherkin feature file), no Custom md files — this is a
+ * standalone "code in, feature file out" request.
+ */
+function buildFeatureFilePrompt(builtInInstructions: string, playwrightCode: string, customInstructions: string): string {
+  const parts: string[] = [];
+
+  if (builtInInstructions) {
+    parts.push(builtInInstructions);
+  } else {
+    parts.push(
+      'Analyze the following Playwright Codegen-generated code and produce a complete, business-focused BDD ' +
+        'Gherkin feature file. Output ONLY the feature file in a single fenced `gherkin` code block, no other commentary.'
+    );
+  }
+
+  if (customInstructions) {
+    parts.push(`\n## Additional instructions from the user — follow these too\n${customInstructions}`);
+  }
+
+  parts.push(
+    `\n## Playwright Codegen output to analyze\n\`\`\`\n${playwrightCode}\n\`\`\``
+  );
+
+  return parts.join('\n');
 }
 
 /** Translates CodegenStatus into the PanelStatus shape the webview knows
@@ -858,7 +1012,6 @@ function buildLlmPrompt(
 ): string {
   const languageName = language === 'java' ? 'Java (JUnit 5, Playwright for Java)' : 'Python (pytest, Playwright for Python)';
   const versionGuidance = languageVersionGuidance(language, languageVersion);
-  const channel = browserChannel === 'edge' ? 'msedge' : 'chrome';
   const isPartialSelection = !!linkedScenario && linkedScenario.selectedStepCount < linkedScenario.totalStepCount;
 
   const parts: string[] = [
@@ -914,18 +1067,31 @@ function buildLlmPrompt(
     parts.push(`\n## Mandatory refinement standard — apply every part of this\n${builtInInstructions}`);
   }
 
-  parts.push(
-    `\n## Browser channel requirement (non-negotiable)\n` +
-      `The user selected **${browserChannel === 'edge' ? 'Microsoft Edge' : 'Google Chrome'}** ` +
-      `(Playwright channel \`"${channel}"\`) in softPlay Settings. A Chromium/Firefox/WebKit download ` +
-      `is blocked by company policy in this environment, so the output must launch that real, ` +
-      `already-installed browser and must never trigger — or leave a code path that could trigger — ` +
-      `a Playwright browser download. The reference code below already carries this override ` +
-      `(a \`browser_type_launch_args\` pytest fixture for Python, or an \`OptionsFactory\` passed to ` +
-      `\`@UsePlaywright\` for Java); keep it in the output exactly as-is, with \`channel="${channel}"\` ` +
-      `(Python) / \`.setChannel("${channel}")\` (Java) unchanged, even as you restructure everything ` +
-      `else around it.`
-  );
+  // Skipped entirely for a partial-step-selection ("bare snippet") request —
+  // the "Restricted scope" section above already forbids ANY browser
+  // launch/teardown code there, and this section would otherwise
+  // contradict that by demanding the launch override be kept. Full-file
+  // requests (the default, all steps checked) still get it.
+  if (!isPartialSelection) {
+    parts.push(
+      `\n## Browser executable requirement (non-negotiable)\n` +
+        `The user selected **${browserChannel === 'edge' ? 'Microsoft Edge' : 'Google Chrome'}** in softPlay ` +
+        `Settings. A Chromium/Firefox/WebKit download is blocked by company policy in this environment, so the ` +
+        `output must launch the real, already-installed ${browserChannel === 'edge' ? 'Edge' : 'Chrome'} executable ` +
+        `on the local machine — found on disk by \`executablePath\` (never by \`channel\`, which still depends on ` +
+        `Playwright's own resolution of the install), and must never trigger — or leave a code path that could ` +
+        `trigger — a Playwright browser download or a launch with no \`executablePath\` set at all. The reference ` +
+        `code below already carries this exact override: a \`_resolve_${browserChannel === 'edge' ? 'edge' : 'chrome'}_executable()\` ` +
+        `helper (Python) checking, in order, an env-var override then the standard Windows install locations ` +
+        `(\`Program Files\`, \`Program Files (x86)\`, per-user \`LOCALAPPDATA\`) for ` +
+        `${browserChannel === 'edge' ? 'msedge.exe' : 'chrome.exe'}, wired into a \`browser_type_launch_args\` ` +
+        `pytest fixture's \`"executable_path"\` — or the equivalent \`resolve${browserChannel === 'edge' ? 'Edge' : 'Chrome'}Executable()\` ` +
+        `helper (Java) wired into an \`OptionsFactory\` passed to \`@UsePlaywright\`, calling ` +
+        `\`.setExecutablePath(Paths.get(...))\`. Keep this override in the output exactly as-is — same candidate ` +
+        `paths in the same order, same env-var name, same "throw/raise if none found" behavior (never silently ` +
+        `fall back to a default launch) — even as you restructure everything else around it.`
+    );
+  }
 
   if (instructions.length) {
     parts.push(

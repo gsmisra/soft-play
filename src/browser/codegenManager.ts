@@ -47,10 +47,11 @@ export class CodegenManager implements vscode.Disposable {
   /** Fires codegen's own file content every time it writes a new version —
    * left otherwise untouched (no reformatting, no locator/action rewriting;
    * that's deliberately "as-is" per the feature's whole point) with exactly
-   * one addition: the Chrome/Edge browser-channel launch override selected
-   * in Settings (see injectBrowserChannelConfig below), so code saved
-   * straight from this panel never falls back to Playwright's own bundled
-   * Chromium, whose download is blocked by company policy. */
+   * one addition: a launch override that finds the real, already-installed
+   * Chrome/Edge executable on disk (whichever is selected in Settings — see
+   * injectBrowserChannelConfig below) and launches that directly, so code
+   * saved straight from this panel never falls back to Playwright's own
+   * bundled Chromium, whose download is blocked by company policy. */
   readonly onCodeUpdate = this.codeEmitter.event;
 
   private readonly logEmitter = new vscode.EventEmitter<string>();
@@ -241,47 +242,95 @@ function describeError(err: unknown): string {
 /**
  * `playwright codegen --channel=...` only steers the browser codegen itself
  * launches to record the flow — verified against Playwright's own
- * `python-pytest`/`java-junit` templates, neither one writes a channel or
- * any other launch config into the *generated test file* on its own (the
- * fixture-based `pytest-playwright` plugin and the `@UsePlaywright` JUnit
- * extension both default to downloading and launching Playwright's own
- * bundled Chromium unless the test file itself says otherwise). Since a
- * Chromium/Firefox/WebKit download is blocked by company policy here, this
- * stitches in the idiomatic override for whichever browser is selected in
- * Settings so the saved file runs against the real, already-installed
- * Chrome/Edge with no download ever attempted — same override the AI
- * refinement prompt is told to reproduce (see prompts/senior-qe-instructions.md).
+ * `python-pytest`/`java-junit` templates, neither one writes any launch
+ * config into the *generated test file* on its own (the fixture-based
+ * `pytest-playwright` plugin and the `@UsePlaywright` JUnit extension both
+ * default to downloading and launching Playwright's own bundled Chromium
+ * unless the test file itself says otherwise). Since a Chromium/Firefox/
+ * WebKit download is blocked by company policy here, this stitches in an
+ * override that finds the real, already-installed Chrome/Edge executable on
+ * disk directly (`executablePath`, resolved from a list of the standard
+ * per-machine/per-user install locations, with an env-var override for a
+ * nonstandard install) — a stronger guarantee than Playwright's own
+ * `channel` resolution, which still depends on Playwright recognizing the
+ * install itself. Same override the AI refinement prompt is told to
+ * reproduce (see prompts/senior-qe-instructions.md).
  */
 function injectBrowserChannelConfig(content: string, language: Language, browserChannel: BrowserChannel): string {
-  const channel = browserChannel === 'edge' ? 'msedge' : 'chrome';
-  return language === 'java' ? injectJavaChannel(content, channel) : injectPythonChannel(content, channel);
+  return language === 'java' ? injectJavaExecutablePath(content, browserChannel) : injectPythonExecutablePath(content, browserChannel);
 }
 
-function injectPythonChannel(content: string, channel: string): string {
+function injectPythonExecutablePath(content: string, browserChannel: BrowserChannel): string {
   const lines = content.split('\n');
   let importEnd = 0;
   while (importEnd < lines.length && (/^\s*(import |from )/.test(lines[importEnd]) || lines[importEnd].trim() === '')) {
     importEnd++;
   }
+  const isEdge = browserChannel === 'edge';
+  const envVar = isEdge ? 'EDGE_EXECUTABLE_PATH' : 'CHROME_EXECUTABLE_PATH';
+  const exeName = isEdge ? 'msedge.exe' : 'chrome.exe';
+  const browserLabel = isEdge ? 'Microsoft Edge' : 'Google Chrome';
+  // Each a separate os.path.join() argument below, never concatenated with
+  // a literal "\" ourselves — a bare "\" inside a normal (non-raw) Python
+  // string is an invalid/deprecated escape sequence unless the following
+  // character happens to form a real one; letting os.path.join supply the
+  // separator sidesteps that entirely, on top of being the idiomatic way to
+  // build a path in Python regardless.
+  const vendor = isEdge ? 'Microsoft' : 'Google';
+  const product = isEdge ? 'Edge' : 'Chrome';
+  // Exact locations Chrome/Edge actually install to on Windows — Chrome
+  // under Program Files, Edge under Program Files (x86) — checked first;
+  // the other Program Files variant and the per-user LOCALAPPDATA install
+  // follow as fallbacks for a non-default install.
+  const primaryProgramFilesVar = isEdge ? 'PROGRAMFILES(X86)' : 'PROGRAMFILES';
+  const primaryProgramFilesDefault = isEdge ? 'C:\\Program Files (x86)' : 'C:\\Program Files';
+  const secondaryProgramFilesVar = isEdge ? 'PROGRAMFILES' : 'PROGRAMFILES(X86)';
+  const secondaryProgramFilesDefault = isEdge ? 'C:\\Program Files' : 'C:\\Program Files (x86)';
+  const candidateLines = [
+    `        os.environ.get("${envVar}"),`,
+    `        os.path.join(os.environ.get("${primaryProgramFilesVar}", r"${primaryProgramFilesDefault}"), "${vendor}", "${product}", "Application", "${exeName}"),`,
+    `        os.path.join(os.environ.get("${secondaryProgramFilesVar}", r"${secondaryProgramFilesDefault}"), "${vendor}", "${product}", "Application", "${exeName}"),`,
+    `        os.path.join(os.environ.get("LOCALAPPDATA", ""), "${vendor}", "${product}", "Application", "${exeName}"),`
+  ];
   const fixtureBlock = [
+    'import os',
     'import pytest',
+    '',
+    '',
+    `def _resolve_${isEdge ? 'edge' : 'chrome'}_executable():`,
+    `    # Chromium/Firefox/WebKit downloads are blocked by company policy — find the`,
+    `    # real, already-installed ${browserLabel} on disk instead (an explicit`,
+    `    # ${envVar} override first, then the standard per-machine/per-user install`,
+    `    # locations) and launch that directly, never Playwright's own bundled browser.`,
+    '    candidates = [',
+    ...candidateLines,
+    '    ]',
+    '    for path in candidates:',
+    '        if path and os.path.isfile(path):',
+    '            return path',
+    '    raise RuntimeError(',
+    `        "Could not find a locally installed ${browserLabel} (${exeName}). Chromium downloads are disabled by "`,
+    `        "company policy — install ${browserLabel}, or set the ${envVar} environment variable to its full path."`,
+    '    )',
     '',
     '',
     '@pytest.fixture(scope="session")',
     'def browser_type_launch_args(browser_type_launch_args):',
-    '    # Use the real, already-installed system browser channel selected in',
-    '    # softPlay Settings instead of Playwright\'s own bundled Chromium —',
-    '    # a Chromium/Firefox/WebKit download is blocked by company policy.',
-    `    return {**browser_type_launch_args, "channel": "${channel}"}`,
+    `    return {**browser_type_launch_args, "executable_path": _resolve_${isEdge ? 'edge' : 'chrome'}_executable()}`,
     ''
   ];
+  const hasOsImport = lines.slice(0, importEnd).some((l) => /^\s*import os\s*$/.test(l));
   const hasPytestImport = lines.slice(0, importEnd).some((l) => /^\s*import pytest\s*$/.test(l));
-  const block = hasPytestImport ? fixtureBlock.slice(2) : fixtureBlock;
+  const block = fixtureBlock.filter((line) => {
+    if (hasOsImport && line === 'import os') return false;
+    if (hasPytestImport && line === 'import pytest') return false;
+    return true;
+  });
   const result = [...lines.slice(0, importEnd), ...block, ...lines.slice(importEnd)];
   return result.join('\n');
 }
 
-function injectJavaChannel(content: string, channel: string): string {
+function injectJavaExecutablePath(content: string, browserChannel: BrowserChannel): string {
   const classMatch = content.match(/public\s+class\s+(\w+)/);
   if (!classMatch) {
     return content;
@@ -292,7 +341,7 @@ function injectJavaChannel(content: string, channel: string): string {
   if (!result.includes('import com.microsoft.playwright.junit.Options;')) {
     result = result.replace(
       /import com\.microsoft\.playwright\.junit\.UsePlaywright;/,
-      `import com.microsoft.playwright.junit.UsePlaywright;\nimport com.microsoft.playwright.junit.Options;\nimport com.microsoft.playwright.junit.OptionsFactory;`
+      `import com.microsoft.playwright.junit.UsePlaywright;\nimport com.microsoft.playwright.junit.Options;\nimport com.microsoft.playwright.junit.OptionsFactory;\nimport java.io.File;\nimport java.nio.file.Paths;`
     );
   }
 
@@ -300,14 +349,49 @@ function injectJavaChannel(content: string, channel: string): string {
   // instead of the bare, browser-default-launching form codegen emits.
   result = result.replace('@UsePlaywright', `@UsePlaywright(${className}.SoftPlayOptions.class)`);
 
+  const isEdge = browserChannel === 'edge';
+  const envVar = isEdge ? 'EDGE_EXECUTABLE_PATH' : 'CHROME_EXECUTABLE_PATH';
+  const exeName = isEdge ? 'msedge.exe' : 'chrome.exe';
+  const browserLabel = isEdge ? 'Microsoft Edge' : 'Google Chrome';
+  const vendorDir = isEdge ? 'Microsoft\\\\Edge' : 'Google\\\\Chrome';
+  const methodName = isEdge ? 'resolveEdgeExecutable' : 'resolveChromeExecutable';
+  // Exact locations Chrome/Edge actually install to on Windows — Chrome
+  // under Program Files, Edge under Program Files (x86) — checked first;
+  // the other Program Files variant follows as a fallback for a
+  // non-default install.
+  const primaryVar = isEdge ? 'PROGRAMFILES(X86)' : 'PROGRAMFILES';
+  const primaryDefault = isEdge ? 'C:\\\\Program Files (x86)' : 'C:\\\\Program Files';
+  const secondaryVar = isEdge ? 'PROGRAMFILES' : 'PROGRAMFILES(X86)';
+  const secondaryDefault = isEdge ? 'C:\\\\Program Files' : 'C:\\\\Program Files (x86)';
+
   const optionsClass =
-    `\n  /** Launches the real, already-installed system browser channel selected\n` +
-    `   * in softPlay Settings instead of Playwright's own bundled Chromium —\n` +
-    `   * a Chromium/Firefox/WebKit download is blocked by company policy. */\n` +
+    `\n  /** Chromium/Firefox/WebKit downloads are blocked by company policy —\n` +
+    `   * finds the real, already-installed ${browserLabel} on disk instead and\n` +
+    `   * launches that directly, never Playwright's own bundled browser. */\n` +
     `  public static class SoftPlayOptions implements OptionsFactory {\n` +
     `    @Override\n` +
     `    public Options getOptions() {\n` +
-    `      return new Options().setLaunchOptions(new com.microsoft.playwright.BrowserType.LaunchOptions().setChannel("${channel}"));\n` +
+    `      return new Options().setLaunchOptions(\n` +
+    `          new com.microsoft.playwright.BrowserType.LaunchOptions().setExecutablePath(Paths.get(${methodName}())));\n` +
+    `    }\n\n` +
+    `    private static String ${methodName}() {\n` +
+    `      String primaryDir = System.getenv().getOrDefault("${primaryVar}", "${primaryDefault}");\n` +
+    `      String secondaryDir = System.getenv().getOrDefault("${secondaryVar}", "${secondaryDefault}");\n` +
+    `      String localAppData = System.getenv().getOrDefault("LOCALAPPDATA", "");\n` +
+    `      String[] candidates = new String[] {\n` +
+    `          System.getenv("${envVar}"),\n` +
+    `          primaryDir + "\\\\${vendorDir}\\\\Application\\\\${exeName}",\n` +
+    `          secondaryDir + "\\\\${vendorDir}\\\\Application\\\\${exeName}",\n` +
+    `          localAppData + "\\\\${vendorDir}\\\\Application\\\\${exeName}"\n` +
+    `      };\n` +
+    `      for (String candidate : candidates) {\n` +
+    `        if (candidate != null && new File(candidate).isFile()) {\n` +
+    `          return candidate;\n` +
+    `        }\n` +
+    `      }\n` +
+    `      throw new IllegalStateException(\n` +
+    `          "Could not find a locally installed ${browserLabel} (${exeName}). Chromium downloads are disabled by "\n` +
+    `              + "company policy — install ${browserLabel}, or set the ${envVar} environment variable to its full path.");\n` +
     `    }\n` +
     `  }\n`;
 

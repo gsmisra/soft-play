@@ -18,15 +18,27 @@
       'def', 'del', 'elif', 'else', 'except', 'finally', 'for', 'from', 'global', 'if', 'import', 'in',
       'is', 'lambda', 'nonlocal', 'not', 'or', 'pass', 'raise', 'return', 'try', 'while', 'with',
       'yield', 'self'
+    ],
+    // "Generate Gherkin Feature File" panel's own editor — a much smaller
+    // keyword set than Java/Python's (Gherkin has no expressions/operators
+    // of its own), just enough to make Given/When/Then/etc. and the section
+    // keywords read clearly against the plain step text around them.
+    gherkin: [
+      'Feature', 'Background', 'Scenario', 'Scenario Outline', 'Scenario Template', 'Examples',
+      'Given', 'When', 'Then', 'And', 'But', 'Rule'
     ]
   };
+
+  // Gherkin comments use "#", same as Python -- everything else (Java)
+  // uses "//"/"/* */".
+  var HASH_COMMENT_LANGS = { python: true, gherkin: true };
 
   function escapeHtml(s) {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
   function buildRegex(lang) {
-    var commentPattern = lang === 'python' ? '#[^\\n]*' : '//[^\\n]*|/\\*[\\s\\S]*?\\*/';
+    var commentPattern = HASH_COMMENT_LANGS[lang] ? '#[^\\n]*' : '//[^\\n]*|/\\*[\\s\\S]*?\\*/';
     var stringPattern =
       lang === 'python'
         ? "[rRbBfFuU]{0,2}(?:'''[\\s\\S]*?'''|\"\"\"[\\s\\S]*?\"\"\"|\"(?:\\\\.|[^\"\\\\\\n])*\"|'(?:\\\\.|[^'\\\\\\n])*')"
