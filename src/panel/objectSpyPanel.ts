@@ -810,12 +810,10 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
           </div>
         </details>
         <div class="toolbar-row ai-open-row">
+          <button id="generateFeatureFileBtn" class="btn btn-silver" title="No feature file to link yet? Record a flow with Start above, then send the recorded Playwright Code (plus anything in the chat box) to the LLM to generate a brand-new BDD Gherkin feature file">Generate Gherkin Feature File</button>
           <button id="startAiProcessingBtn" class="btn btn-silver" title="Send the current Playwright Code, Settings (browser/language/version), linked scenario or selected steps, checked Custom md files, and anything in the chat box below to the LLM for AI code generation">Start AI Processing</button>
           <button id="openAiCodeBtn" class="btn btn-silver">Open AI Generated Code</button>
           <span id="aiStatusLabel" class="llm-status"></span>
-        </div>
-        <div class="toolbar-row ai-open-row">
-          <button id="generateFeatureFileBtn" class="btn" title="No feature file to link yet? Record a flow with Start above, then send the recorded Playwright Code (plus anything in the chat box) to the LLM to generate a brand-new BDD Gherkin feature file">Generate Gherkin Feature File</button>
         </div>
       </div>
 
