@@ -1371,13 +1371,21 @@ function buildFeatureFilePrompt(builtInInstructions: string, playwrightCode: str
     );
   }
 
-  if (customInstructions) {
-    parts.push(`\n## Additional instructions from the user — follow these too\n${customInstructions}`);
-  }
-
   parts.push(
     `\n## Playwright Codegen output to analyze\n\`\`\`\n${playwrightCode}\n\`\`\``
   );
+
+  // Deliberately LAST — see buildLlmPrompt()'s identical block for why:
+  // placed earlier, this reads as a suggestion easily outweighed by
+  // whatever large block follows it; last, it's what the model reads
+  // right before generating.
+  if (customInstructions) {
+    parts.push(
+      `\n## ⚠ Additional instructions from the user — read this last and apply it\nThe user typed the following ` +
+        `into softPlay's chat box specifically for this request. Treat it as a real, binding requirement, not a ` +
+        `suggestion — if it conflicts with something more generic stated earlier in this prompt, this wins:\n${customInstructions}`
+    );
+  }
 
   return parts.join('\n');
 }
@@ -1423,10 +1431,6 @@ function buildApiFeatureFilePrompt(
     );
   }
 
-  if (customInstructions) {
-    parts.push(`\n## Additional instructions from the user — follow these too\n${customInstructions}`);
-  }
-
   if (linkedScenario) {
     const gherkinBlock = [linkedScenario.backgroundRawText, linkedScenario.rawText].filter(Boolean).join('\n\n');
     parts.push(
@@ -1439,6 +1443,15 @@ function buildApiFeatureFilePrompt(
   }
 
   parts.push(`\n## API Request Details to analyze\n${buildApiRequestSummary(apiDetails)}`);
+
+  // Deliberately LAST — see buildLlmPrompt()'s identical block for why.
+  if (customInstructions) {
+    parts.push(
+      `\n## ⚠ Additional instructions from the user — read this last and apply it\nThe user typed the following ` +
+        `into softPlay's chat box specifically for this request. Treat it as a real, binding requirement, not a ` +
+        `suggestion — if it conflicts with something more generic stated earlier in this prompt, this wins:\n${customInstructions}`
+    );
+  }
 
   return parts.join('\n');
 }
@@ -1505,10 +1518,6 @@ function buildApiLlmPrompt(
     );
   }
 
-  if (customInstructions) {
-    parts.push(`\n## Additional instructions from the user — follow these too\n${customInstructions}`);
-  }
-
   parts.push(`\n## API Request Details — the request to build test automation around\n${buildApiRequestSummary(apiDetails)}`);
 
   if (linkedScenario) {
@@ -1530,6 +1539,19 @@ function buildApiLlmPrompt(
               `from this scenario's own name, so it stays recognizable as the test for THIS scenario.`)
       );
     }
+  }
+
+  // Free-text instructions from the chat composer ("Add any details for
+  // the AI to follow…") — deliberately LAST, same reasoning as
+  // buildLlmPrompt()'s identical block: a model weighs what it reads most
+  // recently more heavily, and this document alone runs well over a
+  // thousand lines, easily burying/outweighing anything placed earlier.
+  if (customInstructions) {
+    parts.push(
+      `\n## ⚠ Additional instructions from the user — read this last and apply it\nThe user typed the following ` +
+        `into softPlay's chat box specifically for this request. Treat it as a real, binding requirement, not a ` +
+        `suggestion — if it conflicts with something more generic stated earlier in this prompt, this wins:\n${customInstructions}`
+    );
   }
 
   return parts.join('\n');
@@ -1747,12 +1769,6 @@ function buildLlmPrompt(
     );
   }
 
-  // Free-text instructions from the chat composer — used when no .md file
-  // was selected (or in addition to one).
-  if (customInstructions) {
-    parts.push(`\n## Additional instructions from the user — follow these too\n${customInstructions}`);
-  }
-
   // Placed BEFORE the "Linked Gherkin" section on purpose: the Gherkin
   // section (and its exclusion instruction, when only some steps are
   // checked) is deliberately the LAST thing the model reads before it has
@@ -1822,6 +1838,23 @@ function buildLlmPrompt(
               `derived from this scenario's own name, so it stays recognizable as the test for THIS scenario.`)
       );
     }
+  }
+
+  // Free-text instructions from the chat composer ("Add any details for
+  // the AI to follow…") — deliberately the LAST thing in the prompt, after
+  // the reference code and linked scenario, not earlier: a model weighs
+  // what it reads most recently more heavily, and burying this behind the
+  // large reference-code/Gherkin blocks that used to follow it caused it
+  // to be effectively ignored in practice. This is the user's own most
+  // specific, most current ask — apply it on top of everything above,
+  // adjusting whatever part of the output it's actually about, even where
+  // that means deviating from a general rule stated earlier.
+  if (customInstructions) {
+    parts.push(
+      `\n## ⚠ Additional instructions from the user — read this last and apply it\nThe user typed the following ` +
+        `into softPlay's chat box specifically for this request. Treat it as a real, binding requirement, not a ` +
+        `suggestion — if it conflicts with something more generic stated earlier in this prompt, this wins:\n${customInstructions}`
+    );
   }
 
   return parts.join('\n');
