@@ -139,14 +139,27 @@ export class SettingsPanel implements vscode.Disposable {
       font-size: 0.82em;
       color: var(--vscode-descriptionForeground);
     }
+    .field.disabled { opacity: 0.5; }
   </style>
 </head>
 <body>
-  <h2>Browser</h2>
+  <h2>Automation Type</h2>
   <div class="field">
     <label>
+      Automation type
+      <span class="hint">UI Automation records/refines Playwright browser tests. API Automation builds REST Assured (Java) / requests (Python) API tests from a request you describe below instead — no browser involved.</span>
+    </label>
+    <div class="radio-group">
+      <label><input type="radio" name="automationMode" value="ui" /> UI Automation</label>
+      <label><input type="radio" name="automationMode" value="api" /> API Automation</label>
+    </div>
+  </div>
+
+  <h2>Browser</h2>
+  <div class="field" id="browserField">
+    <label>
       Browser
-      <span class="hint">Chrome or Edge only — this extension never downloads a browser of its own.</span>
+      <span class="hint">Chrome or Edge only — this extension never downloads a browser of its own. Not used in API Automation mode (no browser is launched).</span>
     </label>
     <div class="radio-group">
       <label><input type="radio" name="browserChannel" value="chrome" /> Chrome</label>
@@ -200,6 +213,8 @@ export class SettingsPanel implements vscode.Disposable {
       let languageVersions = {};
       let pendingModelId = '';
 
+      const browserField = document.getElementById('browserField');
+
       document.querySelectorAll('input[name="browserChannel"]').forEach((radio) => {
         radio.addEventListener('change', () => {
           if (radio.checked) {
@@ -207,6 +222,22 @@ export class SettingsPanel implements vscode.Disposable {
           }
         });
       });
+
+      document.querySelectorAll('input[name="automationMode"]').forEach((radio) => {
+        radio.addEventListener('change', () => {
+          if (radio.checked) {
+            vscode.postMessage({ type: 'update', payload: { automationMode: radio.value } });
+          }
+        });
+      });
+
+      function applyAutomationMode(mode) {
+        const isApi = mode === 'api';
+        document.querySelectorAll('input[name="browserChannel"]').forEach((radio) => {
+          radio.disabled = isApi;
+        });
+        browserField.classList.toggle('disabled', isApi);
+      }
 
       languageSelect.addEventListener('change', () => {
         vscode.postMessage({ type: 'update', payload: { language: languageSelect.value } });
@@ -274,6 +305,10 @@ export class SettingsPanel implements vscode.Disposable {
         document.querySelectorAll('input[name="browserChannel"]').forEach((radio) => {
           radio.checked = radio.value === settings.browserChannel;
         });
+        document.querySelectorAll('input[name="automationMode"]').forEach((radio) => {
+          radio.checked = radio.value === settings.automationMode;
+        });
+        applyAutomationMode(settings.automationMode);
         languageSelect.value = settings.language;
         renderVersions(settings.language, settings.languageVersion);
 

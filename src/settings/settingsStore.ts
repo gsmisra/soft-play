@@ -9,10 +9,20 @@ export type Language = 'java' | 'python';
  * own bundled binaries. */
 export type BrowserChannel = 'chrome' | 'edge';
 
+/** 'ui' (default) is the original Playwright/browser recording flow.
+ * 'api' switches the Control Panel over to a Postman-style API request
+ * builder and every AI/Gherkin generation path over to REST Assured
+ * (Java)/`requests` (Python) API test code instead — see
+ * objectSpyPanel.ts's buildLlmPrompt()/buildFeatureFilePrompt() and
+ * prompts/api-automation-instructions.md. Nothing about the UI-mode flow
+ * changes when this is 'ui'; the two modes are additive, not a rewrite. */
+export type AutomationMode = 'ui' | 'api';
+
 export interface ObjectSpySettings {
   language: Language;
   languageVersion: string;
   browserChannel: BrowserChannel;
+  automationMode: AutomationMode;
   /** "Link with GitHub Copilot LLM" toggle — see settingsPanel.ts and src/llm/copilotClient.ts. */
   copilotEnabled: boolean;
   /** LanguageModelChat.id of the selected Copilot model, or '' if none picked yet. */
@@ -34,6 +44,7 @@ const DEFAULTS: ObjectSpySettings = {
   language: 'java',
   languageVersion: '17',
   browserChannel: 'chrome',
+  automationMode: 'ui',
   copilotEnabled: false,
   copilotModelId: ''
 };
@@ -55,7 +66,16 @@ export class SettingsStore implements vscode.Disposable {
 
   constructor(private readonly context: vscode.ExtensionContext) {
     const stored = context.globalState.get<Partial<ObjectSpySettings>>(STORAGE_KEY);
-    this.current = sanitize({ ...DEFAULTS, ...stored });
+    // automationMode is deliberately NOT restored from a previous session —
+    // "UI Automation should be always selected by default" means every
+    // fresh VS Code/extension-host start, not just a brand-new install.
+    // Switching to API Automation is a per-session choice the user makes
+    // explicitly each time; it still persists normally (via update() below)
+    // for the rest of THIS session (e.g. if the Settings panel is closed
+    // and reopened), it just never survives a restart. Every other setting
+    // (language, browser, Copilot linking) keeps its usual persisted
+    // behavior, unaffected.
+    this.current = { ...sanitize({ ...DEFAULTS, ...stored }), automationMode: DEFAULTS.automationMode };
   }
 
   get(): ObjectSpySettings {
@@ -79,8 +99,12 @@ export class SettingsStore implements vscode.Disposable {
  * language version this build doesn't know about). */
 function sanitize(settings: ObjectSpySettings): ObjectSpySettings {
   const versions = LANGUAGE_VERSIONS[settings.language] ?? LANGUAGE_VERSIONS[DEFAULTS.language];
+  let result = settings;
   if (!versions.includes(settings.languageVersion)) {
-    return { ...settings, languageVersion: versions[0] };
+    result = { ...result, languageVersion: versions[0] };
   }
-  return settings;
+  if (result.automationMode !== 'ui' && result.automationMode !== 'api') {
+    result = { ...result, automationMode: DEFAULTS.automationMode };
+  }
+  return result;
 }

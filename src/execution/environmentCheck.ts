@@ -1,5 +1,5 @@
 import { execFile } from 'child_process';
-import { Language } from '../settings/settingsStore';
+import { AutomationMode, Language } from '../settings/settingsStore';
 
 export interface EnvironmentCheckResult {
   ok: boolean;
@@ -71,15 +71,18 @@ export async function checkJavaEnvironment(): Promise<EnvironmentCheckResult> {
 
 /**
  * Same idea for Python: verifies a `python` (or `python3`) interpreter is on
- * PATH, then that the three pip packages the generated pytest file actually
- * needs — `playwright` (the library import, never its own browser
- * binaries — those are never installed, see codegenManager.ts), `pytest`,
- * and `pytest-playwright` (supplies the `page`/`browser_type_launch_args`
- * fixtures the generated code overrides) — are importable. Reports exactly
- * what's missing and the pip command to install it; never installs
- * anything itself.
+ * PATH, then that the pip packages the generated test file actually needs
+ * are importable — UI mode: `playwright` (the library import, never its
+ * own browser binaries — those are never installed, see
+ * codegenManager.ts), `pytest`, and `pytest-playwright` (supplies the
+ * `page`/`browser_type_launch_args` fixtures the generated code overrides);
+ * API mode: `requests` and `pytest` (no Playwright/browser involvement at
+ * all in API automation). Reports exactly what's missing and the pip
+ * command to install it; never installs anything itself.
  */
-export async function checkPythonEnvironment(): Promise<EnvironmentCheckResult & { pythonCommand?: string }> {
+export async function checkPythonEnvironment(
+  automationMode: AutomationMode = 'ui'
+): Promise<EnvironmentCheckResult & { pythonCommand?: string }> {
   const candidates = ['python', 'python3'];
   let pythonCommand: string | undefined;
   let versionLine = '';
@@ -98,7 +101,7 @@ export async function checkPythonEnvironment(): Promise<EnvironmentCheckResult &
     };
   }
 
-  const required = ['playwright', 'pytest', 'pytest_playwright'];
+  const required = automationMode === 'api' ? ['requests', 'pytest'] : ['playwright', 'pytest', 'pytest_playwright'];
   const missing: string[] = [];
   for (const moduleName of required) {
     const result = await run(pythonCommand, ['-c', `import ${moduleName}`]);
@@ -113,12 +116,14 @@ export async function checkPythonEnvironment(): Promise<EnvironmentCheckResult &
       message:
         `${versionLine} found, but missing required pip package(s): ${missing.join(', ')}. Install them with:\n` +
         `    ${pythonCommand} -m pip install ${missing.join(' ')}\n` +
-        `(this never installs a browser — the generated code launches the real, already-installed Chrome/Edge.)`
+        (automationMode === 'api'
+          ? ''
+          : '(this never installs a browser — the generated code launches the real, already-installed Chrome/Edge.)')
     };
   }
   return { ok: true, pythonCommand, message: versionLine };
 }
 
-export function checkEnvironment(language: Language): Promise<EnvironmentCheckResult> {
-  return language === 'java' ? checkJavaEnvironment() : checkPythonEnvironment();
+export function checkEnvironment(language: Language, automationMode: AutomationMode = 'ui'): Promise<EnvironmentCheckResult> {
+  return language === 'java' ? checkJavaEnvironment() : checkPythonEnvironment(automationMode);
 }

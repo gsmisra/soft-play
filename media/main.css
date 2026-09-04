@@ -456,6 +456,16 @@ body.vscode-light .code-editor-wrap {
   gap: 8px;
 }
 
+/* [hidden] and .code-panel{display:flex} otherwise tie on CSS specificity,
+   and this rule comes later in the cascade — without this override the
+   Playwright Code panel stays visible even when JS sets the hidden
+   attribute on it (API Automation mode never uses it — see
+   applyAutomationMode() in main.js), same fix as .ai-generating-banner[hidden]
+   below needed for the same reason. */
+.code-panel[hidden] {
+  display: none;
+}
+
 /* Collapse the Playwright Code panel down to just its header — the header
    (title, Copy/Save, etc.) stays visible; everything below it just isn't
    rendered. Useful once the AI Generated Code panel is open beside this
@@ -674,3 +684,271 @@ body.vscode-light .code-editor-wrap {
   background: #006fd6;
   transform: translateY(-1px);
 }
+
+/* ==========================================================================
+   API Automation mode — a Postman-styled request builder (method+URL,
+   Params/Authorization/Headers/Body tabs). Deliberately its own fixed
+   black/orange palette (Postman's own brand orange, #ff6c37) rather than
+   VS Code theme variables — the explicit ask is to look like Postman
+   regardless of the editor's own light/dark theme — kept in the same
+   claymorphic language (rounded corners, soft paired shadow) as the rest
+   of the UI so it still reads as part of this extension, not a bolted-on
+   iframe. Scoped entirely under .api-panel so none of this leaks into the
+   UI-mode controls sharing the same Control Panel section.
+   ========================================================================== */
+.api-panel {
+  --api-bg: #1e1e1e;
+  --api-bg-alt: #262626;
+  --api-border: #3a3a3a;
+  --api-orange: #ff6c37;
+  --api-text: #ececec;
+  --api-text-dim: #9a9a9a;
+
+  margin-top: 4px;
+  padding: 12px;
+  border-radius: var(--clay-radius-sm);
+  background: var(--api-bg);
+  color: var(--api-text);
+}
+body.vscode-dark .api-panel {
+  box-shadow: 6px 6px 14px rgba(0, 0, 0, 0.35), -4px -4px 10px rgba(255, 255, 255, 0.03);
+}
+body.vscode-light .api-panel {
+  box-shadow: 5px 5px 12px rgba(0, 0, 0, 0.10), -4px -4px 10px rgba(255, 255, 255, 0.7);
+}
+
+.api-panel input[type="text"],
+.api-panel input[type="password"],
+.api-panel select,
+.api-panel textarea {
+  background: var(--api-bg-alt);
+  color: var(--api-text);
+  border: 1px solid var(--api-border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-family: var(--vscode-font-family);
+  font-size: 0.85em;
+}
+.api-panel input[type="text"]:focus,
+.api-panel input[type="password"]:focus,
+.api-panel select:focus,
+.api-panel textarea:focus {
+  outline: none;
+  border-color: var(--api-orange);
+}
+.api-panel input::placeholder,
+.api-panel textarea::placeholder {
+  color: var(--api-text-dim);
+}
+
+.api-request-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.api-method-select {
+  flex: none;
+  width: 100px;
+  font-weight: 700;
+  color: var(--api-orange);
+}
+.api-url-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.api-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--api-border);
+  margin-bottom: 10px;
+}
+.api-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--api-text-dim);
+  padding: 6px 10px;
+  font-size: 0.85em;
+  font-weight: 600;
+  cursor: pointer;
+}
+.api-tab:hover { color: var(--api-text); }
+.api-tab.active {
+  color: var(--api-orange);
+  border-bottom-color: var(--api-orange);
+}
+
+.api-kv-header {
+  font-size: 0.8em;
+  font-weight: 600;
+  color: var(--api-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 6px;
+}
+
+.api-kv-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.api-kv-table th {
+  text-align: left;
+  font-size: 0.72em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--api-text-dim);
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--api-border);
+}
+.api-kv-table td {
+  padding: 3px 6px 3px 0;
+  vertical-align: middle;
+}
+.api-kv-table td:last-child { padding-right: 0; width: 24px; }
+.api-kv-table input[type="text"] { width: 100%; box-sizing: border-box; }
+
+.api-row-remove {
+  background: none;
+  border: none;
+  color: var(--api-text-dim);
+  cursor: pointer;
+  font-size: 0.8em;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.api-row-remove:hover { color: var(--api-orange); background: rgba(255, 108, 55, 0.12); }
+
+/* form-data's per-row Text/File value cell (createFormDataTable() in
+   main.js) — the text input or "Select File" button on the left, the
+   Text/File type dropdown pinned to the right, matching Postman's own
+   layout for this exact control. */
+.api-formdata-value-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.api-formdata-value-cell input[type="text"] { flex: 1; min-width: 0; }
+.api-formdata-type-select {
+  flex: none;
+  width: 62px;
+  padding: 5px 4px;
+  font-size: 0.78em;
+}
+.api-browse-btn {
+  flex: 1;
+  min-width: 0;
+  background: var(--api-bg-alt);
+  color: var(--api-text);
+  border: 1px solid var(--api-border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 0.85em;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.api-browse-btn:hover { border-color: var(--api-orange); color: var(--api-orange); }
+
+.api-field-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+}
+.api-field-row label {
+  flex: none;
+  width: 90px;
+  font-size: 0.82em;
+  color: var(--api-text-dim);
+}
+.api-field-row input,
+.api-field-row select {
+  flex: 1;
+  min-width: 0;
+}
+.api-auth-fields { margin-top: 4px; }
+
+.api-body-mode-row {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 10px;
+  font-size: 0.82em;
+}
+.api-body-mode-row label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
+
+.api-raw-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.api-raw-lang-select { width: 110px; }
+.api-raw-beautify-btn {
+  background: var(--api-bg-alt);
+  color: var(--api-text);
+  border: 1px solid var(--api-border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 0.8em;
+  cursor: pointer;
+}
+.api-raw-beautify-btn:hover { border-color: var(--api-orange); color: var(--api-orange); }
+
+/* Raw body editor -- a real gutter+highlight+textarea stack (see
+   codeEditor.js), themed to match the rest of .api-panel rather than the
+   VS Code editor colors the other code editors in this extension use. */
+.api-raw-editor-wrap {
+  position: relative;
+  height: 220px;
+  border-radius: 8px;
+  border: 1px solid var(--api-border);
+  background: #151515;
+  overflow: hidden;
+}
+.api-raw-gutter {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 40px;
+  overflow: hidden;
+  margin: 0;
+  padding: 8px 8px 8px 0;
+  font-family: var(--vscode-editor-font-family, 'Courier New', monospace);
+  font-size: 0.85em;
+  line-height: 1.5;
+  text-align: right;
+  color: var(--api-text-dim);
+  background: rgba(255, 255, 255, 0.02);
+  border-right: 1px solid var(--api-border);
+  white-space: pre;
+  box-sizing: border-box;
+  user-select: none;
+  pointer-events: none;
+}
+.api-raw-highlight,
+.api-raw-edit-area {
+  position: absolute;
+  inset: 0 0 0 40px;
+  margin: 0;
+  padding: 8px 10px;
+  font-family: var(--vscode-editor-font-family, 'Courier New', monospace);
+  font-size: 0.85em;
+  line-height: 1.5;
+  white-space: pre;
+  tab-size: 2;
+  box-sizing: border-box;
+}
+.api-raw-highlight { color: var(--api-text); overflow: hidden; pointer-events: none; }
+.api-raw-edit-area {
+  overflow: auto;
+  background: transparent;
+  color: transparent;
+  caret-color: #ffffff;
+  border: none;
+  outline: none;
+  resize: none;
+}
+.api-raw-edit-area::placeholder { color: var(--api-text-dim); }

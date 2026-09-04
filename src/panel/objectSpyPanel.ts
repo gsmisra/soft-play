@@ -10,6 +10,7 @@ import { GeneratedFeaturePanel } from './generatedFeaturePanel';
 import { CopilotUnavailableError, extractCodeBlock, sendPrompt } from '../llm/copilotClient';
 import { checkEnvironment, checkPythonEnvironment } from '../execution/environmentCheck';
 import { executeGeneratedCode } from '../execution/testExecutor';
+import { ApiRequestDetails, buildApiRequestSummary, hasApiRequest } from '../api/apiRequestDetails';
 
 type InboundMessage =
   | { type: 'start'; payload?: string }
@@ -18,15 +19,16 @@ type InboundMessage =
   | { type: 'saveCode'; payload: string }
   | { type: 'killAllBrowsers' }
   | { type: 'refreshPromptFiles' }
-  | { type: 'sendToLlm'; payload: { selectedFiles: string[]; code: string; customInstructions: string } }
+  | { type: 'sendToLlm'; payload: { selectedFiles: string[]; code: string; customInstructions: string; apiDetails?: ApiRequestDetails } }
   | { type: 'openAiCodePanel' }
-  | { type: 'generateFeatureFile'; payload: { code: string; customInstructions: string } }
+  | { type: 'generateFeatureFile'; payload: { code: string; customInstructions: string; apiDetails?: ApiRequestDetails } }
   | { type: 'linkFeatureFile' }
   | { type: 'reopenFeatureFile' }
   | { type: 'unlinkFeatureFile' }
   | { type: 'selectedInstructionFiles'; payload: string[] }
   | { type: 'currentCodeReport'; payload: string }
-  | { type: 'setCopilotEnabled'; payload: boolean };
+  | { type: 'setCopilotEnabled'; payload: boolean }
+  | { type: 'browseApiFormFile'; payload: { rowId: number } };
 
 /** Status shape the webview renders (status pill, Start/Stop enablement) —
  * translated 1:1 from CodegenStatus (see mapCodegenStatus()). Kept as its
@@ -100,6 +102,13 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   // time. Cleared only when the user explicitly unlinks it or links a
   // different one.
   private linkedScenario: LinkedScenario | undefined;
+  // API Automation mode's Control Panel request builder, as last sent by
+  // "Start AI Processing"/"Generate Gherkin Feature File" — kept around
+  // purely so "Regenerate" (AI Generated Code / Generated Feature File
+  // panels, which don't have their own copy of the API form) can replay
+  // the same request without the user re-entering it. Never read in UI
+  // mode.
+  private lastApiRequestDetails: ApiRequestDetails | undefined;
   // Workspace-relative paths of whichever "Custom md files" (.github/*.md)
   // checkboxes are currently checked in the webview — kept in sync via the
   // 'selectedInstructionFiles' message every time the user (un)checks one.
@@ -264,14 +273,14 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
         break;
       case 'sendToLlm':
         this.aiCodePanel.show(); // a manual send is a deliberate "show me the result" action
-        await this.sendToLlm(message.payload.selectedFiles, message.payload.code, message.payload.customInstructions);
+        await this.sendToLlm(message.payload.selectedFiles, message.payload.code, message.payload.customInstructions, message.payload.apiDetails);
         break;
       case 'openAiCodePanel':
         this.aiCodePanel.show();
         break;
       case 'generateFeatureFile':
         this.generatedFeaturePanel.show(); // a manual send is a deliberate "show me the result" action
-        await this.generateFeatureFile(message.payload.code, message.payload.customInstructions);
+        await this.generateFeatureFile(message.payload.code, message.payload.customInstructions, message.payload.apiDetails);
         break;
       case 'linkFeatureFile':
         // Once a file has been linked, this button reopens that SAME
@@ -313,7 +322,26 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
         // any other settings change, regardless of which panel made it.
         await this.settingsStore.update({ copilotEnabled: message.payload });
         break;
+      case 'browseApiFormFile':
+        await this.browseApiFormFile(message.payload.rowId);
+        break;
     }
+  }
+
+  /** API Automation mode's form-data body — a row switched to "File" gets
+   * a native OS file picker (never a webview `<input type="file">`, whose
+   * sandboxing hides the real absolute path from the page — exactly the
+   * path the generated multipart-upload code needs) instead of a text
+   * field. No file-type filter: "should be able to pass all applicable
+   * file types" — any file is valid form-data. Silently does nothing if
+   * the user cancels the dialog; `rowId` (not an array index, which shifts
+   * as rows are added/removed) tells the webview which row to update. */
+  private async browseApiFormFile(rowId: number): Promise<void> {
+    const uris = await vscode.window.showOpenDialog({ canSelectMany: false, openLabel: 'Select File' });
+    if (!uris || uris.length === 0) {
+      return;
+    }
+    this.webview?.postMessage({ type: 'apiFormFileSelected', payload: { rowId, filePath: uris[0].fsPath } });
   }
 
   private async saveCode(code: string): Promise<void> {
@@ -369,9 +397,17 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
    * Settings (browser channel, language, language version — also read
    * inside runLlmRefinement()). Recording code, checking a box, or typing
    * in chat never triggers this on their own. */
-  private async sendToLlm(selectedFiles: string[], playwrightCode: string, customInstructions: string): Promise<void> {
+  private async sendToLlm(
+    selectedFiles: string[],
+    playwrightCode: string,
+    customInstructions: string,
+    apiDetails?: ApiRequestDetails
+  ): Promise<void> {
+    if (apiDetails) {
+      this.lastApiRequestDetails = apiDetails;
+    }
     const instructions = await this.readInstructionFiles(selectedFiles);
-    await this.runLlmRefinement(instructions, playwrightCode, customInstructions.trim());
+    await this.runLlmRefinement(instructions, playwrightCode, customInstructions.trim(), apiDetails);
   }
 
   /** "Regenerate AI Code" (AI Generated Code panel) — re-runs the same
@@ -395,25 +431,34 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     // send, the automatic pipeline) enforces it the same way.
     const playwrightCode = await this.requestCurrentPlaywrightCode();
     const instructions = await this.readInstructionFiles(this.selectedInstructionFiles);
-    await this.runLlmRefinement(instructions, playwrightCode, '');
+    await this.runLlmRefinement(instructions, playwrightCode, '', this.lastApiRequestDetails);
   }
 
   /** "Generate Gherkin Feature File" (Control Panel) — the counterpart to
    * "Start AI Processing" for when the user has NOT linked a .feature file:
-   * sends whatever Playwright Codegen recorded (plus anything currently in
-   * the chat box) to the LLM with prompts/generate-feature-file.md's
+   * sends whatever Playwright Codegen recorded (UI mode) or the API request
+   * described in the Control Panel (API mode) — plus anything currently in
+   * the chat box — to the LLM with prompts/generate-feature-file.md's
    * instructions, producing a brand-new BDD .feature file in the Generated
    * Feature File panel instead of refined automation code. */
-  private async generateFeatureFile(playwrightCode: string, customInstructions: string): Promise<void> {
+  private async generateFeatureFile(playwrightCode: string, customInstructions: string, apiDetails?: ApiRequestDetails): Promise<void> {
     const settings = this.settingsStore.get();
     if (!settings.copilotEnabled || !settings.copilotModelId) {
       this.generatedFeaturePanel.showError('Enable "Link with GitHub Copilot LLM" (Control Panel) and pick a model in Settings first.');
       return;
     }
-    // Same empty/no-op guard as runLlmRefinement() — never send an
-    // empty/no-op context to the LLM.
-    if (!playwrightCode.trim()) {
-      void vscode.window.showWarningMessage('Record some user action first before generating a feature file');
+    const isApiMode = settings.automationMode === 'api';
+    if (apiDetails) {
+      this.lastApiRequestDetails = apiDetails;
+    }
+    // Same empty/no-op guard as runLlmRefinement(), for whichever mode's
+    // own notion of "there's nothing here yet" applies.
+    if (isApiMode ? !hasApiRequest(apiDetails ?? this.lastApiRequestDetails) : !playwrightCode.trim()) {
+      void vscode.window.showWarningMessage(
+        isApiMode
+          ? 'Enter an API request URL in the Control Panel first before generating a feature file'
+          : 'Record some user action first before generating a feature file'
+      );
       return;
     }
 
@@ -425,11 +470,13 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     this.generatedFeaturePanel.startGenerating();
 
     const builtIn = readFeatureFileGenInstructions();
-    const prompt = buildFeatureFilePrompt(builtIn, playwrightCode, customInstructions.trim());
+    const prompt = isApiMode
+      ? buildApiFeatureFilePrompt(builtIn, (apiDetails ?? this.lastApiRequestDetails)!, customInstructions.trim(), this.linkedScenario)
+      : buildFeatureFilePrompt(builtIn, playwrightCode, customInstructions.trim());
     this.outputChannel.appendLine(
-      `Sending to Copilot model "${settings.copilotModelId}" for feature-file generation: ` +
-        `${builtIn ? `instructions (${builtIn.length} chars)` : '(MISSING — prompts/generate-feature-file.md failed to load)'}, ` +
-        `${playwrightCode.length} chars of reference code — prompt is ${prompt.length} chars total.`
+      `Sending to Copilot model "${settings.copilotModelId}" for feature-file generation (${isApiMode ? 'API' : 'UI'} mode): ` +
+        `${builtIn ? `instructions (${builtIn.length} chars)` : '(MISSING — prompts/generate-feature-file.md failed to load)'} — ` +
+        `prompt is ${prompt.length} chars total.`
     );
 
     try {
@@ -448,33 +495,40 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   }
 
   /** "Regenerate" (Generated Feature File panel) — re-runs with the
-   * Playwright Code editor's live content at click time; no chat-box text
-   * (that's specific to the Control Panel's "Generate Gherkin Feature
-   * File" button — same asymmetry as regenerateAiCode() vs. sendToLlm()). */
+   * Playwright Code editor's live content (UI mode) or the last-sent API
+   * request (API mode) at click time; no chat-box text (that's specific to
+   * the Control Panel's "Generate Gherkin Feature File" button — same
+   * asymmetry as regenerateAiCode() vs. sendToLlm()). */
   private async regenerateFeatureFile(): Promise<void> {
     const playwrightCode = await this.requestCurrentPlaywrightCode();
-    await this.generateFeatureFile(playwrightCode, '');
+    await this.generateFeatureFile(playwrightCode, '', this.lastApiRequestDetails);
   }
 
   private static readonly MAX_VERIFY_ATTEMPTS = 5;
 
   /**
    * "Verify & Fix Code" (AI Generated Code panel) — actually EXECUTES the
-   * AI-generated code, headless, in a disposable scratch project (never the
-   * user's workspace), and loops: run -> if it fails, hand the error (plus
-   * the ORIGINAL Playwright Codegen output, kept in context on every
-   * attempt so the LLM can always re-derive the correct locator/action —
-   * per the explicit ask) to the LLM for a fix -> confirm with the user
-   * (modal Yes/No) before every single run, including the first -> repeat,
-   * up to MAX_VERIFY_ATTEMPTS. "No" at any confirmation stops immediately
-   * and leaves the current errors visible for manual fixing. A clean run
-   * shows a big green "Code Correctness Confirmed" banner on the sidebar
-   * (see postCodeCorrectness()) — never shown for a BDD-mode compile-only
-   * check, since that isn't actually proof the flow runs (see
-   * executeGeneratedCode()'s doc comment in testExecutor.ts for why).
+   * AI-generated code in a disposable scratch project (never the user's
+   * workspace), and loops: run -> if it's a genuine code defect, hand the
+   * error (plus the ORIGINAL context — the Playwright Codegen output in UI
+   * mode, or the API request details in API mode — kept in context on
+   * every attempt so the LLM can always re-derive what's correct, per the
+   * explicit ask) to the LLM for a fix -> confirm with the user (modal
+   * Yes/No) before every single run, including the first -> repeat, up to
+   * MAX_VERIFY_ATTEMPTS. "No" at any confirmation stops immediately and
+   * leaves the current errors visible for manual fixing.
+   *
+   * UI mode: "success" = a real headless Playwright run passing. API mode:
+   * "success" = the code compiling/parsing cleanly — a live API call that
+   * then fails with an HTTP error is reported separately and never treated
+   * as a defect to fix (see testExecutor.ts's doc comment).
+   *
+   * A clean, non-compile-only, non-"API error" result shows a big green
+   * "Code Correctness Confirmed" banner on the sidebar (postCodeCorrectness()).
    */
   private async verifyAndFixCode(): Promise<void> {
     const settings = this.settingsStore.get();
+    const isApiMode = settings.automationMode === 'api';
     if (!settings.copilotEnabled || !settings.copilotModelId) {
       this.aiCodePanel.setVerifyStatus('Enable "Link with GitHub Copilot LLM" (Control Panel) and pick a model in Settings first.', 'error');
       return;
@@ -490,29 +544,31 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     this.postCodeCorrectness(false);
     try {
       this.aiCodePanel.setVerifyStatus('Checking the local environment…', 'info');
-      const env = await checkEnvironment(settings.language);
-      this.outputChannel.appendLine(`Verify & Fix Code — environment check (${settings.language}): ${env.ok ? 'OK' : 'FAILED'} — ${env.message}`);
+      const env = await checkEnvironment(settings.language, settings.automationMode);
+      this.outputChannel.appendLine(
+        `Verify & Fix Code — environment check (${settings.language}, ${isApiMode ? 'API' : 'UI'} mode): ${env.ok ? 'OK' : 'FAILED'} — ${env.message}`
+      );
       if (!env.ok) {
         this.aiCodePanel.setVerifyStatus(env.message, 'error');
         void vscode.window.showErrorMessage(`softPlay: ${env.message}`);
         return;
       }
       const pythonCommand =
-        settings.language === 'python' ? (await checkPythonEnvironment()).pythonCommand ?? 'python' : '';
+        settings.language === 'python' ? (await checkPythonEnvironment(settings.automationMode)).pythonCommand ?? 'python' : '';
 
       // Kept fresh on every attempt (re-read, not snapshotted once) so a
       // recording made WHILE the fix loop is running still counts — but in
-      // practice this is whatever was last recorded, exactly the "keep the
-      // Playwright Codegen output in context" ask.
-      const scratchDir = path.join(this.context.globalStorageUri.fsPath, 'test-runner', settings.language);
+      // practice this is whatever was last recorded/entered, exactly the
+      // "keep the original context in LLM memory" ask.
+      const scratchDir = path.join(this.context.globalStorageUri.fsPath, 'test-runner', settings.automationMode, settings.language);
       await fs.promises.mkdir(scratchDir, { recursive: true });
 
       let code = initialCode;
       for (let attempt = 1; attempt <= ObjectSpyPanel.MAX_VERIFY_ATTEMPTS; attempt++) {
         const choice = await vscode.window.showWarningMessage(
           attempt === 1
-            ? 'Run the AI-generated code now, headless, to verify it executes without errors?'
-            : `Attempt ${attempt} of ${ObjectSpyPanel.MAX_VERIFY_ATTEMPTS}: re-run the LLM-fixed code, headless, to verify it now executes without errors?`,
+            ? `Run the AI-generated code now to verify it ${isApiMode ? 'compiles/parses' : 'executes headless'} without errors?`
+            : `Attempt ${attempt} of ${ObjectSpyPanel.MAX_VERIFY_ATTEMPTS}: re-run the LLM-fixed code to verify it now ${isApiMode ? 'compiles/parses' : 'executes headless'} without errors?`,
           { modal: true },
           'Yes',
           'No'
@@ -525,19 +581,38 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
           return;
         }
 
-        this.aiCodePanel.setVerifyStatus(`Running attempt ${attempt} of ${ObjectSpyPanel.MAX_VERIFY_ATTEMPTS} (headless)…`, 'info');
-        const result = await executeGeneratedCode(settings.language, code, scratchDir, this.linkedScenario?.featureFilePath, pythonCommand);
+        this.aiCodePanel.setVerifyStatus(`Running attempt ${attempt} of ${ObjectSpyPanel.MAX_VERIFY_ATTEMPTS}…`, 'info');
+        const result = await executeGeneratedCode(
+          settings.language,
+          code,
+          scratchDir,
+          this.linkedScenario?.featureFilePath,
+          pythonCommand,
+          settings.automationMode
+        );
         this.outputChannel.appendLine(
           `Verify & Fix Code — attempt ${attempt}: ${result.success ? 'PASSED' : 'FAILED'}` +
-            `${result.compileOnly ? ' (compile/collect-only check)' : ''}\n${result.output}`
+            `${result.compileOnly ? ' (compile/collect-only check)' : ''}` +
+            `${result.apiCallOutcome !== 'not-run' ? ` — live API call ${result.apiCallOutcome}` : ''}\n${result.output}`
         );
 
         if (result.success) {
           if (result.compileOnly) {
             this.aiCodePanel.setVerifyStatus(
-              'Compiled successfully — BDD step definitions have no generated runner to fully execute yet, so this is a compile check, not a confirmed headless run.',
+              'Compiled successfully — BDD step definitions have no generated runner to fully execute yet, so this is a compile check, not a confirmed run.',
               'success'
             );
+          } else if (isApiMode) {
+            if (result.apiCallOutcome === 'failed') {
+              this.aiCodePanel.setVerifyStatus(
+                'Code Correctness Confirmed — no syntax errors. The live API call itself returned an error response ' +
+                  '(see the softPlay Output channel) — recheck the endpoint URL/credentials and try again in your own IDE/test package.',
+                'success'
+              );
+            } else {
+              this.aiCodePanel.setVerifyStatus('Code Correctness Confirmed — compiled cleanly and the API call succeeded.', 'success');
+            }
+            this.postCodeCorrectness(true);
           } else {
             this.aiCodePanel.setVerifyStatus('Code Correctness Confirmed — ran headless without errors.', 'success');
             this.postCodeCorrectness(true);
@@ -554,7 +629,24 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
         }
 
         this.aiCodePanel.setVerifyStatus(`Attempt ${attempt} failed — asking the LLM to fix it…`, 'info');
-        const fixPrompt = buildFixPrompt(readSeniorQeInstructions(), this.nativeGeneratedCode, code, result.output, settings.language);
+        const originalContext = isApiMode
+          ? {
+              label: 'Original API Request Details (the ground truth for this request — refer back to this if the error suggests one was used incorrectly)',
+              content: this.lastApiRequestDetails ? buildApiRequestSummary(this.lastApiRequestDetails) : '(not available)'
+            }
+          : {
+              label:
+                'Original Playwright Codegen output (real, unmodified recording — the ground truth for which locators and actions are actually correct; refer back to this if the error suggests one was used incorrectly)',
+              content: `\`\`\`${settings.language}\n${this.nativeGeneratedCode}\n\`\`\``
+            };
+        const fixPrompt = buildFixPrompt(
+          isApiMode ? readApiAutomationInstructions() : readSeniorQeInstructions(),
+          originalContext,
+          code,
+          result.output,
+          settings.language,
+          settings.automationMode
+        );
         this.outputChannel.appendLine(
           `Verify & Fix Code — sending fix request to Copilot model "${settings.copilotModelId}": prompt is ${fixPrompt.length} chars.`
         );
@@ -627,19 +719,27 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   private async runLlmRefinement(
     instructions: { path: string; content: string }[],
     playwrightCode: string,
-    customInstructions: string
+    customInstructions: string,
+    apiDetails?: ApiRequestDetails
   ): Promise<void> {
     const settings = this.settingsStore.get();
     if (!settings.copilotEnabled || !settings.copilotModelId) {
       this.postLlmError('Enable "Link with GitHub Copilot LLM" (Control Panel) and pick a model in Settings first.');
       return;
     }
+    const isApiMode = settings.automationMode === 'api';
     // Single choke point for every path into this method (manual chat send,
     // the automatic post-recording pipeline, and "Regenerate AI Code") —
     // never send an empty/no-op context to the LLM, and tell the user why
-    // instead of silently doing nothing.
-    if (!playwrightCode.trim()) {
-      void vscode.window.showWarningMessage('Record some user action first before triggering AI analysis');
+    // instead of silently doing nothing. Which "empty" means depends on the
+    // mode: API mode has no Playwright code at all, ever — its own request
+    // details are what must not be empty.
+    if (isApiMode ? !hasApiRequest(apiDetails) : !playwrightCode.trim()) {
+      void vscode.window.showWarningMessage(
+        isApiMode
+          ? 'Enter an API request URL in the Control Panel first before triggering AI analysis'
+          : 'Record some user action first before triggering AI analysis'
+      );
       return;
     }
 
@@ -650,29 +750,41 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
 
     this.postLlmStart();
 
-    const builtIn = readSeniorQeInstructions();
-    const prompt = buildLlmPrompt(
-      settings.language,
-      settings.languageVersion,
-      settings.browserChannel,
-      builtIn,
-      instructions,
-      playwrightCode,
-      customInstructions,
-      this.linkedScenario,
-      this.currentSuggestedBaseName()
-    );
+    const builtIn = isApiMode ? readApiAutomationInstructions() : readSeniorQeInstructions();
+    const prompt = isApiMode
+      ? buildApiLlmPrompt(
+          settings.language,
+          settings.languageVersion,
+          builtIn,
+          instructions,
+          apiDetails!,
+          customInstructions,
+          this.linkedScenario,
+          this.currentSuggestedBaseName()
+        )
+      : buildLlmPrompt(
+          settings.language,
+          settings.languageVersion,
+          settings.browserChannel,
+          builtIn,
+          instructions,
+          playwrightCode,
+          customInstructions,
+          this.linkedScenario,
+          this.currentSuggestedBaseName()
+        );
     // Diagnostic trail for exactly the question "was X actually sent, and
     // did a response come back?" — check the softPlay Output channel
     // (View -> Output -> softPlay) rather than needing to guess from a
     // stuck "(generating…)" label with no other visible signal.
     this.outputChannel.appendLine(
-      `Sending to Copilot model "${settings.copilotModelId}": target ${settings.language} ${settings.languageVersion}, ` +
-        `senior-QE instructions ` +
-        `${builtIn ? `(${builtIn.length} chars)` : '(MISSING — prompts/senior-qe-instructions.md failed to load)'}, ` +
+      `Sending to Copilot model "${settings.copilotModelId}" (${isApiMode ? 'API' : 'UI'} mode): target ` +
+        `${settings.language} ${settings.languageVersion}, mandatory standard ` +
+        `${builtIn ? `(${builtIn.length} chars)` : '(MISSING — instructions .md failed to load)'}, ` +
         `${instructions.length} project .md file(s), ` +
         `${this.linkedScenario ? `linked scenario "${this.linkedScenario.scenarioName}"` : 'no linked scenario'}, ` +
-        `${playwrightCode.length} chars of reference code — prompt is ${prompt.length} chars total.`
+        `${isApiMode ? `API request to ${apiDetails?.url}` : `${playwrightCode.length} chars of reference code`} — ` +
+        `prompt is ${prompt.length} chars total.`
     );
 
     try {
@@ -853,7 +965,13 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     const settings = this.settingsStore.get();
     this.webview?.postMessage({
       type: 'code',
-      payload: { code: this.nativeGeneratedCode, language: settings.language, languageVersion: settings.languageVersion, isNewRecording }
+      payload: {
+        code: this.nativeGeneratedCode,
+        language: settings.language,
+        languageVersion: settings.languageVersion,
+        automationMode: settings.automationMode,
+        isNewRecording
+      }
     });
   }
 
@@ -900,15 +1018,18 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
           <button id="unlinkScenarioBtn" class="btn-icon-small" title="Unlink this scenario">✕</button>
         </span>
       </div>
-      <div class="toolbar-row">
-        <input id="urlInput" type="text" placeholder="https://example.com" />
+      <div id="uiModeControls">
+        <div class="toolbar-row">
+          <input id="urlInput" type="text" placeholder="https://example.com" />
+        </div>
+        <div class="toolbar-row">
+          <button id="startBtn" class="btn btn-primary">Start</button>
+          <button id="stopBtn" class="btn" disabled>Stop</button>
+          <button id="killAllBtn" class="btn btn-danger" title="Close the codegen browser this extension launched and clear the generated code">Kill All Browsers</button>
+          <span id="statusPill" class="status-pill status-idle">Idle</span>
+        </div>
       </div>
-      <div class="toolbar-row">
-        <button id="startBtn" class="btn btn-primary">Start</button>
-        <button id="stopBtn" class="btn" disabled>Stop</button>
-        <button id="killAllBtn" class="btn btn-danger" title="Close the codegen browser this extension launched and clear the generated code">Kill All Browsers</button>
-        <span id="statusPill" class="status-pill status-idle">Idle</span>
-      </div>
+      ${getApiPanelHtml()}
       <div class="toolbar-row copilot-toggle-row">
         <span class="copilot-toggle-label">
           Link with GitHub Copilot LLM
@@ -986,6 +1107,127 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
 </body>
 </html>`;
   }
+}
+
+/**
+ * The "API Automation" mode's Control Panel content — a Postman-styled
+ * request builder (method+URL, Params/Authorization/Headers/Body tabs),
+ * black background with orange accents per the explicit ask, built from
+ * scratch as plain HTML/CSS (no bundling a real HTTP-client UI library) —
+ * this extension never actually SENDS the request itself; it only collects
+ * the request shape and hands it to the LLM as context (see
+ * collectApiRequestDetails() in main.js and buildApiRequestSummary() below).
+ * Deliberately a practical subset of Postman's own surface, not a pixel
+ * clone: Pre-request Script/Tests/Settings tabs, GraphQL body, binary file
+ * upload, and the more exotic auth types (NTLM, AWS Signature, Hawk,
+ * Akamai EdgeGrid, OAuth) are out of scope — none of them add information
+ * an LLM needs to generate correct REST Assured/requests code, which is
+ * this feature's actual purpose.
+ */
+function getApiPanelHtml(): string {
+  return `
+      <div id="apiModeControls" class="api-panel" hidden>
+        <div class="api-request-row">
+          <select id="apiMethod" class="api-method-select">
+            <option value="GET">GET</option>
+            <option value="POST">POST</option>
+            <option value="PUT">PUT</option>
+            <option value="PATCH">PATCH</option>
+            <option value="DELETE">DELETE</option>
+            <option value="HEAD">HEAD</option>
+            <option value="OPTIONS">OPTIONS</option>
+          </select>
+          <input id="apiUrl" class="api-url-input" type="text" placeholder="Enter request URL" />
+        </div>
+        <div class="api-tabs">
+          <button type="button" class="api-tab active" data-tab="params">Params</button>
+          <button type="button" class="api-tab" data-tab="auth">Authorization</button>
+          <button type="button" class="api-tab" data-tab="headers">Headers</button>
+          <button type="button" class="api-tab" data-tab="body">Body</button>
+        </div>
+
+        <div class="api-tab-panel" data-panel="params">
+          <div class="api-kv-header">Query Params</div>
+          <table class="api-kv-table" id="apiParamsTable">
+            <thead><tr><th>Key</th><th>Value</th><th>Description</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="api-tab-panel" data-panel="auth" hidden>
+          <div class="api-field-row">
+            <label>Type</label>
+            <select id="apiAuthType">
+              <option value="noauth">No Auth</option>
+              <option value="apikey">API Key</option>
+              <option value="bearer">Bearer Token</option>
+              <option value="basic">Basic Auth</option>
+            </select>
+          </div>
+          <div class="api-auth-fields" data-auth="apikey" hidden>
+            <div class="api-field-row"><label>Key</label><input id="apiAuthApiKeyName" type="text" placeholder="e.g. X-API-Key" /></div>
+            <div class="api-field-row"><label>Value</label><input id="apiAuthApiKeyValue" type="password" placeholder="Value" /></div>
+            <div class="api-field-row">
+              <label>Add to</label>
+              <select id="apiAuthApiKeyAddTo">
+                <option value="header">Header</option>
+                <option value="query">Query Params</option>
+              </select>
+            </div>
+          </div>
+          <div class="api-auth-fields" data-auth="bearer" hidden>
+            <div class="api-field-row"><label>Token</label><input id="apiAuthBearerToken" type="password" placeholder="Token" /></div>
+          </div>
+          <div class="api-auth-fields" data-auth="basic" hidden>
+            <div class="api-field-row"><label>Username</label><input id="apiAuthBasicUser" type="text" placeholder="Username" /></div>
+            <div class="api-field-row"><label>Password</label><input id="apiAuthBasicPass" type="password" placeholder="Password" /></div>
+          </div>
+        </div>
+
+        <div class="api-tab-panel" data-panel="headers" hidden>
+          <div class="api-kv-header">Headers</div>
+          <table class="api-kv-table" id="apiHeadersTable">
+            <thead><tr><th>Key</th><th>Value</th><th>Description</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="api-tab-panel" data-panel="body" hidden>
+          <div class="api-body-mode-row">
+            <label><input type="radio" name="apiBodyMode" value="none" checked /> none</label>
+            <label><input type="radio" name="apiBodyMode" value="form-data" /> form-data</label>
+            <label><input type="radio" name="apiBodyMode" value="x-www-form-urlencoded" /> x-www-form-urlencoded</label>
+            <label><input type="radio" name="apiBodyMode" value="raw" /> raw</label>
+          </div>
+          <div class="api-body-panel" data-body="form-data" hidden>
+            <table class="api-kv-table" id="apiFormDataTable">
+              <thead><tr><th>Key</th><th>Value</th><th>Description</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="api-body-panel" data-body="x-www-form-urlencoded" hidden>
+            <table class="api-kv-table" id="apiUrlencodedTable">
+              <thead><tr><th>Key</th><th>Value</th><th>Description</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="api-body-panel" data-body="raw" hidden>
+            <div class="api-raw-toolbar">
+              <select id="apiRawLanguage" class="api-raw-lang-select">
+                <option value="Text">Text</option>
+                <option value="JSON" selected>JSON</option>
+                <option value="XML">XML</option>
+              </select>
+              <button type="button" id="apiRawBeautifyBtn" class="api-raw-beautify-btn" title="Auto-format (pretty-print) the body">Beautify</button>
+            </div>
+            <div class="api-raw-editor-wrap">
+              <div id="apiRawGutter" class="api-raw-gutter"></div>
+              <pre id="apiRawHighlight" class="api-raw-highlight" aria-hidden="true"><code></code></pre>
+              <textarea id="apiRawBody" class="api-raw-edit-area" spellcheck="false" placeholder="Request body"></textarea>
+            </div>
+          </div>
+        </div>
+      </div>`;
 }
 
 function getNonce(): string {
@@ -1073,6 +1315,159 @@ function buildFeatureFilePrompt(builtInInstructions: string, playwrightCode: str
   return parts.join('\n');
 }
 
+// Same pattern as readSeniorQeInstructions()/readFeatureFileGenInstructions()
+// above, for API Automation mode's prompts/api-automation-instructions.md.
+let cachedApiAutomationInstructions: string | undefined;
+function readApiAutomationInstructions(): string {
+  if (cachedApiAutomationInstructions !== undefined) {
+    return cachedApiAutomationInstructions;
+  }
+  try {
+    cachedApiAutomationInstructions = fs.readFileSync(
+      path.join(__dirname, '..', '..', 'prompts', 'api-automation-instructions.md'),
+      'utf8'
+    );
+  } catch {
+    cachedApiAutomationInstructions = '';
+  }
+  return cachedApiAutomationInstructions;
+}
+
+/** API Automation mode's counterpart to buildFeatureFilePrompt() — same
+ * "code/request in, feature file out" shape, just fed the Control Panel's
+ * API request details (buildApiRequestSummary()) instead of Playwright
+ * Codegen output. A linked scenario (if any) is folded in as additional
+ * business context per the explicit ask that a linked feature file be
+ * handled "the same way" in API mode as in UI mode. */
+function buildApiFeatureFilePrompt(
+  builtInInstructions: string,
+  apiDetails: ApiRequestDetails,
+  customInstructions: string,
+  linkedScenario?: LinkedScenario
+): string {
+  const parts: string[] = [];
+
+  if (builtInInstructions) {
+    parts.push(builtInInstructions);
+  } else {
+    parts.push(
+      'Analyze the following API request details and produce a complete, business-focused BDD Gherkin feature ' +
+        'file. Output ONLY the feature file in a single fenced `gherkin` code block, no other commentary.'
+    );
+  }
+
+  if (customInstructions) {
+    parts.push(`\n## Additional instructions from the user — follow these too\n${customInstructions}`);
+  }
+
+  if (linkedScenario) {
+    const gherkinBlock = [linkedScenario.backgroundRawText, linkedScenario.rawText].filter(Boolean).join('\n\n');
+    parts.push(
+      `\n## Existing linked Gherkin ${linkedScenario.scenarioKind} — "${linkedScenario.scenarioName}" (from ${linkedScenario.featureName})`,
+      `The user has this Cucumber ${linkedScenario.scenarioKind} already linked via "Link Feature file" — use it as ` +
+        `additional business context (naming/terminology consistency, existing coverage to avoid duplicating) when ` +
+        `generating the new feature file below; it is not itself the thing to regenerate.`,
+      `\`\`\`gherkin\n${gherkinBlock}\n\`\`\``
+    );
+  }
+
+  parts.push(`\n## API Request Details to analyze\n${buildApiRequestSummary(apiDetails)}`);
+
+  return parts.join('\n');
+}
+
+/**
+ * API Automation mode's counterpart to buildLlmPrompt() — same overall
+ * shape and section ordering (opening ask, mandatory standard, project
+ * .md files, user's free-text, the thing to analyze, linked Gherkin last
+ * for recency — see buildLlmPrompt()'s own comment for why that order
+ * matters), just built around an API request instead of a Playwright
+ * recording: no "Reference Playwright-generated code" section (there is
+ * none — no browser, no codegen, in this mode) and no browser-executable
+ * requirement (API automation never launches a browser).
+ */
+function buildApiLlmPrompt(
+  language: 'java' | 'python',
+  languageVersion: string,
+  builtInInstructions: string,
+  instructions: { path: string; content: string }[],
+  apiDetails: ApiRequestDetails,
+  customInstructions: string,
+  linkedScenario?: LinkedScenario,
+  suggestedClassName?: string
+): string {
+  const languageName = language === 'java' ? 'Java (JUnit 5, REST Assured)' : 'Python (pytest, requests)';
+  const versionGuidance = languageVersionGuidance(language, languageVersion);
+  const isPartialSelection = !!linkedScenario && linkedScenario.selectedStepCount < linkedScenario.totalStepCount;
+
+  const parts: string[] = [
+    `You are an expert API test automation engineer working on an enterprise QA codebase.`,
+    `Generate ${languageName} API test automation code, targeting exactly **${language === 'java' ? 'Java' : 'Python'} ` +
+      `${languageVersion}** — the specific language/runtime version the user selected in Settings, and it must ` +
+      `compile/run correctly under it, using only language features actually available in that version (never a ` +
+      `newer version's syntax, no need to stay compatible with anything older either). ${versionGuidance} ` +
+      `Follow the enterprise structure described in the mandatory refinement standard below. This is API test ` +
+      `automation — there is no browser, no Playwright, no UI of any kind involved anywhere in the output. ` +
+      `Respond with ONLY the final code in a single fenced code block and no other commentary.`
+  ];
+
+  if (isPartialSelection && linkedScenario) {
+    parts.push(
+      `\n## ⚠ Restricted scope for this request — OVERRIDES the mandatory refinement standard below wherever they conflict\n` +
+        `The user checked only ${linkedScenario.selectedStepCount} of ${linkedScenario.totalStepCount} steps in the ` +
+        `linked scenario (see the "Linked Gherkin" section near the end of this prompt) and wants a bare, minimal ` +
+        `snippet — NOT a complete runnable file. Output ONLY:\n` +
+        `  (a) one BDD step definition method for each checked step, and\n` +
+        `  (b) whatever API client method(s) that step definition directly calls.\n` +
+        `Do NOT include a class declaration/wrapper, any setup/teardown hooks, a step definition for the ` +
+        `Background, or a step/API-client method for any step the user left unchecked — even indirectly (e.g. a ` +
+        `prior API call a checked step might seem to depend on). The refinement standard's STYLE rules still apply ` +
+        `to whatever you DO output; only its single-complete-file, hook, and Background-related instructions are ` +
+        `overridden here.`
+    );
+  }
+
+  if (builtInInstructions) {
+    parts.push(`\n## Mandatory refinement standard — apply every part of this\n${builtInInstructions}`);
+  }
+
+  if (instructions.length) {
+    parts.push(
+      `\n## Project instructions/skills/prompts (from .github/) — follow these`,
+      ...instructions.map((f) => `### ${f.path}\n${f.content}`)
+    );
+  }
+
+  if (customInstructions) {
+    parts.push(`\n## Additional instructions from the user — follow these too\n${customInstructions}`);
+  }
+
+  parts.push(`\n## API Request Details — the request to build test automation around\n${buildApiRequestSummary(apiDetails)}`);
+
+  if (linkedScenario) {
+    parts.push(
+      `\n## Linked Gherkin ${linkedScenario.scenarioKind} — "${linkedScenario.scenarioName}" (from ${linkedScenario.featureName})`,
+      `The user has linked this Cucumber ${linkedScenario.scenarioKind} to the API request above via "Link Feature ` +
+        `file". Every Given/When/Then/And/But/* line below must get its own properly linked BDD step definition ` +
+        `per section 7 of the mandatory refinement standard — do not just append the Gherkin as a comment. Produce ` +
+        `exactly ONE file, in exactly ONE fenced code block: the API client AND its BDD step definitions together.`,
+      `\`\`\`gherkin\n${[linkedScenario.backgroundRawText, linkedScenario.rawText].filter(Boolean).join('\n\n')}\n\`\`\``
+    );
+    if (suggestedClassName && !isPartialSelection) {
+      parts.push(
+        `\n## Required ${language === 'java' ? 'class' : 'module/file'} name (non-negotiable)\n` +
+          (language === 'java'
+            ? `Name the primary public class exactly \`${suggestedClassName}\` (and its file \`${suggestedClassName}.java\`) — ` +
+              `derived from this scenario's own name, so it stays recognizable as the test for THIS scenario.`
+            : `Name the module (test file, without the \`.py\` extension) exactly \`${suggestedClassName}\` — derived ` +
+              `from this scenario's own name, so it stays recognizable as the test for THIS scenario.`)
+      );
+    }
+  }
+
+  return parts.join('\n');
+}
+
 /**
  * Builds the fix-up request sent to the LLM after a "Verify & Fix Code"
  * attempt actually failed to execute — deliberately keeps the ORIGINAL,
@@ -1083,38 +1478,37 @@ function buildFeatureFilePrompt(builtInInstructions: string, playwrightCode: str
  */
 function buildFixPrompt(
   builtInInstructions: string,
-  originalCodegenCode: string,
+  originalContext: { label: string; content: string },
   brokenCode: string,
   errorOutput: string,
-  language: 'java' | 'python'
+  language: 'java' | 'python',
+  automationMode: 'ui' | 'api'
 ): string {
   const languageName = language === 'java' ? 'Java' : 'Python';
+  const domain = automationMode === 'api' ? 'API' : 'UI/Playwright';
   const parts: string[] = [
-    `You are an expert Playwright test automation engineer working on an enterprise QA codebase. The following ` +
-      `${languageName} code was AI-generated and just FAILED when actually executed, headless, in a real test run. ` +
-      `Fix it so it compiles and runs cleanly — respond with ONLY the corrected, complete code in a single fenced ` +
-      `code block, no commentary.`
+    `You are an expert ${domain} test automation engineer working on an enterprise QA codebase. The following ` +
+      `${languageName} code was AI-generated and just FAILED to compile/parse when actually run in a real test ` +
+      `attempt (a real API-side error response is handled separately and never reaches this prompt — this is a ` +
+      `genuine code defect). Fix it so it compiles cleanly — respond with ONLY the corrected, complete code in a ` +
+      `single fenced code block, no commentary.`
   ];
 
   if (builtInInstructions) {
     parts.push(`\n## Mandatory refinement standard — the fixed code must still follow every part of this\n${builtInInstructions}`);
   }
 
-  parts.push(
-    `\n## Original Playwright Codegen output (real, unmodified recording — the ground truth for which locators and ` +
-      `actions are actually correct; refer back to this if the error suggests one was used incorrectly)\n` +
-      `\`\`\`${language}\n${originalCodegenCode}\n\`\`\``
-  );
+  parts.push(`\n## ${originalContext.label}\n${originalContext.content}`);
 
-  parts.push(`\n## AI-generated code that failed to execute\n\`\`\`${language}\n${brokenCode}\n\`\`\``);
+  parts.push(`\n## AI-generated code that failed\n\`\`\`${language}\n${brokenCode}\n\`\`\``);
 
-  parts.push(`\n## Exact error output from the failed headless run\n\`\`\`\n${errorOutput}\n\`\`\``);
+  parts.push(`\n## Exact error output from the failed attempt\n\`\`\`\n${errorOutput}\n\`\`\``);
 
   parts.push(
     `\n## Task\nFix ONLY what's necessary to resolve this specific error. Do not restructure or rewrite parts of ` +
       `the code that aren't implicated by it. Keep the same class/file name, the same target language/runtime ` +
-      `version, the same browser-executable launch override (never remove or weaken it), and the overall structure ` +
-      `— this is a targeted fix, not a rewrite.`
+      `version${automationMode === 'ui' ? ', the same browser-executable launch override (never remove or weaken it)' : ''}, ` +
+      `and the overall structure — this is a targeted fix, not a rewrite.`
   );
 
   return parts.join('\n');

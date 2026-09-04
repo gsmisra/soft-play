@@ -36,6 +36,432 @@
   const aiStatusLabel = document.getElementById('aiStatusLabel');
   const aiGeneratingBanner = document.getElementById('aiGeneratingBanner');
   const copilotEnabledToggle = document.getElementById('copilotEnabledToggle');
+  const uiModeControls = document.getElementById('uiModeControls');
+  const apiModeControls = document.getElementById('apiModeControls');
+
+  // ---------------------------------------------------------------------
+  // API Automation mode — Postman-styled request builder. Switching modes
+  // never touches Playwright/codegen state; it only shows/hides which half
+  // of the Control Panel is visible (see applyAutomationMode() below) and
+  // changes what "Start AI Processing"/"Generate Gherkin Feature File"
+  // bundle into their request (see collectApiRequestDetails() and the
+  // click handlers further down).
+  // ---------------------------------------------------------------------
+
+  function applyAutomationMode(mode) {
+    const isApi = mode === 'api';
+    uiModeControls.hidden = isApi;
+    apiModeControls.hidden = !isApi;
+    // "Playwright Code" is never used in API Automation -- nothing records
+    // it there (no browser is ever launched). "Start AI Processing"/"Open
+    // AI Generated Code" stay put; they read from the API request builder
+    // instead in this mode (see collectApiRequestDetails()).
+    playwrightCodePanel.hidden = isApi;
+  }
+
+  /** Builds one Params/Headers/form-data/urlencoded key-value-description
+   * table: renders from `rows`, and keeps exactly one trailing blank row
+   * available to type into (Postman's own "add a row by typing in the last
+   * one" pattern) — a filled-in last row spawns a fresh blank one below it;
+   * an emptied non-last row is removed. Returns {getRows} to read back
+   * only the genuinely filled-in rows (blank trailing row excluded).
+   */
+  function createKvTable(tableEl) {
+    const tbody = tableEl.querySelector('tbody');
+    let rows = [{ key: '', value: '', description: '' }];
+
+    function isBlank(row) {
+      return !row.key && !row.value && !row.description;
+    }
+
+    function render() {
+      tbody.innerHTML = '';
+      rows.forEach((row, index) => {
+        const tr = document.createElement('tr');
+
+        const keyTd = document.createElement('td');
+        const keyInput = document.createElement('input');
+        keyInput.type = 'text';
+        keyInput.placeholder = 'Key';
+        keyInput.value = row.key;
+        keyInput.addEventListener('input', () => onEdit(index, 'key', keyInput.value));
+        keyTd.appendChild(keyInput);
+
+        const valueTd = document.createElement('td');
+        const valueInput = document.createElement('input');
+        valueInput.type = 'text';
+        valueInput.placeholder = 'Value';
+        valueInput.value = row.value;
+        valueInput.addEventListener('input', () => onEdit(index, 'value', valueInput.value));
+        valueTd.appendChild(valueInput);
+
+        const descTd = document.createElement('td');
+        const descInput = document.createElement('input');
+        descInput.type = 'text';
+        descInput.placeholder = 'Description';
+        descInput.value = row.description;
+        descInput.addEventListener('input', () => onEdit(index, 'description', descInput.value));
+        descTd.appendChild(descInput);
+
+        const removeTd = document.createElement('td');
+        if (index < rows.length - 1) {
+          const removeBtn = document.createElement('button');
+          removeBtn.type = 'button';
+          removeBtn.className = 'api-row-remove';
+          removeBtn.textContent = '✕';
+          removeBtn.title = 'Remove this row';
+          removeBtn.addEventListener('click', () => {
+            rows.splice(index, 1);
+            render();
+          });
+          removeTd.appendChild(removeBtn);
+        }
+
+        tr.appendChild(keyTd);
+        tr.appendChild(valueTd);
+        tr.appendChild(descTd);
+        tr.appendChild(removeTd);
+        tbody.appendChild(tr);
+      });
+    }
+
+    function onEdit(index, field, value) {
+      rows[index] = { ...rows[index], [field]: value };
+      const isLastRow = index === rows.length - 1;
+      if (isLastRow && !isBlank(rows[index])) {
+        rows.push({ key: '', value: '', description: '' });
+        render();
+        return;
+      }
+      // A non-last row emptied out entirely -- drop it rather than leave a
+      // dead blank row in the middle of the table.
+      if (!isLastRow && isBlank(rows[index])) {
+        rows.splice(index, 1);
+        render();
+        return;
+      }
+      // In-place edit -- re-render is unnecessary (would steal focus), the
+      // input's own value already reflects what the user typed.
+    }
+
+    render();
+
+    return {
+      getRows() {
+        return rows.filter((r) => !isBlank(r));
+      }
+    };
+  }
+
+  /** form-data's own table — a Key/Value/Description/remove table like
+   * createKvTable() above, EXCEPT each row's Value cell also carries a
+   * Text/File dropdown (matching Postman): "Text" is the same plain input
+   * createKvTable() already has; "File" swaps it for a "Select File"
+   * button that hands off to the extension host's native OS file dialog
+   * (see the 'browseApiFormFile'/'apiFormFileSelected' round trip below —
+   * a webview `<input type="file">` cannot reveal the real absolute path
+   * the generated multipart-upload code needs, only the OS dialog can). A
+   * separate function from createKvTable() on purpose: the other three
+   * tables (Params/Headers/x-www-form-urlencoded) never need this and stay
+   * completely unaffected. */
+  function createFormDataTable(tableEl) {
+    const tbody = tableEl.querySelector('tbody');
+    let nextRowId = 1;
+    let rows = [{ id: nextRowId++, key: '', value: '', valueType: 'text', description: '' }];
+
+    function isBlank(row) {
+      return !row.key && !row.value && !row.description;
+    }
+
+    function indexOfRowId(rowId) {
+      return rows.findIndex((r) => r.id === rowId);
+    }
+
+    function render() {
+      tbody.innerHTML = '';
+      rows.forEach((row, index) => {
+        const tr = document.createElement('tr');
+
+        const keyTd = document.createElement('td');
+        const keyInput = document.createElement('input');
+        keyInput.type = 'text';
+        keyInput.placeholder = 'Key';
+        keyInput.value = row.key;
+        keyInput.addEventListener('input', () => onEdit(index, { key: keyInput.value }));
+        keyTd.appendChild(keyInput);
+
+        const valueTd = document.createElement('td');
+        valueTd.className = 'api-formdata-value-cell';
+        if (row.valueType === 'file') {
+          const browseBtn = document.createElement('button');
+          browseBtn.type = 'button';
+          browseBtn.className = 'api-browse-btn';
+          browseBtn.textContent = row.value ? fileBaseName(row.value) : 'Select File';
+          browseBtn.title = row.value || 'Select a file to upload';
+          browseBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'browseApiFormFile', payload: { rowId: row.id } });
+          });
+          valueTd.appendChild(browseBtn);
+        } else {
+          const valueInput = document.createElement('input');
+          valueInput.type = 'text';
+          valueInput.placeholder = 'Value';
+          valueInput.value = row.value;
+          valueInput.addEventListener('input', () => onEdit(index, { value: valueInput.value }));
+          valueTd.appendChild(valueInput);
+        }
+        const typeSelect = document.createElement('select');
+        typeSelect.className = 'api-formdata-type-select';
+        [
+          ['text', 'Text'],
+          ['file', 'File']
+        ].forEach(([value, label]) => {
+          const opt = document.createElement('option');
+          opt.value = value;
+          opt.textContent = label;
+          if (row.valueType === value) opt.selected = true;
+          typeSelect.appendChild(opt);
+        });
+        typeSelect.addEventListener('change', () => {
+          // Switching type discards whatever the old value held -- a file
+          // path is meaningless as text and vice versa.
+          onEdit(index, { valueType: typeSelect.value, value: '' });
+        });
+        valueTd.appendChild(typeSelect);
+
+        const descTd = document.createElement('td');
+        const descInput = document.createElement('input');
+        descInput.type = 'text';
+        descInput.placeholder = 'Description';
+        descInput.value = row.description;
+        descInput.addEventListener('input', () => onEdit(index, { description: descInput.value }));
+        descTd.appendChild(descInput);
+
+        const removeTd = document.createElement('td');
+        if (index < rows.length - 1) {
+          const removeBtn = document.createElement('button');
+          removeBtn.type = 'button';
+          removeBtn.className = 'api-row-remove';
+          removeBtn.textContent = '✕';
+          removeBtn.title = 'Remove this row';
+          removeBtn.addEventListener('click', () => {
+            rows.splice(index, 1);
+            render();
+          });
+          removeTd.appendChild(removeBtn);
+        }
+
+        tr.appendChild(keyTd);
+        tr.appendChild(valueTd);
+        tr.appendChild(descTd);
+        tr.appendChild(removeTd);
+        tbody.appendChild(tr);
+      });
+    }
+
+    function onEdit(index, patch) {
+      rows[index] = { ...rows[index], ...patch };
+      const isLastRow = index === rows.length - 1;
+      if (isLastRow && !isBlank(rows[index])) {
+        rows.push({ id: nextRowId++, key: '', value: '', valueType: 'text', description: '' });
+        render();
+        return;
+      }
+      if (!isLastRow && isBlank(rows[index])) {
+        rows.splice(index, 1);
+        render();
+        return;
+      }
+      // A file selection always needs the button's label refreshed; a
+      // plain text edit doesn't need a re-render (would steal focus).
+      if (patch.value !== undefined && rows[index].valueType === 'file') {
+        render();
+      }
+    }
+
+    render();
+
+    return {
+      getRows() {
+        return rows.filter((r) => !isBlank(r)).map(({ id, ...row }) => row);
+      },
+      /** Applies a file path the user just picked via the native OS dialog
+       * back onto whichever row asked for it (see the
+       * 'browseApiFormFile'/'apiFormFileSelected' round trip). A no-op if
+       * that row was removed while the dialog was open. */
+      applyFileSelection(rowId, filePath) {
+        const index = indexOfRowId(rowId);
+        if (index === -1) {
+          return;
+        }
+        onEdit(index, { value: filePath });
+      }
+    };
+  }
+
+  function fileBaseName(filePath) {
+    const parts = filePath.split(/[\\/]/);
+    return parts[parts.length - 1] || filePath;
+  }
+
+  const apiParamsTable = createKvTable(document.getElementById('apiParamsTable'));
+  const apiHeadersTable = createKvTable(document.getElementById('apiHeadersTable'));
+  const apiFormDataTable = createFormDataTable(document.getElementById('apiFormDataTable'));
+  const apiUrlencodedTable = createKvTable(document.getElementById('apiUrlencodedTable'));
+
+  // Tab strip (Params/Authorization/Headers/Body) -- one panel visible at a time.
+  document.querySelectorAll('.api-tab').forEach((tabBtn) => {
+    tabBtn.addEventListener('click', () => {
+      document.querySelectorAll('.api-tab').forEach((b) => b.classList.remove('active'));
+      tabBtn.classList.add('active');
+      const target = tabBtn.getAttribute('data-tab');
+      document.querySelectorAll('.api-tab-panel').forEach((panel) => {
+        panel.hidden = panel.getAttribute('data-panel') !== target;
+      });
+    });
+  });
+
+  // Authorization type -> show only the matching fields.
+  const apiAuthType = document.getElementById('apiAuthType');
+  apiAuthType.addEventListener('change', () => {
+    document.querySelectorAll('.api-auth-fields').forEach((el) => {
+      el.hidden = el.getAttribute('data-auth') !== apiAuthType.value;
+    });
+  });
+
+  // Body mode (none/form-data/x-www-form-urlencoded/raw) -> show only the matching panel.
+  document.querySelectorAll('input[name="apiBodyMode"]').forEach((radio) => {
+    radio.addEventListener('change', () => {
+      if (!radio.checked) return;
+      document.querySelectorAll('.api-body-panel').forEach((el) => {
+        el.hidden = el.getAttribute('data-body') !== radio.value;
+      });
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // Raw request body — a real code-editor experience (line-numbered
+  // gutter, syntax color coding, directly editable) via the same
+  // createCodeEditor() factory the Playwright Code/AI Generated Code
+  // editors already use, rather than a plain <textarea>. JSON/XML also
+  // get auto-formatted (pretty-printed) on language switch and via the
+  // Beautify button — never silently on every keystroke, which would
+  // fight the user's cursor while they're still typing.
+  // ---------------------------------------------------------------------
+
+  const apiRawLanguageSelect = document.getElementById('apiRawLanguage');
+  const apiRawBeautifyBtn = document.getElementById('apiRawBeautifyBtn');
+  const apiRawBodyEditor = window.createCodeEditor(
+    document.getElementById('apiRawBody'),
+    document.getElementById('apiRawHighlight'),
+    document.getElementById('apiRawGutter')
+  );
+  // Re-highlights live as the user types -- createCodeEditor() only wires
+  // that up when a caller actually asks for it via onEdit().
+  apiRawBodyEditor.onEdit(() => {});
+
+  function rawBodyEditorLanguage() {
+    const value = apiRawLanguageSelect.value;
+    return value === 'JSON' ? 'json' : value === 'XML' ? 'xml' : 'text';
+  }
+
+  /** Pretty-prints the raw body in place for whichever language is
+   * currently selected. Silently leaves the content untouched if it isn't
+   * valid JSON/XML (a mid-edit or deliberately non-JSON JSON body is not
+   * an error condition worth interrupting the user over) or the language
+   * is plain Text (nothing to format). */
+  function beautifyRawBody() {
+    const lang = rawBodyEditorLanguage();
+    const current = apiRawBodyEditor.getValue();
+    const formatted = lang === 'json' ? beautifyJson(current) : lang === 'xml' ? beautifyXml(current) : null;
+    if (formatted !== null && formatted !== current) {
+      apiRawBodyEditor.setValue(formatted);
+    }
+  }
+
+  function beautifyJson(text) {
+    if (!text.trim()) return null;
+    try {
+      return JSON.stringify(JSON.parse(text), null, 2);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** Best-effort XML pretty-printer: not a real parser (no attribute/entity
+   * validation) -- just enough to turn well-formed-but-unindented XML into
+   * something readable, the same modest bar Postman's own Beautify holds
+   * itself to. Left alone (returns the original text) on anything that
+   * doesn't look like it has real tags to indent. */
+  function beautifyXml(text) {
+    const trimmed = text.trim();
+    if (!trimmed || trimmed.indexOf('<') === -1) return null;
+
+    function classify(line) {
+      if (/^<\?/.test(line) || /^<!--[\s\S]*-->$/.test(line) || /\/>$/.test(line)) {
+        return 'leaf';
+      }
+      if (/^<([A-Za-z_][-\w:.]*)[^>]*>.*<\/\1>$/.test(line)) {
+        return 'leaf'; // e.g. <name>John</name> on one line -- doesn't nest further
+      }
+      if (/^<\//.test(line)) return 'close';
+      if (/^</.test(line)) return 'open';
+      return 'leaf'; // plain text content
+    }
+
+    const lines = trimmed
+      .replace(/>\s*</g, '>\n<')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+    let indent = 0;
+    const out = [];
+    for (const line of lines) {
+      const kind = classify(line);
+      if (kind === 'close') indent = Math.max(indent - 1, 0);
+      out.push('  '.repeat(indent) + line);
+      if (kind === 'open') indent++;
+    }
+    return out.join('\n');
+  }
+
+  apiRawLanguageSelect.addEventListener('change', () => {
+    apiRawBodyEditor.setLanguage(rawBodyEditorLanguage());
+    beautifyRawBody();
+  });
+  apiRawBeautifyBtn.addEventListener('click', beautifyRawBody);
+  apiRawBodyEditor.setLanguage(rawBodyEditorLanguage());
+
+  /** Everything currently in the API request builder, as one structured
+   * object -- sent verbatim (minus redaction of secret VALUES, applied
+   * server-side, never here) as the "API Request Details" context for
+   * "Start AI Processing" and "Generate Gherkin Feature File" in API mode.
+   * Harmless to compute in UI mode too (the extension host only reads it
+   * when settings.automationMode === 'api'). */
+  function collectApiRequestDetails() {
+    const checkedBodyMode = document.querySelector('input[name="apiBodyMode"]:checked');
+    return {
+      method: document.getElementById('apiMethod').value,
+      url: document.getElementById('apiUrl').value.trim(),
+      params: apiParamsTable.getRows(),
+      headers: apiHeadersTable.getRows(),
+      authType: apiAuthType.value,
+      auth: {
+        apiKeyName: document.getElementById('apiAuthApiKeyName').value,
+        apiKeyValue: document.getElementById('apiAuthApiKeyValue').value,
+        apiKeyAddTo: document.getElementById('apiAuthApiKeyAddTo').value,
+        bearerToken: document.getElementById('apiAuthBearerToken').value,
+        basicUsername: document.getElementById('apiAuthBasicUser').value,
+        basicPassword: document.getElementById('apiAuthBasicPass').value
+      },
+      bodyMode: checkedBodyMode ? checkedBodyMode.value : 'none',
+      bodyFormFields: apiFormDataTable.getRows(),
+      bodyUrlencodedFields: apiUrlencodedTable.getRows(),
+      bodyRawLanguage: apiRawLanguageSelect.value,
+      bodyRaw: apiRawBodyEditor.getValue()
+    };
+  }
 
   let killConfirmPending = false;
   let killConfirmTimer = null;
@@ -189,25 +615,32 @@
   // "Start AI Processing" — the ONLY trigger for AI code generation.
   // Bundles staged chat instructions, the current Playwright Code, and
   // checked .md files; the extension host adds Settings and the linked
-  // scenario/selected steps on its own.
+  // scenario/selected steps on its own. `apiDetails` is always included —
+  // harmless in UI mode, where the extension host simply ignores it (see
+  // sendToLlm()/runLlmRefinement() there, gated on settings.automationMode).
   startAiProcessingBtn.addEventListener('click', () => {
     const customInstructions = collectAndClearStagedInstructions();
     vscode.postMessage({
       type: 'sendToLlm',
-      payload: { selectedFiles: selectedPromptFiles(), code: playwrightEditor.getValue(), customInstructions }
+      payload: {
+        selectedFiles: selectedPromptFiles(),
+        code: playwrightEditor.getValue(),
+        customInstructions,
+        apiDetails: collectApiRequestDetails()
+      }
     });
   });
 
   // "Generate Gherkin Feature File" — for when no .feature file has been
-  // linked yet: turns whatever Playwright Codegen recorded (plus staged
-  // chat instructions) into a brand-new BDD feature file instead of
-  // refined automation code. No Custom md files / Settings / linked
-  // scenario involved — see generateFeatureFile() on the extension host.
+  // linked yet: turns whatever Playwright Codegen recorded (UI mode) or the
+  // API request just described above (API mode) — plus staged chat
+  // instructions — into a brand-new BDD feature file instead of refined
+  // automation code. See generateFeatureFile() on the extension host.
   generateFeatureFileBtn.addEventListener('click', () => {
     const customInstructions = collectAndClearStagedInstructions();
     vscode.postMessage({
       type: 'generateFeatureFile',
-      payload: { code: playwrightEditor.getValue(), customInstructions }
+      payload: { code: playwrightEditor.getValue(), customInstructions, apiDetails: collectApiRequestDetails() }
     });
   });
 
@@ -356,6 +789,9 @@
       case 'codeCorrectness':
         codeCorrectnessBanner.hidden = !message.payload;
         break;
+      case 'apiFormFileSelected':
+        apiFormDataTable.applyFileSelection(message.payload.rowId, message.payload.filePath);
+        break;
     }
   });
 
@@ -428,6 +864,7 @@
   }
 
   function applyCode(payload) {
+    applyAutomationMode(payload.automationMode);
     codeLanguageLabel.textContent =
       '(' + payload.language[0].toUpperCase() + payload.language.slice(1) + ' ' + payload.languageVersion + ')';
 
