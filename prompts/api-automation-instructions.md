@@ -355,6 +355,874 @@ jsonPath.getString("users[0].name");
 
 # Authentication
 
+# REST Assured Authentication Master Guide for LLMs
+
+## Purpose
+
+This document is designed for AI coding agents and LLMs that generate Java REST Assured and Python API automation code.
+
+Goal:
+- Correctly identify authentication type.
+- Generate secure code.
+- Select proper REST Assured authentication APIs.
+- Generate equivalent Python requests/httpx implementations.
+- Follow modern API security best practices.
+
+---
+
+# Authentication Selection Matrix
+
+| Authentication Type | Still Used | REST Assured Support | Python Support |
+|---------------------|------------|----------------------|----------------|
+| API Key | Yes | Native Headers/Params | requests |
+| Bearer Token | Yes | Native Headers | requests |
+| JWT | Yes | Native Headers | requests |
+| Basic Auth | Yes | auth().basic() | requests |
+| Digest Auth | Legacy | auth().digest() | requests |
+| OAuth 2.0 Client Credentials | Yes | oauth2() | requests |
+| OAuth 2.0 Authorization Code | Yes | oauth2() | requests |
+| OAuth 2.0 PKCE | Yes | oauth2() | requests |
+| OpenID Connect (OIDC) | Yes | oauth2() | requests |
+| Mutual TLS (mTLS) | Enterprise | keystore support | requests cert |
+| HMAC Signature | Yes | Custom Filter/Header | custom signing |
+| AWS SigV4 | Yes | Custom signing | boto/aws auth |
+| Azure Entra ID | Yes | oauth2() | MSAL |
+| Google Identity | Yes | oauth2() | google-auth |
+| Okta/Auth0 | Yes | oauth2() | requests |
+| SAML-to-Token Flow | Enterprise | token usage | requests |
+| Session Cookie | Yes | cookies()/session support | requests session |
+| CSRF Protected APIs | Yes | csrf() support patterns | requests |
+
+---
+
+# Universal Agent Rules
+
+Always:
+
+1. Never hardcode secrets.
+2. Store secrets in environment variables.
+3. Refresh expiring tokens.
+4. Log requests without exposing credentials.
+5. Mask sensitive headers.
+6. Reuse authentication logic.
+7. Centralize token acquisition.
+8. Validate authentication failures.
+
+Never:
+
+- Commit secrets.
+- Print passwords.
+- Log JWTs.
+- Disable SSL in production.
+
+---
+
+# API Key Authentication
+
+## Header Based
+
+### Java REST Assured
+
+```java
+given()
+    .header("X-API-Key", apiKey)
+.when()
+    .get(endpoint)
+.then()
+    .statusCode(200);
+```
+
+### Python
+
+```python
+headers = {"X-API-Key": api_key}
+response = requests.get(url, headers=headers)
+```
+
+## Query Parameter Based
+
+```java
+.queryParam("apikey", apiKey)
+```
+
+Use only when explicitly required.
+
+---
+
+# Bearer Token Authentication
+
+## Standard Pattern
+
+### REST Assured
+
+```java
+given()
+    .header("Authorization", "Bearer " + token)
+.when()
+    .get(url);
+```
+
+### Python
+
+```python
+headers = {
+    "Authorization": f"Bearer {token}"
+}
+```
+
+Use whenever API documentation mentions:
+
+- Bearer Token
+- Access Token
+- JWT Access Token
+
+---
+
+# JWT Authentication
+
+## Identification
+
+JWT consists of:
+
+```text
+header.payload.signature
+```
+
+## REST Assured
+
+```java
+given()
+    .header("Authorization",
+       "Bearer " + jwt)
+```
+
+## Optional Token Validation
+
+Agent may:
+
+- decode payload
+- verify expiry claim
+- inspect roles claim
+
+Common claims:
+
+```text
+sub
+iss
+aud
+exp
+iat
+roles
+scope
+```
+
+---
+
+# Basic Authentication
+
+## REST Assured
+
+```java
+given()
+.auth()
+.preemptive()
+.basic(username, password)
+```
+
+## Challenged Authentication
+
+```java
+given()
+.auth()
+.basic(username, password)
+```
+
+## Python
+
+```python
+requests.get(
+    url,
+    auth=(username,password)
+)
+```
+
+---
+
+# Digest Authentication
+
+```java
+given()
+.auth()
+.digest(user, password)
+```
+
+Generate only if explicitly requested.
+
+---
+
+# OAuth 2.0 Overview
+
+## Supported Flows
+
+### Client Credentials
+### Authorization Code
+### Authorization Code + PKCE
+### Refresh Token
+### Device Code
+### OIDC
+
+---
+
+# OAuth 2.0 Client Credentials
+
+## Flow
+
+```text
+Application
+  -> Token Endpoint
+  -> Access Token
+  -> API Call
+```
+
+### Token Request
+
+```java
+Response tokenResponse =
+    given()
+      .contentType("application/x-www-form-urlencoded")
+      .formParam("grant_type",
+                 "client_credentials")
+      .formParam("client_id", clientId)
+      .formParam("client_secret", secret)
+    .post(tokenUrl);
+```
+
+### Token Extraction
+
+```java
+String token = tokenResponse
+    .jsonPath()
+    .getString("access_token");
+```
+
+### Protected API
+
+```java
+given()
+.auth()
+.oauth2(token)
+```
+
+---
+
+# OAuth Authorization Code Flow
+
+## Architecture
+
+```text
+User Login
+Authorization Code
+Token Exchange
+Access Token
+Protected API
+```
+
+Agent Rules:
+
+- Obtain code first.
+- Exchange code.
+- Extract access token.
+- Use oauth2(token).
+
+---
+
+# PKCE Authentication
+
+Used by:
+
+- SPA apps
+- Mobile apps
+- Public clients
+
+Components:
+
+```text
+code_verifier
+code_challenge
+code_challenge_method=S256
+```
+
+Agent should generate:
+
+- verifier generation
+- SHA256 challenge generation
+- token exchange
+
+Then use Bearer token.
+
+---
+
+# Refresh Token Flow
+
+## Detection
+
+Response contains:
+
+```json
+{
+  "access_token":"...",
+  "refresh_token":"..."
+}
+```
+
+Refresh request:
+
+```java
+.formParam("grant_type",
+          "refresh_token")
+```
+
+Agent should automatically implement token renewal.
+
+---
+
+# OpenID Connect (OIDC)
+
+OIDC = OAuth2 + Identity Layer
+
+Common providers:
+
+- Azure Entra ID
+- Okta
+- Auth0
+- Google
+- Keycloak
+
+Relevant tokens:
+
+```text
+id_token
+access_token
+refresh_token
+```
+
+Use:
+
+```java
+.oauth2(accessToken)
+```
+
+Do not send ID token as API access token unless documentation says so.
+
+---
+
+# Azure Entra ID Authentication
+
+## Client Credentials
+
+Token endpoint pattern:
+
+```text
+https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token
+```
+
+Acquire token.
+
+Then:
+
+```java
+given()
+.auth()
+.oauth2(token)
+```
+
+Recommended libraries:
+
+- MSAL4J
+- Microsoft Authentication Library
+
+Python:
+
+- msal
+
+---
+
+# Auth0 Authentication
+
+Typical flow:
+
+```text
+Client Credentials
+JWT Token
+Bearer Access
+```
+
+Generate token first.
+
+Then:
+
+```java
+.oauth2(token)
+```
+
+---
+
+# Okta Authentication
+
+Usually:
+
+- OAuth2
+- OIDC
+- JWT Access Tokens
+
+LLM should treat Okta tokens as Bearer tokens.
+
+---
+
+# Google Identity Authentication
+
+Use:
+
+- OAuth2
+- Service Accounts
+
+Protected APIs:
+
+```java
+.header("Authorization",
+ "Bearer " + accessToken)
+```
+
+---
+
+# AWS Signature V4
+
+## Detection
+
+Headers contain:
+
+```text
+AWS4-HMAC-SHA256
+```
+
+Agent should:
+
+1. Create canonical request.
+2. Generate string to sign.
+3. Sign with secret.
+4. Create Authorization header.
+
+Prefer AWS SDK solutions.
+
+## softPlay Control Panel fields
+
+When the Control Panel's Authorization tab is set to **AWS Signature**, the
+request context supplies: Access Key, Secret Key, Session Token (optional —
+present only for temporary/STS credentials), AWS Region, and Service Name
+(e.g. `execute-api` for API Gateway, `s3`, `execute-api`). Never hand-roll
+the SigV4 canonical-request/signing-key algorithm — use the real AWS SDK,
+which already implements it correctly:
+
+**Java** — `software.amazon.awssdk:auth` (AWS SDK v2)'s `Aws4Signer`, or
+sign the request directly via `AwsBasicCredentials`/`AwsSessionCredentials`
+(when a Session Token is present) passed through an
+`AwsCredentialsProvider`, then `Aws4Signer.sign(request, signingParams)`
+built with the given Region and Service Name; apply the resulting signed
+headers to the REST Assured request via `.headers(...)`.
+
+**Python** — `boto3`/`botocore`'s `botocore.auth.SigV4Auth` (or
+`requests-aws4auth`'s `AWS4Auth(access_key, secret_key, region, service,
+session_token=session_token)` passed straight as `requests`' `auth=`
+parameter) — `requests-aws4auth` is the simplest correct option when the
+test only needs to sign requests, not the full AWS SDK.
+
+---
+
+# OAuth 1.0 Authentication
+
+## softPlay Control Panel fields
+
+Authorization tab set to **OAuth 1.0** supplies: Consumer Key, Consumer
+Secret, Access Token, Token Secret, and Signature Method (`HMAC-SHA1`
+default, or `HMAC-SHA256`/`PLAINTEXT`). Never hand-roll the OAuth1 signing
+algorithm — use a real OAuth1 client library:
+
+**Java (REST Assured)** — REST Assured has a built-in
+`.auth().oauth(consumerKey, consumerSecret, accessToken, tokenSecret)` (and
+the newer `.auth().oauth1(...)` alias) that signs the request automatically
+using the selected signature method; it requires the optional
+`com.github.scribejava:scribejava-core` dependency (REST Assured delegates
+OAuth1 signing to it) — declare it alongside the `rest-assured` dependency
+whenever this auth type is used:
+
+```java
+given()
+    .auth().oauth(consumerKey, consumerSecret, accessToken, tokenSecret)
+.when()
+    .get("/protected/resource")
+.then()
+    .statusCode(200);
+```
+
+**Python** — the `requests-oauthlib` package's `OAuth1` auth class, passed
+as `requests`' `auth=`:
+
+```python
+from requests_oauthlib import OAuth1
+
+auth = OAuth1(
+    CONSUMER_KEY,
+    client_secret=CONSUMER_SECRET,
+    resource_owner_key=ACCESS_TOKEN,
+    resource_owner_secret=TOKEN_SECRET,
+    signature_method="HMAC-SHA1",  # matches the Control Panel's Signature Method field
+)
+response = session.get(url, auth=auth)
+```
+
+---
+
+# Hawk Authentication
+
+## softPlay Control Panel fields
+
+Authorization tab set to **Hawk Authentication** supplies: Hawk Auth ID,
+Hawk Auth Key, and Algorithm (`sha256` default, or `sha1`). Hawk computes a
+per-request MAC (over the method, URI, host, port, timestamp, and a nonce)
+and sends it as an `Authorization: Hawk id="...", ts="...", nonce="...",
+mac="..."` header — never a static token; there is no first-class Java
+library for it, so implement the signing yourself (same shape as this
+document's HMAC Authentication section above) or find a maintained Hawk
+signing library on the classpath if the project already has one:
+
+**Java** — build a REST Assured `Filter` that: generates a Unix timestamp
+and random nonce, constructs the Hawk "normalized string"
+(`hawk.1.header\n<ts>\n<nonce>\n<METHOD>\n<path>\n<host>\n<port>\n\n\n`),
+computes an HMAC (per the selected Algorithm) keyed with the Hawk Auth Key,
+Base64-encodes it as `mac`, and sets the `Authorization` header to
+`Hawk id="<Hawk Auth ID>", ts="<ts>", nonce="<nonce>", mac="<mac>"` before
+the request is sent.
+
+**Python** — the `mohawk` package:
+
+```python
+from mohawk import Sender
+
+sender = Sender(
+    {"id": HAWK_AUTH_ID, "key": HAWK_AUTH_KEY, "algorithm": "sha256"},  # matches the Algorithm field
+    url,
+    method,
+    content=body or "",
+    content_type=content_type or "",
+)
+response = session.request(method, url, headers={"Authorization": sender.request_header})
+```
+
+---
+
+# NTLM Authentication
+
+## softPlay Control Panel fields
+
+Authorization tab set to **NTLM Authentication** supplies: Username,
+Password, and optionally Domain and Workstation. NTLM is a multi-step
+challenge/response handshake — never attempt to compute it by hand; use a
+library that implements the handshake:
+
+**Java** — REST Assured has no built-in NTLM support; configure its
+underlying Apache HttpClient with `NTCredentials` via
+`RestAssured.config = RestAssuredConfig.config().httpClient(
+HttpClientConfig.httpClientConfig().httpClientFactory(() -> { ...
+DefaultHttpClient with a CredentialsProvider holding new NTCredentials(username,
+password, workstation, domain) for AuthScope.ANY ... }))`, or add
+`org.apache.httpcomponents.client5:httpclient5-win` /
+`jcifs:jcifs-ext`-based NTLM support if the project already depends on one.
+
+**Python** — the `requests-ntlm` package:
+
+```python
+from requests_ntlm import HttpNtlmAuth
+
+domain_user = f"{NTLM_DOMAIN}\\{NTLM_USERNAME}" if NTLM_DOMAIN else NTLM_USERNAME
+response = session.get(url, auth=HttpNtlmAuth(domain_user, NTLM_PASSWORD))
+```
+
+---
+
+# Akamai EdgeGrid Authentication
+
+## softPlay Control Panel fields
+
+Authorization tab set to **Akamai EdgeGrid** supplies: Access Token, Client
+Token, and Client Secret (Akamai's own EdgeGrid signing scheme — distinct
+from AWS SigV4 despite the similar shape). Use Akamai's own official
+signing libraries, never a hand-rolled signature:
+
+**Java** — `com.akamai.edgegrid:edgegrid-signer-apache-http-client` (or the
+`-core`/`-rest-assured` variants Akamai publishes): construct a
+`ClientCredential` from the Access Token/Client Token/Client Secret and a
+`host`, wire it into the HTTP client REST Assured uses (same
+`httpClientFactory` pattern as the NTLM section above) so every request is
+signed automatically.
+
+**Python** — the official `edgegrid-python` package:
+
+```python
+from akamai.edgegrid import EdgeGridAuth
+
+session.auth = EdgeGridAuth(
+    client_token=EDGEGRID_CLIENT_TOKEN,
+    client_secret=EDGEGRID_CLIENT_SECRET,
+    access_token=EDGEGRID_ACCESS_TOKEN,
+)
+response = session.get(url)
+```
+
+---
+
+# HMAC Authentication
+
+## Typical Pattern
+
+```text
+Timestamp
+Nonce
+Method
+Path
+Body Hash
+Signature
+```
+
+### REST Assured
+
+Create custom filter:
+
+```java
+public class HmacFilter
+    implements Filter
+```
+
+Tasks:
+
+- Generate hash
+- Add signature
+- Add timestamp
+
+---
+
+# Mutual TLS Authentication (mTLS)
+
+## REST Assured
+
+```java
+given()
+.config(
+ RestAssured.config()
+)
+```
+
+Use keystore.
+
+Example:
+
+```java
+.keystore(path,password)
+```
+
+## Python
+
+```python
+requests.get(
+    url,
+    cert=(cert, key)
+)
+```
+
+---
+
+# Cookie Based Authentication
+
+Login:
+
+```java
+Response response =
+    given()
+    .formParam(...)
+    .post(loginUrl);
+```
+
+Extract:
+
+```java
+String session =
+ response.cookie("JSESSIONID");
+```
+
+Reuse:
+
+```java
+.cookie("JSESSIONID", session)
+```
+
+---
+
+# Session Filter
+
+```java
+SessionFilter sessionFilter =
+    new SessionFilter();
+```
+
+Usage:
+
+```java
+given()
+.filter(sessionFilter)
+```
+
+---
+
+# CSRF Security
+
+Some APIs require:
+
+```text
+CSRF Token
+Session Cookie
+```
+
+Flow:
+
+1. Get CSRF token.
+2. Extract token.
+3. Send token header.
+4. Send session cookie.
+
+---
+
+# Multi-Step Enterprise Authentication
+
+Typical chain:
+
+```text
+Login
+MFA
+Token
+Refresh Token
+Protected API
+```
+
+Agent Strategy:
+
+1. Identify login endpoint.
+2. Extract MFA requirement.
+3. Complete challenge.
+4. Capture access token.
+5. Store refresh token.
+
+---
+
+# Authentication Failure Handling
+
+Expected codes:
+
+```text
+401 Unauthorized
+403 Forbidden
+429 Too Many Requests
+```
+
+Generate:
+
+```java
+.then()
+.statusCode(anyOf(
+ is(200),
+ is(201)
+));
+```
+
+Negative tests:
+
+```java
+.statusCode(401)
+```
+
+---
+
+# Reusable Authentication Manager
+
+Recommended Architecture:
+
+```text
+AuthenticationManager
+├─ getAccessToken()
+├─ refreshToken()
+├─ createAuthHeader()
+├─ getApiKey()
+├─ getSessionCookie()
+└─ renewIfExpired()
+```
+
+---
+
+# Python Authentication Framework
+
+```python
+class AuthManager:
+
+    def get_token(self):
+        pass
+
+    def auth_headers(self):
+        return {
+           "Authorization":
+           f"Bearer {self.get_token()}"
+        }
+```
+
+---
+
+# LLM Decision Engine
+
+If docs mention:
+
+| Keyword | Authentication |
+|----------|----------------|
+| API Key | API Key |
+| Bearer | OAuth/JWT |
+| Access Token | OAuth |
+| OAuth2 | OAuth2 |
+| OpenID | OIDC |
+| PKCE | OAuth PKCE |
+| client_credentials | OAuth Client Credentials |
+| code_verifier | PKCE |
+| AWS4-HMAC-SHA256 | AWS SigV4 |
+| Signature Header | HMAC |
+| cert.pem | mTLS |
+| JSESSIONID | Session Cookie |
+| csrf-token | CSRF |
+
+---
+
+# Final Rules For LLMs
+
+When generating REST Assured code:
+
+1. Detect authentication method first.
+2. Acquire token before API call.
+3. Use oauth2() whenever OAuth access token is available.
+4. Use JsonPath to extract token values.
+5. Use SessionFilter for session-based auth.
+6. Use request specifications for reusable auth.
+7. Support token refresh logic.
+8. Never hardcode credentials.
+9. Mask secrets in logs.
+10. Generate positive and negative authentication tests.
+
+This guide should be treated as the authoritative authentication instruction set for generating enterprise-grade REST Assured Java and Python API automation code.
+
+
 ## Basic Auth
 
 ```java

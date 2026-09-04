@@ -368,6 +368,13 @@ export class AiCodePanel implements vscode.Disposable {
 
       const editor = window.createCodeEditor(editArea, highlightPre, gutter);
       editor.setLanguage(${JSON.stringify(this.language)});
+      // Without this, the highlighted <pre> overlay the user actually SEES
+      // (the real textarea underneath is invisible text, caret only) never
+      // re-renders as they type/backspace/delete -- it'd stay frozen on
+      // whatever was last streamed in, silently out of sync with their
+      // edits. createCodeEditor() only wires that re-render on 'input' when
+      // a caller explicitly asks for it via onEdit().
+      editor.onEdit(() => {});
       ${this.status === 'error' ? `statusEl.textContent = 'Error'; statusEl.className = 'status error';` : ''}
 
       copyBtn.addEventListener('click', async () => {

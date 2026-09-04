@@ -149,6 +149,13 @@
     return {
       getRows() {
         return rows.filter((r) => !isBlank(r));
+      },
+      /** Replaces every row wholesale (e.g. from a parsed curl command) —
+       * always leaves one trailing blank row, same as normal editing does. */
+      setRows(newRows) {
+        rows = newRows.map((r) => ({ key: r.key || '', value: r.value || '', description: r.description || '' }));
+        rows.push({ key: '', value: '', description: '' });
+        render();
       }
     };
   }
@@ -284,6 +291,22 @@
     return {
       getRows() {
         return rows.filter((r) => !isBlank(r)).map(({ id, ...row }) => row);
+      },
+      /** Replaces every row wholesale (e.g. from a parsed curl -F flag) —
+       * always leaves one trailing blank row, same as normal editing does.
+       * A curl command can only ever describe Text form-data values (a
+       * "@path" argument is a real uploaded file, matching valueType
+       * 'file' directly). */
+      setRows(newRows) {
+        rows = newRows.map((r) => ({
+          id: nextRowId++,
+          key: r.key || '',
+          value: r.value || '',
+          valueType: r.valueType === 'file' ? 'file' : 'text',
+          description: r.description || ''
+        }));
+        rows.push({ id: nextRowId++, key: '', value: '', valueType: 'text', description: '' });
+        render();
       },
       /** Applies a file path the user just picked via the native OS dialog
        * back onto whichever row asked for it (see the
@@ -433,12 +456,367 @@
   apiRawBeautifyBtn.addEventListener('click', beautifyRawBody);
   apiRawBodyEditor.setLanguage(rawBodyEditorLanguage());
 
+  // ---------------------------------------------------------------------
+  // "CURL" import — paste a curl command, auto-fill Method/URL/Params/
+  // Headers/Auth/Body instead of typing each field by hand. Best-effort,
+  // not a full shell grammar: handles the flags real-world "Copy as cURL"
+  // (Chrome/Firefox/Postman) output actually uses. Auth types that aren't
+  // expressible as a handful of curl flags (OAuth 1.0/2.0, Hawk, AWS
+  // Signature, NTLM, Akamai EdgeGrid) are never guessed at — only Basic
+  // (-u/--user, or --digest + -u for Digest) and Bearer/Basic/Digest
+  // recognized from a literal "Authorization:" header are detected.
+  // ---------------------------------------------------------------------
+
+  const CURL_FLAGS_NO_VALUE = new Set([
+    '-s', '--silent', '-v', '--verbose', '-i', '--include', '-k', '--insecure', '-L', '--location',
+    '--compressed', '-f', '--fail', '-4', '--ipv4', '-6', '--ipv6', '-N', '--no-buffer', '-#',
+    '--progress-bar', '-g', '--globoff', '-G', '--get', '-J', '--remote-header-name', '-O',
+    '--remote-name', '-n', '--netrc', '--digest', '--ntlm', '--negotiate', '--anyauth', '-1', '--tlsv1'
+  ]);
+  const CURL_FLAGS_WITH_VALUE = new Set([
+    '--connect-timeout', '--max-time', '-m', '-o', '--output', '-x', '--proxy', '--cacert', '--cert',
+    '-E', '--key', '--cookie-jar', '-c', '--interface', '--limit-rate', '--retry', '-w', '--write-out'
+  ]);
+
+  /** Splits a shell-style command line into argv tokens, honoring single-
+   * and double-quoted strings (including backslash escapes inside double
+   * quotes) and a bare backslash escaping the next character outside any
+   * quotes -- covers the quoting styles real "Copy as cURL" output and
+   * hand-written curl commands actually use. */
+  function tokenizeShellCommand(str) {
+    const tokens = [];
+    let i = 0;
+    const n = str.length;
+    while (i < n) {
+      while (i < n && /\s/.test(str[i])) i++;
+      if (i >= n) break;
+      let token = '';
+      while (i < n && !/\s/.test(str[i])) {
+        const ch = str[i];
+        if (ch === '"' || ch === "'") {
+          const quote = ch;
+          i++;
+          while (i < n && str[i] !== quote) {
+            if (quote === '"' && str[i] === '\\' && i + 1 < n) {
+              token += str[i + 1];
+              i += 2;
+            } else {
+              token += str[i];
+              i++;
+            }
+          }
+          i++; // skip closing quote
+        } else if (ch === '\\' && i + 1 < n) {
+          token += str[i + 1];
+          i += 2;
+        } else {
+          token += ch;
+          i++;
+        }
+      }
+      tokens.push(token);
+    }
+    return tokens;
+  }
+
+  /** Parses `raw` (a curl command, possibly multi-line with "\" or "^"
+   * line continuations) into an ApiRequestDetails-shaped object. Throws
+   * only on genuinely malformed input (nothing to tokenize); an
+   * unrecognized flag is simply skipped rather than treated as an error --
+   * a best-effort import is far more useful than an all-or-nothing one. */
+  function parseCurlCommand(raw) {
+    const normalized = raw.replace(/\\\r?\n\s*/g, ' ').replace(/\^\r?\n\s*/g, ' ').trim();
+    let tokens = tokenizeShellCommand(normalized);
+    if (tokens[0] && tokens[0].toLowerCase() === 'curl') {
+      tokens = tokens.slice(1);
+    }
+
+    let method = null;
+    let url = '';
+    const headers = [];
+    const dataParts = [];
+    const formFields = [];
+    let isMultipart = false;
+    let basicCred = null;
+    let digestFlag = false;
+
+    for (let i = 0; i < tokens.length; i++) {
+      const t = tokens[i];
+      if (t === '-X' || t === '--request') {
+        method = (tokens[++i] || '').toUpperCase();
+      } else if (t === '-H' || t === '--header') {
+        const headerStr = tokens[++i] || '';
+        const idx = headerStr.indexOf(':');
+        if (idx !== -1) {
+          headers.push({ key: headerStr.slice(0, idx).trim(), value: headerStr.slice(idx + 1).trim(), description: '' });
+        }
+      } else if (t === '-d' || t === '--data' || t === '--data-raw' || t === '--data-binary' || t === '--data-ascii' || t === '--data-urlencode') {
+        dataParts.push(tokens[++i] || '');
+      } else if (t === '-F' || t === '--form') {
+        isMultipart = true;
+        const kv = tokens[++i] || '';
+        const eq = kv.indexOf('=');
+        if (eq !== -1) {
+          const key = kv.slice(0, eq);
+          let value = kv.slice(eq + 1);
+          const valueType = value.charAt(0) === '@' ? 'file' : 'text';
+          if (valueType === 'file') value = value.slice(1);
+          formFields.push({ key, value, valueType, description: '' });
+        }
+      } else if (t === '-u' || t === '--user') {
+        const cred = tokens[++i] || '';
+        const idx = cred.indexOf(':');
+        basicCred = { username: idx === -1 ? cred : cred.slice(0, idx), password: idx === -1 ? '' : cred.slice(idx + 1) };
+      } else if (t === '--digest') {
+        digestFlag = true;
+      } else if (t === '-b' || t === '--cookie') {
+        headers.push({ key: 'Cookie', value: tokens[++i] || '', description: '' });
+      } else if (t === '-A' || t === '--user-agent') {
+        headers.push({ key: 'User-Agent', value: tokens[++i] || '', description: '' });
+      } else if (t === '-e' || t === '--referer') {
+        headers.push({ key: 'Referer', value: tokens[++i] || '', description: '' });
+      } else if (t === '--url') {
+        url = tokens[++i] || '';
+      } else if (t.charAt(0) === '-') {
+        if (CURL_FLAGS_WITH_VALUE.has(t)) {
+          i++; // skip this flag's value -- never mistake it for the URL
+        }
+        // Anything else (recognized no-value flag or truly unknown) is
+        // simply skipped -- neither consumes a following token nor errors.
+      } else if (!url) {
+        url = t; // the one bare, non-flag argument is always the URL
+      }
+    }
+
+    if (!method) {
+      method = dataParts.length || formFields.length ? 'POST' : 'GET';
+    }
+
+    // Query params: parsed out of the URL for the Params tab, but the URL
+    // field itself keeps the full, original URL (including the query
+    // string) -- exactly what the user pasted, never silently rewritten.
+    const params = [];
+    const queryIndex = url.indexOf('?');
+    if (queryIndex !== -1) {
+      const query = url.slice(queryIndex + 1);
+      query.split('&').filter(Boolean).forEach((pair) => {
+        const eq = pair.indexOf('=');
+        const key = decodeURIComponent((eq === -1 ? pair : pair.slice(0, eq)).replace(/\+/g, ' '));
+        const value = eq === -1 ? '' : decodeURIComponent(pair.slice(eq + 1).replace(/\+/g, ' '));
+        params.push({ key, value, description: '' });
+      });
+    }
+
+    // Auth: an explicit Authorization header wins if present (removed from
+    // the plain Headers list so it isn't double-represented once it's been
+    // turned into a structured auth type); otherwise -u/--user (Digest if
+    // paired with --digest, Basic otherwise).
+    let authType = 'noauth';
+    const auth = {};
+    const authHeaderIndex = headers.findIndex((h) => h.key.toLowerCase() === 'authorization');
+    if (authHeaderIndex !== -1) {
+      const value = headers[authHeaderIndex].value;
+      const bearerMatch = /^Bearer\s+(.+)$/i.exec(value);
+      const basicMatch = /^Basic\s+(.+)$/i.exec(value);
+      if (bearerMatch) {
+        authType = 'bearer';
+        auth.bearerToken = bearerMatch[1];
+        headers.splice(authHeaderIndex, 1);
+      } else if (basicMatch) {
+        try {
+          const decoded = atob(basicMatch[1]);
+          const idx = decoded.indexOf(':');
+          authType = 'basic';
+          auth.basicUsername = idx === -1 ? decoded : decoded.slice(0, idx);
+          auth.basicPassword = idx === -1 ? '' : decoded.slice(idx + 1);
+          headers.splice(authHeaderIndex, 1);
+        } catch (e) {
+          // Not valid base64 -- leave it as a plain header rather than guess.
+        }
+      }
+    } else if (basicCred) {
+      authType = digestFlag ? 'digest' : 'basic';
+      if (authType === 'digest') {
+        auth.digestUsername = basicCred.username;
+        auth.digestPassword = basicCred.password;
+      } else {
+        auth.basicUsername = basicCred.username;
+        auth.basicPassword = basicCred.password;
+      }
+    }
+    // A header that looks like an API key convention (never guessed at for
+    // query params -- too easy to false-positive on a legitimate business
+    // param there) gets promoted to the structured API Key auth type too.
+    if (authType === 'noauth') {
+      const apiKeyIndex = headers.findIndex((h) => /^(x-)?api[-_]?key$/i.test(h.key));
+      if (apiKeyIndex !== -1) {
+        authType = 'apikey';
+        auth.apiKeyName = headers[apiKeyIndex].key;
+        auth.apiKeyValue = headers[apiKeyIndex].value;
+        auth.apiKeyAddTo = 'header';
+        headers.splice(apiKeyIndex, 1);
+      }
+    }
+
+    // Body.
+    let bodyMode = 'none';
+    let bodyRaw = '';
+    let bodyRawLanguage = 'Text';
+    let bodyUrlencodedFields = [];
+    const contentTypeHeader = headers.find((h) => h.key.toLowerCase() === 'content-type');
+    const contentType = contentTypeHeader ? contentTypeHeader.value.toLowerCase() : '';
+
+    if (isMultipart) {
+      bodyMode = 'form-data';
+    } else if (dataParts.length) {
+      const joined = dataParts.join('&');
+      const looksLikeJson = /^\s*[[{]/.test(joined);
+      const looksLikeXml = /^\s*</.test(joined);
+      const looksLikeUrlencoded = !looksLikeJson && !looksLikeXml && /^[^\s{}<>]+=[^\s{}<>]*(&[^\s{}<>]+=[^\s{}<>]*)*$/.test(joined);
+      if (contentType.indexOf('json') !== -1 || (looksLikeJson && !contentType)) {
+        bodyMode = 'raw';
+        bodyRawLanguage = 'JSON';
+        bodyRaw = beautifyJson(joined) || joined;
+      } else if (contentType.indexOf('xml') !== -1 || (looksLikeXml && !contentType)) {
+        bodyMode = 'raw';
+        bodyRawLanguage = 'XML';
+        bodyRaw = beautifyXml(joined) || joined;
+      } else if (looksLikeUrlencoded && contentType.indexOf('json') === -1 && contentType.indexOf('xml') === -1) {
+        bodyMode = 'x-www-form-urlencoded';
+        bodyUrlencodedFields = joined.split('&').filter(Boolean).map((pair) => {
+          const eq = pair.indexOf('=');
+          const key = decodeURIComponent((eq === -1 ? pair : pair.slice(0, eq)).replace(/\+/g, ' '));
+          const value = eq === -1 ? '' : decodeURIComponent(pair.slice(eq + 1).replace(/\+/g, ' '));
+          return { key, value, description: '' };
+        });
+      } else {
+        bodyMode = 'raw';
+        bodyRawLanguage = 'Text';
+        bodyRaw = joined;
+      }
+    }
+
+    return { method, url, headers, params, authType, auth, bodyMode, bodyRaw, bodyRawLanguage, bodyFormFields: formFields, bodyUrlencodedFields };
+  }
+
+  /** Pushes a parsed curl result into every Control Panel field it touches
+   * -- dispatches 'change' on the auth-type/body-mode controls afterward
+   * so their own existing listeners handle showing the right field
+   * blocks, rather than duplicating that show/hide logic here. */
+  function applyCurlResult(result) {
+    document.getElementById('apiMethod').value = result.method;
+    document.getElementById('apiUrl').value = result.url;
+    apiParamsTable.setRows(result.params);
+    apiHeadersTable.setRows(result.headers);
+
+    apiAuthType.value = result.authType;
+    apiAuthType.dispatchEvent(new Event('change'));
+    // Explicit map (not a naming-convention derivation -- several element
+    // ids are deliberately abbreviated, e.g. basicUsername's input is
+    // #apiAuthBasicUser, not the "obvious" #apiAuthBasicUsername) so this
+    // can never silently drift out of sync with the actual markup above.
+    const AUTH_FIELD_IDS = {
+      apiKeyName: 'apiAuthApiKeyName',
+      apiKeyValue: 'apiAuthApiKeyValue',
+      apiKeyAddTo: 'apiAuthApiKeyAddTo',
+      bearerToken: 'apiAuthBearerToken',
+      basicUsername: 'apiAuthBasicUser',
+      basicPassword: 'apiAuthBasicPass',
+      digestUsername: 'apiAuthDigestUser',
+      digestPassword: 'apiAuthDigestPass',
+      oauth1ConsumerKey: 'apiAuthOauth1ConsumerKey',
+      oauth1ConsumerSecret: 'apiAuthOauth1ConsumerSecret',
+      oauth1AccessToken: 'apiAuthOauth1AccessToken',
+      oauth1TokenSecret: 'apiAuthOauth1TokenSecret',
+      oauth1SignatureMethod: 'apiAuthOauth1SignatureMethod',
+      oauth2AccessToken: 'apiAuthOauth2AccessToken',
+      oauth2HeaderPrefix: 'apiAuthOauth2HeaderPrefix',
+      hawkAuthId: 'apiAuthHawkId',
+      hawkAuthKey: 'apiAuthHawkKey',
+      hawkAlgorithm: 'apiAuthHawkAlgorithm',
+      awsAccessKey: 'apiAuthAwsAccessKey',
+      awsSecretKey: 'apiAuthAwsSecretKey',
+      awsSessionToken: 'apiAuthAwsSessionToken',
+      awsRegion: 'apiAuthAwsRegion',
+      awsServiceName: 'apiAuthAwsServiceName',
+      ntlmUsername: 'apiAuthNtlmUser',
+      ntlmPassword: 'apiAuthNtlmPass',
+      ntlmDomain: 'apiAuthNtlmDomain',
+      ntlmWorkstation: 'apiAuthNtlmWorkstation',
+      edgeGridAccessToken: 'apiAuthEdgeGridAccessToken',
+      edgeGridClientToken: 'apiAuthEdgeGridClientToken',
+      edgeGridClientSecret: 'apiAuthEdgeGridClientSecret'
+    };
+    Object.keys(result.auth).forEach((key) => {
+      const el = document.getElementById(AUTH_FIELD_IDS[key]);
+      if (el) el.value = result.auth[key];
+    });
+
+    const bodyModeRadio = document.querySelector('input[name="apiBodyMode"][value="' + result.bodyMode + '"]');
+    if (bodyModeRadio) {
+      bodyModeRadio.checked = true;
+      bodyModeRadio.dispatchEvent(new Event('change'));
+    }
+    apiFormDataTable.setRows(result.bodyFormFields);
+    apiUrlencodedTable.setRows(result.bodyUrlencodedFields);
+    apiRawLanguageSelect.value = result.bodyRawLanguage;
+    apiRawBodyEditor.setLanguage(rawBodyEditorLanguage());
+    apiRawBodyEditor.setValue(result.bodyRaw);
+  }
+
+  const apiCurlBtn = document.getElementById('apiCurlBtn');
+  const apiCurlPanel = document.getElementById('apiCurlPanel');
+  const apiCurlInput = document.getElementById('apiCurlInput');
+  const apiCurlImportBtn = document.getElementById('apiCurlImportBtn');
+  const apiCurlCancelBtn = document.getElementById('apiCurlCancelBtn');
+  const apiCurlStatus = document.getElementById('apiCurlStatus');
+
+  function closeCurlPanel() {
+    apiCurlPanel.hidden = true;
+    apiCurlInput.value = '';
+    apiCurlStatus.textContent = '';
+  }
+
+  apiCurlBtn.addEventListener('click', () => {
+    apiCurlPanel.hidden = !apiCurlPanel.hidden;
+    if (!apiCurlPanel.hidden) apiCurlInput.focus();
+  });
+  apiCurlCancelBtn.addEventListener('click', closeCurlPanel);
+  apiCurlImportBtn.addEventListener('click', () => {
+    const raw = apiCurlInput.value.trim();
+    if (!raw) return;
+    let result;
+    try {
+      result = parseCurlCommand(raw);
+    } catch (e) {
+      result = null;
+    }
+    if (!result || !result.url) {
+      apiCurlStatus.textContent = 'Could not find a URL in that command — check it was pasted in full.';
+      apiCurlStatus.className = 'api-curl-status error';
+      return;
+    }
+    applyCurlResult(result);
+    apiCurlStatus.textContent = 'Imported.';
+    apiCurlStatus.className = 'api-curl-status success';
+    setTimeout(closeCurlPanel, 900);
+  });
+
   /** Everything currently in the API request builder, as one structured
    * object -- sent verbatim (minus redaction of secret VALUES, applied
    * server-side, never here) as the "API Request Details" context for
    * "Start AI Processing" and "Generate Gherkin Feature File" in API mode.
    * Harmless to compute in UI mode too (the extension host only reads it
    * when settings.automationMode === 'api'). */
+  /** Shorthand for reading one Control Panel field's current value by id --
+   * used heavily below since every auth type's own fields (11 types, most
+   * with 2-5 fields each) would otherwise be a wall of repeated
+   * document.getElementById(...).value calls. */
+  function fieldValue(id) {
+    const el = document.getElementById(id);
+    return el ? el.value : '';
+  }
+
   function collectApiRequestDetails() {
     const checkedBodyMode = document.querySelector('input[name="apiBodyMode"]:checked');
     return {
@@ -448,12 +826,36 @@
       headers: apiHeadersTable.getRows(),
       authType: apiAuthType.value,
       auth: {
-        apiKeyName: document.getElementById('apiAuthApiKeyName').value,
-        apiKeyValue: document.getElementById('apiAuthApiKeyValue').value,
-        apiKeyAddTo: document.getElementById('apiAuthApiKeyAddTo').value,
-        bearerToken: document.getElementById('apiAuthBearerToken').value,
-        basicUsername: document.getElementById('apiAuthBasicUser').value,
-        basicPassword: document.getElementById('apiAuthBasicPass').value
+        apiKeyName: fieldValue('apiAuthApiKeyName'),
+        apiKeyValue: fieldValue('apiAuthApiKeyValue'),
+        apiKeyAddTo: fieldValue('apiAuthApiKeyAddTo') || 'header',
+        bearerToken: fieldValue('apiAuthBearerToken'),
+        basicUsername: fieldValue('apiAuthBasicUser'),
+        basicPassword: fieldValue('apiAuthBasicPass'),
+        digestUsername: fieldValue('apiAuthDigestUser'),
+        digestPassword: fieldValue('apiAuthDigestPass'),
+        oauth1ConsumerKey: fieldValue('apiAuthOauth1ConsumerKey'),
+        oauth1ConsumerSecret: fieldValue('apiAuthOauth1ConsumerSecret'),
+        oauth1AccessToken: fieldValue('apiAuthOauth1AccessToken'),
+        oauth1TokenSecret: fieldValue('apiAuthOauth1TokenSecret'),
+        oauth1SignatureMethod: fieldValue('apiAuthOauth1SignatureMethod') || 'HMAC-SHA1',
+        oauth2AccessToken: fieldValue('apiAuthOauth2AccessToken'),
+        oauth2HeaderPrefix: fieldValue('apiAuthOauth2HeaderPrefix') || 'Bearer',
+        hawkAuthId: fieldValue('apiAuthHawkId'),
+        hawkAuthKey: fieldValue('apiAuthHawkKey'),
+        hawkAlgorithm: fieldValue('apiAuthHawkAlgorithm') || 'sha256',
+        awsAccessKey: fieldValue('apiAuthAwsAccessKey'),
+        awsSecretKey: fieldValue('apiAuthAwsSecretKey'),
+        awsSessionToken: fieldValue('apiAuthAwsSessionToken'),
+        awsRegion: fieldValue('apiAuthAwsRegion'),
+        awsServiceName: fieldValue('apiAuthAwsServiceName'),
+        ntlmUsername: fieldValue('apiAuthNtlmUser'),
+        ntlmPassword: fieldValue('apiAuthNtlmPass'),
+        ntlmDomain: fieldValue('apiAuthNtlmDomain'),
+        ntlmWorkstation: fieldValue('apiAuthNtlmWorkstation'),
+        edgeGridAccessToken: fieldValue('apiAuthEdgeGridAccessToken'),
+        edgeGridClientToken: fieldValue('apiAuthEdgeGridClientToken'),
+        edgeGridClientSecret: fieldValue('apiAuthEdgeGridClientSecret')
       },
       bodyMode: checkedBodyMode ? checkedBodyMode.value : 'none',
       bodyFormFields: apiFormDataTable.getRows(),

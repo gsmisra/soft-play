@@ -24,8 +24,50 @@ export interface ApiFormDataRow extends ApiKeyValueRow {
   valueType: 'text' | 'file';
 }
 
-export type ApiAuthType = 'noauth' | 'apikey' | 'bearer' | 'basic';
+/** Every auth type softPlay's Control Panel offers — the same set Postman
+ * itself offers minus "Inherit auth from parent" (no collection/folder
+ * hierarchy exists here for anything to inherit from). */
+export type ApiAuthType = 'noauth' | 'apikey' | 'bearer' | 'basic' | 'digest' | 'oauth1' | 'oauth2' | 'hawk' | 'awsv4' | 'ntlm' | 'edgegrid';
 export type ApiBodyMode = 'none' | 'form-data' | 'x-www-form-urlencoded' | 'raw';
+
+/** All auth types' fields flattened into one object (mirrors the Control
+ * Panel's own markup — one field block per type, shown/hidden by
+ * `authType`) rather than a discriminated union: simpler to read/write
+ * from main.js, and only the fields matching the current `authType` are
+ * ever populated or rendered into the LLM prompt (see
+ * buildApiRequestSummary()) — the rest just sit empty. */
+export interface ApiAuthFields {
+  apiKeyName: string;
+  apiKeyValue: string;
+  apiKeyAddTo: 'header' | 'query';
+  bearerToken: string;
+  basicUsername: string;
+  basicPassword: string;
+  digestUsername: string;
+  digestPassword: string;
+  oauth1ConsumerKey: string;
+  oauth1ConsumerSecret: string;
+  oauth1AccessToken: string;
+  oauth1TokenSecret: string;
+  oauth1SignatureMethod: string;
+  oauth2AccessToken: string;
+  oauth2HeaderPrefix: string;
+  hawkAuthId: string;
+  hawkAuthKey: string;
+  hawkAlgorithm: string;
+  awsAccessKey: string;
+  awsSecretKey: string;
+  awsSessionToken: string;
+  awsRegion: string;
+  awsServiceName: string;
+  ntlmUsername: string;
+  ntlmPassword: string;
+  ntlmDomain: string;
+  ntlmWorkstation: string;
+  edgeGridAccessToken: string;
+  edgeGridClientToken: string;
+  edgeGridClientSecret: string;
+}
 
 export interface ApiRequestDetails {
   method: string;
@@ -33,14 +75,7 @@ export interface ApiRequestDetails {
   params: ApiKeyValueRow[];
   headers: ApiKeyValueRow[];
   authType: ApiAuthType;
-  auth: {
-    apiKeyName: string;
-    apiKeyValue: string;
-    apiKeyAddTo: 'header' | 'query';
-    bearerToken: string;
-    basicUsername: string;
-    basicPassword: string;
-  };
+  auth: ApiAuthFields;
   bodyMode: ApiBodyMode;
   bodyFormFields: ApiFormDataRow[];
   bodyUrlencodedFields: ApiKeyValueRow[];
@@ -106,16 +141,7 @@ export function buildApiRequestSummary(details: ApiRequestDetails): string {
   lines.push(formatRows(details.headers));
 
   lines.push(`Authorization: ${authTypeLabel(details.authType)}`);
-  if (details.authType === 'apikey') {
-    lines.push(`  - Key name: ${details.auth.apiKeyName || '(not set)'}`);
-    lines.push(`  - Value: ${details.auth.apiKeyValue ? REDACTED : '(not set)'}`);
-    lines.push(`  - Added to: ${details.auth.apiKeyAddTo === 'query' ? 'Query Params' : 'Header'}`);
-  } else if (details.authType === 'bearer') {
-    lines.push(`  - Token: ${details.auth.bearerToken ? REDACTED : '(not set)'}`);
-  } else if (details.authType === 'basic') {
-    lines.push(`  - Username: ${details.auth.basicUsername || '(not set)'}`);
-    lines.push(`  - Password: ${details.auth.basicPassword ? REDACTED : '(not set)'}`);
-  }
+  lines.push(...formatAuthFields(details.authType, details.auth));
 
   lines.push(`Body mode: ${details.bodyMode}`);
   if (details.bodyMode === 'form-data') {
@@ -177,7 +203,85 @@ function authTypeLabel(type: ApiAuthType): string {
       return 'Bearer Token';
     case 'basic':
       return 'Basic Auth';
+    case 'digest':
+      return 'Digest Auth';
+    case 'oauth1':
+      return 'OAuth 1.0';
+    case 'oauth2':
+      return 'OAuth 2.0';
+    case 'hawk':
+      return 'Hawk Authentication';
+    case 'awsv4':
+      return 'AWS Signature';
+    case 'ntlm':
+      return 'NTLM Authentication';
+    case 'edgegrid':
+      return 'Akamai EdgeGrid';
     default:
       return 'No Auth';
+  }
+}
+
+/** One line per field of whichever auth type is actually selected — every
+ * secret-shaped field (keys, secrets, tokens, passwords) goes through
+ * REDACTED, exactly like the original API Key/Bearer/Basic handling did;
+ * everything else (usernames, key NAMES, regions, algorithms, header
+ * prefixes) is plain, non-secret metadata the LLM needs to generate the
+ * right shape of code and is sent as-is. */
+function formatAuthFields(type: ApiAuthType, auth: ApiAuthFields): string[] {
+  const notSet = (v: string) => v || '(not set)';
+  const secret = (v: string) => (v ? REDACTED : '(not set)');
+  switch (type) {
+    case 'apikey':
+      return [
+        `  - Key name: ${notSet(auth.apiKeyName)}`,
+        `  - Value: ${secret(auth.apiKeyValue)}`,
+        `  - Added to: ${auth.apiKeyAddTo === 'query' ? 'Query Params' : 'Header'}`
+      ];
+    case 'bearer':
+      return [`  - Token: ${secret(auth.bearerToken)}`];
+    case 'basic':
+      return [`  - Username: ${notSet(auth.basicUsername)}`, `  - Password: ${secret(auth.basicPassword)}`];
+    case 'digest':
+      return [`  - Username: ${notSet(auth.digestUsername)}`, `  - Password: ${secret(auth.digestPassword)}`];
+    case 'oauth1':
+      return [
+        `  - Consumer Key: ${secret(auth.oauth1ConsumerKey)}`,
+        `  - Consumer Secret: ${secret(auth.oauth1ConsumerSecret)}`,
+        `  - Access Token: ${secret(auth.oauth1AccessToken)}`,
+        `  - Token Secret: ${secret(auth.oauth1TokenSecret)}`,
+        `  - Signature Method: ${notSet(auth.oauth1SignatureMethod)}`
+      ];
+    case 'oauth2':
+      return [`  - Access Token: ${secret(auth.oauth2AccessToken)}`, `  - Header Prefix: ${notSet(auth.oauth2HeaderPrefix)}`];
+    case 'hawk':
+      return [
+        `  - Hawk Auth ID: ${notSet(auth.hawkAuthId)}`,
+        `  - Hawk Auth Key: ${secret(auth.hawkAuthKey)}`,
+        `  - Algorithm: ${notSet(auth.hawkAlgorithm)}`
+      ];
+    case 'awsv4':
+      return [
+        `  - Access Key: ${secret(auth.awsAccessKey)}`,
+        `  - Secret Key: ${secret(auth.awsSecretKey)}`,
+        `  - Session Token: ${auth.awsSessionToken ? secret(auth.awsSessionToken) : '(not set — not using temporary credentials)'}`,
+        `  - AWS Region: ${notSet(auth.awsRegion)}`,
+        `  - Service Name: ${notSet(auth.awsServiceName)}`
+      ];
+    case 'ntlm':
+      return [
+        `  - Username: ${notSet(auth.ntlmUsername)}`,
+        `  - Password: ${secret(auth.ntlmPassword)}`,
+        `  - Domain: ${auth.ntlmDomain || '(not set)'}`,
+        `  - Workstation: ${auth.ntlmWorkstation || '(not set)'}`
+      ];
+    case 'edgegrid':
+      return [
+        `  - Access Token: ${secret(auth.edgeGridAccessToken)}`,
+        `  - Client Token: ${secret(auth.edgeGridClientToken)}`,
+        `  - Client Secret: ${secret(auth.edgeGridClientSecret)}`
+      ];
+    default:
+      return [];
   }
 }

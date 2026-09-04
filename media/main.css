@@ -757,6 +757,67 @@ body.vscode-light .api-panel {
   min-width: 0;
 }
 
+/* "CURL" import button — orange background, white text, exactly as asked,
+   distinct from the rest of the panel's outline-style buttons so it reads
+   as its own dedicated action. */
+.api-curl-btn {
+  flex: none;
+  background: var(--api-orange);
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-weight: 700;
+  font-size: 0.8em;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+.api-curl-btn:hover { background: #e85c2a; }
+
+.api-curl-panel {
+  margin: -2px 0 10px;
+  padding: 10px;
+  border: 1px solid var(--api-border);
+  border-radius: 8px;
+  background: var(--api-bg-alt);
+}
+.api-curl-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.82em;
+  resize: vertical;
+}
+.api-curl-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.api-curl-status { flex: 1; font-size: 0.8em; }
+.api-curl-status.success { color: #4caf50; }
+.api-curl-status.error { color: #ff6c37; }
+.api-curl-cancel-btn,
+.api-curl-import-btn {
+  border: none;
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 0.82em;
+  cursor: pointer;
+}
+.api-curl-cancel-btn {
+  background: transparent;
+  color: var(--api-text-dim);
+  border: 1px solid var(--api-border);
+}
+.api-curl-cancel-btn:hover { color: var(--api-text); }
+.api-curl-import-btn {
+  background: var(--api-orange);
+  color: #ffffff;
+  font-weight: 600;
+}
+.api-curl-import-btn:hover { background: #e85c2a; }
+
 .api-tabs {
   display: flex;
   gap: 4px;

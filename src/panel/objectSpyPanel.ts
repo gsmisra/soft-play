@@ -1138,6 +1138,15 @@ function getApiPanelHtml(): string {
             <option value="OPTIONS">OPTIONS</option>
           </select>
           <input id="apiUrl" class="api-url-input" type="text" placeholder="Enter request URL" />
+          <button type="button" id="apiCurlBtn" class="api-curl-btn" title="Paste a curl command to auto-fill this request">CURL</button>
+        </div>
+        <div id="apiCurlPanel" class="api-curl-panel" hidden>
+          <textarea id="apiCurlInput" class="api-curl-textarea" rows="6" spellcheck="false" placeholder="Paste a curl command here — e.g. curl -X POST https://api.example.com/users -H 'Content-Type: application/json' -d '{&quot;name&quot;:&quot;John&quot;}'"></textarea>
+          <div class="api-curl-actions">
+            <span id="apiCurlStatus" class="api-curl-status"></span>
+            <button type="button" id="apiCurlCancelBtn" class="api-curl-cancel-btn">Cancel</button>
+            <button type="button" id="apiCurlImportBtn" class="api-curl-import-btn">Import</button>
+          </div>
         </div>
         <div class="api-tabs">
           <button type="button" class="api-tab active" data-tab="params">Params</button>
@@ -1162,6 +1171,13 @@ function getApiPanelHtml(): string {
               <option value="apikey">API Key</option>
               <option value="bearer">Bearer Token</option>
               <option value="basic">Basic Auth</option>
+              <option value="digest">Digest Auth</option>
+              <option value="oauth1">OAuth 1.0</option>
+              <option value="oauth2">OAuth 2.0</option>
+              <option value="hawk">Hawk Authentication</option>
+              <option value="awsv4">AWS Signature</option>
+              <option value="ntlm">NTLM Authentication</option>
+              <option value="edgegrid">Akamai EdgeGrid</option>
             </select>
           </div>
           <div class="api-auth-fields" data-auth="apikey" hidden>
@@ -1181,6 +1197,57 @@ function getApiPanelHtml(): string {
           <div class="api-auth-fields" data-auth="basic" hidden>
             <div class="api-field-row"><label>Username</label><input id="apiAuthBasicUser" type="text" placeholder="Username" /></div>
             <div class="api-field-row"><label>Password</label><input id="apiAuthBasicPass" type="password" placeholder="Password" /></div>
+          </div>
+          <div class="api-auth-fields" data-auth="digest" hidden>
+            <div class="api-field-row"><label>Username</label><input id="apiAuthDigestUser" type="text" placeholder="Username" /></div>
+            <div class="api-field-row"><label>Password</label><input id="apiAuthDigestPass" type="password" placeholder="Password" /></div>
+          </div>
+          <div class="api-auth-fields" data-auth="oauth1" hidden>
+            <div class="api-field-row"><label>Consumer Key</label><input id="apiAuthOauth1ConsumerKey" type="password" placeholder="Consumer Key" /></div>
+            <div class="api-field-row"><label>Consumer Secret</label><input id="apiAuthOauth1ConsumerSecret" type="password" placeholder="Consumer Secret" /></div>
+            <div class="api-field-row"><label>Access Token</label><input id="apiAuthOauth1AccessToken" type="password" placeholder="Access Token" /></div>
+            <div class="api-field-row"><label>Token Secret</label><input id="apiAuthOauth1TokenSecret" type="password" placeholder="Token Secret" /></div>
+            <div class="api-field-row">
+              <label>Signature Method</label>
+              <select id="apiAuthOauth1SignatureMethod">
+                <option value="HMAC-SHA1">HMAC-SHA1</option>
+                <option value="HMAC-SHA256">HMAC-SHA256</option>
+                <option value="PLAINTEXT">PLAINTEXT</option>
+              </select>
+            </div>
+          </div>
+          <div class="api-auth-fields" data-auth="oauth2" hidden>
+            <div class="api-field-row"><label>Access Token</label><input id="apiAuthOauth2AccessToken" type="password" placeholder="Access Token" /></div>
+            <div class="api-field-row"><label>Header Prefix</label><input id="apiAuthOauth2HeaderPrefix" type="text" placeholder="Bearer" value="Bearer" /></div>
+          </div>
+          <div class="api-auth-fields" data-auth="hawk" hidden>
+            <div class="api-field-row"><label>Hawk Auth ID</label><input id="apiAuthHawkId" type="text" placeholder="Hawk Auth ID" /></div>
+            <div class="api-field-row"><label>Hawk Auth Key</label><input id="apiAuthHawkKey" type="password" placeholder="Hawk Auth Key" /></div>
+            <div class="api-field-row">
+              <label>Algorithm</label>
+              <select id="apiAuthHawkAlgorithm">
+                <option value="sha256">sha256</option>
+                <option value="sha1">sha1</option>
+              </select>
+            </div>
+          </div>
+          <div class="api-auth-fields" data-auth="awsv4" hidden>
+            <div class="api-field-row"><label>Access Key</label><input id="apiAuthAwsAccessKey" type="password" placeholder="Access Key" /></div>
+            <div class="api-field-row"><label>Secret Key</label><input id="apiAuthAwsSecretKey" type="password" placeholder="Secret Key" /></div>
+            <div class="api-field-row"><label>Session Token</label><input id="apiAuthAwsSessionToken" type="password" placeholder="Session Token (optional)" /></div>
+            <div class="api-field-row"><label>AWS Region</label><input id="apiAuthAwsRegion" type="text" placeholder="e.g. us-east-1" /></div>
+            <div class="api-field-row"><label>Service Name</label><input id="apiAuthAwsServiceName" type="text" placeholder="e.g. execute-api" /></div>
+          </div>
+          <div class="api-auth-fields" data-auth="ntlm" hidden>
+            <div class="api-field-row"><label>Username</label><input id="apiAuthNtlmUser" type="text" placeholder="Username" /></div>
+            <div class="api-field-row"><label>Password</label><input id="apiAuthNtlmPass" type="password" placeholder="Password" /></div>
+            <div class="api-field-row"><label>Domain</label><input id="apiAuthNtlmDomain" type="text" placeholder="Domain (optional)" /></div>
+            <div class="api-field-row"><label>Workstation</label><input id="apiAuthNtlmWorkstation" type="text" placeholder="Workstation (optional)" /></div>
+          </div>
+          <div class="api-auth-fields" data-auth="edgegrid" hidden>
+            <div class="api-field-row"><label>Access Token</label><input id="apiAuthEdgeGridAccessToken" type="password" placeholder="Access Token" /></div>
+            <div class="api-field-row"><label>Client Token</label><input id="apiAuthEdgeGridClientToken" type="password" placeholder="Client Token" /></div>
+            <div class="api-field-row"><label>Client Secret</label><input id="apiAuthEdgeGridClientSecret" type="password" placeholder="Client Secret" /></div>
           </div>
         </div>
 
