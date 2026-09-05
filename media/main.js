@@ -915,21 +915,26 @@
 
     closeCurlPanel();
 
-    // Custom md files -- uncheck everything currently checked.
+    resetAiAssistUi();
+    vscode.postMessage({ type: 'clearApiData' });
+    scheduleTokenEstimate();
+  });
+
+  /** Shared by "Clear Data" (API Automation) and "Kill All Browsers" (UI
+   * Automation): unchecks every "Custom md files" checkbox and discards
+   * the chat composer's staged bubbles and any unsent text -- the client
+   * side of "any custom prompt loaded in memory" being freed. */
+  function resetAiAssistUi() {
     promptFilesList.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
       cb.checked = false;
     });
     postSelectedInstructionFiles();
 
-    // Chat composer -- discard both staged bubbles and anything unsent.
     stagedInstructions = [];
     chatMessages.innerHTML = '';
     chatInput.value = '';
     autoResizeChatInput();
-
-    vscode.postMessage({ type: 'clearApiData' });
-    scheduleTokenEstimate();
-  });
+  }
 
   // ---------------------------------------------------------------------
   // Token Monitoring — recomputed (debounced) on essentially any change
@@ -1481,6 +1486,8 @@
     playwrightEditor.setValue('// Click Start and interact with the codegen browser window.');
     clearTimeout(newCodeFlashTimer);
     newCodeFlash.hidden = true;
+    resetAiAssistUi();
+    scheduleTokenEstimate();
   }
 
   function applyStatus(status) {

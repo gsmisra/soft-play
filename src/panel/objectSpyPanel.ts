@@ -369,6 +369,26 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
    * piece of "LLM context memory" this session was keeping around for this
    * request, freed for a genuine clean slate. */
   private clearApiData(): void {
+    this.clearSharedLlmContext();
+    this.outputChannel.appendLine('Clear Data — API Automation context (linked scenario/file, last request, generated results) has been reset.');
+  }
+
+  /**
+   * Everything "start completely over" has in common between "Clear Data"
+   * (API Automation) and "Kill All Browsers" (UI Automation) — every piece
+   * of LLM context memory this session was holding on top of whatever
+   * lives in the Playwright Code / API request fields themselves: the
+   * linked scenario, the linked/cached feature file (forgotten outright,
+   * not just unlinked — "Link Feature File" browses fresh again next
+   * time), checked "Custom md files", any in-flight LLM request, both
+   * result panels' content (AI Generated Code and Generated Feature File —
+   * "generated code" per the explicit ask covers both), the green
+   * correctness banner, and the Token Monitoring estimate. Callers add
+   * whatever's specific to them on top (killAllBrowsers() also stops the
+   * browser and clears the raw Playwright Codegen output; clearApiData()
+   * has nothing further to add — there's no browser in API mode).
+   */
+  private clearSharedLlmContext(): void {
     this.llmCancellation?.cancel();
     this.llmCancellation?.dispose();
     this.llmCancellation = undefined;
@@ -389,10 +409,8 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     this.postCodeCorrectness(false);
 
     this.lastReceivedTokens = 0;
-    this.tokenEstimateSeq++; // discard any in-flight estimate for the data just wiped
+    this.tokenEstimateSeq++; // discard any in-flight estimate for the context just wiped
     this.webview?.postMessage({ type: 'tokenEstimate', payload: { available: false, reason: 'Cleared — nothing to estimate yet.' } });
-
-    this.outputChannel.appendLine('Clear Data — API Automation context (linked scenario/file, last request, generated results) has been reset.');
   }
 
   /**
@@ -540,14 +558,29 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     void vscode.window.showInformationMessage(`softPlay: saved ${path.basename(uri.fsPath)}`);
   }
 
+  /** "Kill All Browsers" (UI Automation) — stops every Playwright browser
+   * instance this extension launched (via codegenManager.stop(), which
+   * also tears down the OS process the browser runs in — see its own doc
+   * comment), then resets everything else the same way "Clear Data" does
+   * in API Automation mode: both the raw Playwright Codegen output AND the
+   * AI Generated Code are removed, any linked/cached feature file and
+   * checked Custom md files are forgotten, and the LLM context memory
+   * built from any of that (linked scenario, in-flight requests, the
+   * Generated Feature File panel, the correctness banner, the token
+   * estimate) is freed — a genuine "start this recording completely
+   * over", not just a browser restart. */
   private async killAllBrowsers(): Promise<void> {
     await this.codegenManager.stop();
     this.nativeGeneratedCode = '';
-    // 'clearAll' resets the webview's code editor itself — no need to also
+    this.clearSharedLlmContext();
+    // 'clearAll' resets the webview's Playwright Code editor and its own
+    // local state (Custom md checkboxes, chat composer) — no need to also
     // postCode() here, that would just be an empty-code message the client
     // immediately overwrites again anyway.
     this.webview?.postMessage({ type: 'clearAll' });
-    this.outputChannel.appendLine('Killed the softPlay-launched codegen browser and cleared generated code.');
+    this.outputChannel.appendLine(
+      'Kill All Browsers — stopped the codegen browser and cleared all generated code, the linked feature file, and LLM context memory.'
+    );
   }
 
   // -----------------------------------------------------------------------
