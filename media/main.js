@@ -38,6 +38,16 @@
   const copilotEnabledToggle = document.getElementById('copilotEnabledToggle');
   const uiModeControls = document.getElementById('uiModeControls');
   const apiModeControls = document.getElementById('apiModeControls');
+  const clearApiDataBtn = document.getElementById('clearApiDataBtn');
+  const tokenBarFill = document.getElementById('tokenBarFill');
+  const tokenPercentLabel = document.getElementById('tokenPercentLabel');
+  const tokenModelLabel = document.getElementById('tokenModelLabel');
+  const tokenUnavailableNote = document.getElementById('tokenUnavailableNote');
+  const tokenBreakdown = document.getElementById('tokenBreakdown');
+  const tokenSentValue = document.getElementById('tokenSentValue');
+  const tokenReceivedValue = document.getElementById('tokenReceivedValue');
+  const tokenTotalValue = document.getElementById('tokenTotalValue');
+  const tokenMaxValue = document.getElementById('tokenMaxValue');
 
   // ---------------------------------------------------------------------
   // API Automation mode — Postman-styled request builder. Switching modes
@@ -57,6 +67,10 @@
     // AI Generated Code" stay put; they read from the API request builder
     // instead in this mode (see collectApiRequestDetails()).
     playwrightCodePanel.hidden = isApi;
+    // "Clear Data" is API Automation-only (see its own handler below for
+    // why -- UI mode already has "Kill All Browsers" for the equivalent
+    // "start over" action, with genuinely different things to reset).
+    clearApiDataBtn.hidden = !isApi;
   }
 
   /** Builds one Params/Headers/form-data/urlencoded key-value-description
@@ -865,6 +879,160 @@
     };
   }
 
+  // "Clear Data" (API Automation) -- resets every Control Panel field back
+  // to blank/default, then asks the extension host to forget everything it
+  // was keeping in memory on top of that (linked scenario, linked/cached
+  // feature file, last-sent API request, checked Custom md files, any
+  // in-flight LLM request, the AI Generated Code / Generated Feature File
+  // panels' content) -- a genuine "start this API test over from nothing",
+  // not just an emptied form.
+  clearApiDataBtn.addEventListener('click', () => {
+    document.getElementById('apiMethod').value = 'GET';
+    document.getElementById('apiUrl').value = '';
+    apiParamsTable.setRows([]);
+    apiHeadersTable.setRows([]);
+
+    apiAuthType.value = 'noauth';
+    apiAuthType.dispatchEvent(new Event('change'));
+    document.querySelectorAll('.api-auth-fields input').forEach((el) => {
+      el.value = '';
+    });
+    // Selects with a sensible non-empty default (rather than just blank)
+    // go back to that default, matching what a freshly loaded panel shows.
+    document.getElementById('apiAuthApiKeyAddTo').value = 'header';
+    document.getElementById('apiAuthOauth1SignatureMethod').value = 'HMAC-SHA1';
+    document.getElementById('apiAuthOauth2HeaderPrefix').value = 'Bearer';
+    document.getElementById('apiAuthHawkAlgorithm').value = 'sha256';
+
+    const noneBodyMode = document.querySelector('input[name="apiBodyMode"][value="none"]');
+    noneBodyMode.checked = true;
+    noneBodyMode.dispatchEvent(new Event('change'));
+    apiFormDataTable.setRows([]);
+    apiUrlencodedTable.setRows([]);
+    apiRawLanguageSelect.value = 'JSON';
+    apiRawBodyEditor.setLanguage(rawBodyEditorLanguage());
+    apiRawBodyEditor.setValue('');
+
+    closeCurlPanel();
+
+    // Custom md files -- uncheck everything currently checked.
+    promptFilesList.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
+      cb.checked = false;
+    });
+    postSelectedInstructionFiles();
+
+    // Chat composer -- discard both staged bubbles and anything unsent.
+    stagedInstructions = [];
+    chatMessages.innerHTML = '';
+    chatInput.value = '';
+    autoResizeChatInput();
+
+    vscode.postMessage({ type: 'clearApiData' });
+    scheduleTokenEstimate();
+  });
+
+  // ---------------------------------------------------------------------
+  // Token Monitoring — recomputed (debounced) on essentially any change
+  // anywhere in the sidebar, using the SAME data "Start AI Processing"
+  // would actually send; the extension host does the real counting (via
+  // the selected model's own tokenizer) and reports back. See
+  // updateTokenEstimate()/recordReceivedTokens() in objectSpyPanel.ts.
+  // ---------------------------------------------------------------------
+
+  // Merges partial updates: a completed-response update only carries
+  // receivedTokens (sentTokens: null), a draft-context update only carries
+  // sentTokens -- each keeps whatever the other last reported rather than
+  // clobbering it back to zero.
+  let lastTokenState = null;
+
+  /** Whatever's currently in the chat composer (staged bubbles + anything
+   * still unsent), WITHOUT clearing it -- unlike
+   * collectAndClearStagedInstructions(), typing must never itself clear
+   * the composer, only actually sending does. */
+  function currentCustomInstructionsPreview() {
+    const unsent = chatInput.value.trim();
+    const parts = unsent ? [...stagedInstructions, unsent] : stagedInstructions;
+    return parts.join('\n\n');
+  }
+
+  function sendDraftContext() {
+    vscode.postMessage({
+      type: 'updateDraftContext',
+      payload: {
+        code: playwrightEditor.getValue(),
+        customInstructions: currentCustomInstructionsPreview(),
+        selectedFiles: selectedPromptFiles(),
+        apiDetails: collectApiRequestDetails()
+      }
+    });
+  }
+
+  let tokenEstimateTimer = null;
+  function scheduleTokenEstimate() {
+    clearTimeout(tokenEstimateTimer);
+    tokenEstimateTimer = setTimeout(sendDraftContext, 600);
+  }
+
+  // Delegated at the document level rather than wired to each individual
+  // field -- the Params/Headers/form-data/Auth fields are numerous, several
+  // tables re-render their inputs entirely on every edit, and this way
+  // nothing new added to any panel in the future is silently missed.
+  document.addEventListener('input', scheduleTokenEstimate);
+  document.addEventListener('change', scheduleTokenEstimate);
+
+  function applyTokenEstimate(payload) {
+    if (payload.available === false) {
+      lastTokenState = null;
+      tokenUnavailableNote.hidden = false;
+      tokenUnavailableNote.textContent = payload.reason || 'Token usage unavailable.';
+      tokenBreakdown.hidden = true;
+      tokenBarFill.style.width = '0%';
+      tokenPercentLabel.textContent = '—';
+      tokenModelLabel.textContent = '';
+      return;
+    }
+
+    lastTokenState = lastTokenState || {};
+    if (payload.sentTokens !== null && payload.sentTokens !== undefined) {
+      lastTokenState.sentTokens = payload.sentTokens;
+    }
+    if (payload.receivedTokens !== null && payload.receivedTokens !== undefined) {
+      lastTokenState.receivedTokens = payload.receivedTokens;
+    }
+    if (payload.maxInputTokens) {
+      lastTokenState.maxInputTokens = payload.maxInputTokens;
+    }
+    if (payload.modelId) {
+      lastTokenState.modelId = payload.modelId;
+    }
+    // A "received-only" update (a response just completed) landing before
+    // any draft was ever estimated has nothing to render a percentage
+    // against yet -- wait for the next real sent-token estimate.
+    if (lastTokenState.sentTokens === undefined) {
+      return;
+    }
+
+    tokenUnavailableNote.hidden = true;
+    tokenBreakdown.hidden = false;
+
+    const sent = lastTokenState.sentTokens;
+    const received = lastTokenState.receivedTokens || 0;
+    const max = lastTokenState.maxInputTokens || 0;
+    const percent = max > 0 ? Math.min(100, (sent / max) * 100) : 0;
+
+    tokenBarFill.style.width = percent + '%';
+    // Green -> amber -> red thresholds, same semantic colors as every
+    // other "how much headroom is left" indicator (GitHub's own status
+    // colors) -- an enterprise-recognizable convention, not an invented one.
+    tokenBarFill.style.background = percent >= 85 ? '#f85149' : percent >= 60 ? '#d29922' : '#3fb950';
+    tokenPercentLabel.textContent = percent.toFixed(1) + '% of context window';
+    tokenModelLabel.textContent = lastTokenState.modelId || '';
+    tokenSentValue.textContent = sent.toLocaleString();
+    tokenReceivedValue.textContent = received.toLocaleString();
+    tokenTotalValue.textContent = (sent + received).toLocaleString();
+    tokenMaxValue.textContent = max.toLocaleString();
+  }
+
   let killConfirmPending = false;
   let killConfirmTimer = null;
 
@@ -1194,8 +1362,22 @@
       case 'apiFormFileSelected':
         apiFormDataTable.applyFileSelection(message.payload.rowId, message.payload.filePath);
         break;
+      case 'tokenEstimate':
+        applyTokenEstimate(message.payload);
+        break;
+      case 'requestDraftContext':
+        // A settings change (model/language/automation mode) needs a fresh
+        // estimate immediately -- not debounced, this isn't a burst of
+        // keystrokes, it's one explicit, already-settled change.
+        sendDraftContext();
+        break;
     }
   });
+
+  // One initial estimate once the webview has finished wiring itself up,
+  // so Token Monitoring shows real numbers from the start rather than
+  // waiting for the user's first edit.
+  scheduleTokenEstimate();
 
   function applyCopilotEnabledState(enabled) {
     // Setting .checked programmatically does not fire 'change', so this

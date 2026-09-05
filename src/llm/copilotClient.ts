@@ -77,3 +77,35 @@ export function extractCodeBlock(responseText: string): string {
   const match = responseText.match(/```[^\n]*\n([\s\S]*?)```/);
   return match ? match[1].trimEnd() : responseText.trim();
 }
+
+export interface ModelTokenCount {
+  /** Real token count for `text`, from the model's OWN tokenizer via VS
+   * Code's Language Model API (`LanguageModelChat.countTokens`) — never a
+   * character-count heuristic, so this is exactly what the model itself
+   * would bill/consider for that text. */
+  count: number;
+  /** `LanguageModelChat.maxInputTokens` — the real context-window ceiling
+   * for this specific model, so a percentage-used figure means something
+   * (and updates correctly the moment the user picks a different model in
+   * Settings, since each model reports its own). */
+  maxInputTokens: number;
+}
+
+/** Powers the "Token Monitoring" segment — counts `text` (a prompt about
+ * to be sent, or a response just received) against whichever model is
+ * currently selected. Returns `undefined` rather than throwing when the
+ * model can't be resolved (not installed/signed in/no longer offered) or
+ * `countTokens` itself fails — a monitoring feature must never surface as
+ * a hard error interrupting the rest of the UI. */
+export async function countModelTokens(modelId: string, text: string, token?: vscode.CancellationToken): Promise<ModelTokenCount | undefined> {
+  try {
+    const model = await findModel(modelId);
+    if (!model) {
+      return undefined;
+    }
+    const count = await model.countTokens(text, token);
+    return { count, maxInputTokens: model.maxInputTokens };
+  } catch {
+    return undefined;
+  }
+}

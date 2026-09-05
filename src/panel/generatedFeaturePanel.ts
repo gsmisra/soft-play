@@ -82,6 +82,15 @@ export class GeneratedFeaturePanel implements vscode.Disposable {
     this.panel?.webview.postMessage({ type: 'error', payload: message });
   }
 
+  /** "Clear Data" (API Automation mode's Control Panel) — wipes this
+   * panel's content back to blank, same as before anything was ever
+   * generated. Left open if it's open, only its content changes. */
+  clear(): void {
+    this.status = 'idle';
+    this.featureText = '';
+    this.panel?.webview.postMessage({ type: 'done', payload: '' });
+  }
+
   private async handleMessage(message: InboundMessage): Promise<void> {
     if (message.type === 'saveFeature') {
       const uri = await vscode.window.showSaveDialog({

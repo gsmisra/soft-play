@@ -127,6 +127,19 @@ export class AiCodePanel implements vscode.Disposable {
     this.panel?.webview.postMessage({ type: 'error', payload: message });
   }
 
+  /** "Clear Data" (API Automation mode's Control Panel) — wipes this
+   * panel's content and status back to a blank slate, same as it looks
+   * before anything's ever been generated. Left open if it's open (only
+   * its content changes), so the user isn't surprised by panels vanishing
+   * out from under them. */
+  clear(): void {
+    this.status = 'idle';
+    this.code = '';
+    this.errorMessage = '';
+    this.setVerifyStatus('', 'info');
+    this.panel?.webview.postMessage({ type: 'done', payload: '' });
+  }
+
   /** "Verify & Fix Code" status line — separate from generation's own
    * status (see `verifyStatusText`). `kind` picks the color: 'info' while
    * an attempt is running, 'success'/'error' once it settles. */

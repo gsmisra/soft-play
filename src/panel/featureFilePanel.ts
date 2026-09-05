@@ -93,6 +93,17 @@ export class FeatureFilePanel implements vscode.Disposable {
     return this.filePath;
   }
 
+  /** "Clear Data" (API Automation mode) — forgets the linked file entirely
+   * (the exact opposite of the persistence hasLinkedFile() documents): the
+   * Control Panel's button goes back to "Link Feature File" and browses
+   * fresh next time, exactly as if none had ever been linked this session.
+   * Closes the picker view too, if it's open. */
+  forgetFile(): void {
+    this.filePath = '';
+    this.feature = undefined;
+    this.panel?.dispose();
+  }
+
   async browseAndOpen(): Promise<void> {
     const uris = await vscode.window.showOpenDialog({
       canSelectMany: false,

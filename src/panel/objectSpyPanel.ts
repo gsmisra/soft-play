@@ -7,7 +7,7 @@ import { SettingsPanel } from './settingsPanel';
 import { FeatureFilePanel, LinkedScenario } from './featureFilePanel';
 import { AiCodePanel } from './aiCodePanel';
 import { GeneratedFeaturePanel } from './generatedFeaturePanel';
-import { CopilotUnavailableError, extractCodeBlock, sendPrompt } from '../llm/copilotClient';
+import { CopilotUnavailableError, countModelTokens, extractCodeBlock, sendPrompt } from '../llm/copilotClient';
 import { checkEnvironment, checkPythonEnvironment } from '../execution/environmentCheck';
 import { executeGeneratedCode } from '../execution/testExecutor';
 import { ApiRequestDetails, buildApiRequestSummary, hasApiRequest } from '../api/apiRequestDetails';
@@ -28,7 +28,9 @@ type InboundMessage =
   | { type: 'selectedInstructionFiles'; payload: string[] }
   | { type: 'currentCodeReport'; payload: string }
   | { type: 'setCopilotEnabled'; payload: boolean }
-  | { type: 'browseApiFormFile'; payload: { rowId: number } };
+  | { type: 'browseApiFormFile'; payload: { rowId: number } }
+  | { type: 'clearApiData' }
+  | { type: 'updateDraftContext'; payload: { code: string; customInstructions: string; selectedFiles: string[]; apiDetails?: ApiRequestDetails } };
 
 /** Status shape the webview renders (status pill, Start/Stop enablement) —
  * translated 1:1 from CodegenStatus (see mapCodegenStatus()). Kept as its
@@ -115,6 +117,16 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
   // Purely staged context: checking a box does NOT itself trigger anything
   // — it's folded in the next time "Start AI Processing" is clicked.
   private selectedInstructionFiles: string[] = [];
+  // "Token Monitoring" segment — the real token count of the LAST completed
+  // LLM response (0 until the first one lands this session), always
+  // rebroadcast alongside a fresh "sent" estimate so the sidebar shows both
+  // together (see updateTokenEstimate()/broadcastTokenEstimate()).
+  private lastReceivedTokens = 0;
+  // Discards a stale in-flight token count that resolves after a newer one
+  // was already requested (countTokens is async and its latency isn't
+  // bounded) — only the response matching the CURRENT sequence number is
+  // ever applied, so a slow/older estimate can never overwrite a fresher one.
+  private tokenEstimateSeq = 0;
   // Resolves a pending requestCurrentPlaywrightCode() call (see
   // "Regenerate AI Code") once the sidebar webview reports its Playwright
   // Code editor's live content back via 'currentCodeReport'.
@@ -175,6 +187,13 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
       this.settingsStore.onChange((settings) => {
         this.postCode();
         this.postCopilotEnabledState(settings.copilotEnabled);
+        // Token Monitoring must react the moment the model (or language,
+        // or automation mode) changes — each model reports its own real
+        // context window, so switching models can turn a red bar green or
+        // vice versa with the exact same draft. The sidebar owns the
+        // current draft's content, so it's asked to resend it rather than
+        // this trying to reconstruct it from settings alone.
+        this.webview?.postMessage({ type: 'requestDraftContext' });
       })
     );
   }
@@ -325,7 +344,169 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
       case 'browseApiFormFile':
         await this.browseApiFormFile(message.payload.rowId);
         break;
+      case 'clearApiData':
+        this.clearApiData();
+        break;
+      case 'updateDraftContext':
+        void this.updateTokenEstimate(
+          message.payload.code,
+          message.payload.customInstructions,
+          message.payload.selectedFiles,
+          message.payload.apiDetails
+        );
+        break;
     }
+  }
+
+  /** "Clear Data" (API Automation Control Panel) — the Control Panel's own
+   * fields are already reset client-side (see the click handler in
+   * main.js); this is everything the extension host was ADDITIONALLY
+   * holding on top of that: the linked scenario, the linked/cached feature
+   * file (a genuine "forget it", not just an unlink — "Link Feature File"
+   * browses fresh again next time), the last-sent API request details
+   * (what "Regenerate" in either result panel would otherwise replay), any
+   * in-flight LLM request, and both result panels' content — i.e. every
+   * piece of "LLM context memory" this session was keeping around for this
+   * request, freed for a genuine clean slate. */
+  private clearApiData(): void {
+    this.llmCancellation?.cancel();
+    this.llmCancellation?.dispose();
+    this.llmCancellation = undefined;
+    this.featureGenCancellation?.cancel();
+    this.featureGenCancellation?.dispose();
+    this.featureGenCancellation = undefined;
+
+    this.linkedScenario = undefined;
+    this.postLinkedScenario();
+    this.featureFilePanel.forgetFile();
+    this.postFeatureFileAvailable(false);
+
+    this.lastApiRequestDetails = undefined;
+    this.selectedInstructionFiles = [];
+
+    this.aiCodePanel.clear();
+    this.generatedFeaturePanel.clear();
+    this.postCodeCorrectness(false);
+
+    this.lastReceivedTokens = 0;
+    this.tokenEstimateSeq++; // discard any in-flight estimate for the data just wiped
+    this.webview?.postMessage({ type: 'tokenEstimate', payload: { available: false, reason: 'Cleared — nothing to estimate yet.' } });
+
+    this.outputChannel.appendLine('Clear Data — API Automation context (linked scenario/file, last request, generated results) has been reset.');
+  }
+
+  /**
+   * "Token Monitoring" — recomputes, using the REAL selected model's own
+   * tokenizer (`vscode.LanguageModelChat.countTokens`, via
+   * copilotClient.ts's countModelTokens()) rather than a character-count
+   * guess, exactly how many tokens the prompt this draft would build
+   * actually comes to, and against exactly that model's own real context
+   * window (`maxInputTokens`) — both change correctly the instant the user
+   * picks a different model in Settings, since each model reports its own.
+   * Builds the SAME prompt sendToLlm()/generateFeatureFile() would (same
+   * builder functions, same mandatory-standard file, same linked
+   * scenario/settings) purely to measure it — nothing is sent to the LLM
+   * here. Debounced on the client side (main.js), not here, so this only
+   * ever runs once activity settles for a moment, not on every keystroke.
+   */
+  private async updateTokenEstimate(
+    playwrightCode: string,
+    customInstructions: string,
+    selectedFiles: string[],
+    apiDetails: ApiRequestDetails | undefined
+  ): Promise<void> {
+    const settings = this.settingsStore.get();
+    const seq = ++this.tokenEstimateSeq;
+    if (!settings.copilotEnabled || !settings.copilotModelId) {
+      this.webview?.postMessage({
+        type: 'tokenEstimate',
+        payload: { available: false, reason: 'Enable "Link with GitHub Copilot LLM" and pick a model in Settings to see token usage.' }
+      });
+      return;
+    }
+
+    const isApiMode = settings.automationMode === 'api';
+    if (isApiMode ? !hasApiRequest(apiDetails) : !playwrightCode.trim()) {
+      this.webview?.postMessage({
+        type: 'tokenEstimate',
+        payload: {
+          available: false,
+          reason: isApiMode ? 'Enter an API request to see token usage.' : 'Record some user action to see token usage.'
+        }
+      });
+      return;
+    }
+
+    const instructions = await this.readInstructionFiles(selectedFiles);
+    const builtIn = isApiMode ? readApiAutomationInstructions() : readSeniorQeInstructions();
+    const prompt = isApiMode
+      ? buildApiLlmPrompt(
+          settings.language,
+          settings.languageVersion,
+          builtIn,
+          instructions,
+          apiDetails!,
+          customInstructions,
+          this.linkedScenario,
+          this.currentSuggestedBaseName()
+        )
+      : buildLlmPrompt(
+          settings.language,
+          settings.languageVersion,
+          settings.browserChannel,
+          builtIn,
+          instructions,
+          playwrightCode,
+          customInstructions,
+          this.linkedScenario,
+          this.currentSuggestedBaseName()
+        );
+
+    const result = await countModelTokens(settings.copilotModelId, prompt);
+    if (seq !== this.tokenEstimateSeq) {
+      return; // superseded by a newer draft/model change while this was in flight
+    }
+    if (!result) {
+      this.webview?.postMessage({
+        type: 'tokenEstimate',
+        payload: { available: false, reason: 'Could not reach the selected Copilot model to estimate tokens.' }
+      });
+      return;
+    }
+    this.webview?.postMessage({
+      type: 'tokenEstimate',
+      payload: {
+        available: true,
+        sentTokens: result.count,
+        receivedTokens: this.lastReceivedTokens,
+        maxInputTokens: result.maxInputTokens,
+        modelId: settings.copilotModelId
+      }
+    });
+  }
+
+  /** Updates `lastReceivedTokens` from a just-completed LLM response and
+   * re-broadcasts — a completed response changes what the sidebar should
+   * show even though nothing in the DRAFT itself changed, so this can't
+   * just wait for the next natural updateTokenEstimate() call. Silently
+   * gives up on a counting failure — an inability to count the response
+   * after the fact is not worth surfacing as an error to the user. */
+  private async recordReceivedTokens(responseText: string, modelId: string): Promise<void> {
+    const result = await countModelTokens(modelId, responseText);
+    if (!result) {
+      return;
+    }
+    this.lastReceivedTokens = result.count;
+    this.webview?.postMessage({
+      type: 'tokenEstimate',
+      payload: {
+        available: true,
+        sentTokens: null,
+        receivedTokens: this.lastReceivedTokens,
+        maxInputTokens: result.maxInputTokens,
+        modelId
+      }
+    });
   }
 
   /** API Automation mode's form-data body — a row switched to "File" gets
@@ -485,6 +666,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
       );
       this.outputChannel.appendLine(`Copilot response received: ${accumulated.length} chars.`);
       this.generatedFeaturePanel.finish(extractCodeBlock(accumulated));
+      void this.recordReceivedTokens(accumulated, settings.copilotModelId);
     } catch (err) {
       if (!cts.token.isCancellationRequested) {
         const message = err instanceof CopilotUnavailableError ? err.message : describeError(err);
@@ -791,6 +973,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
       const accumulated = await this.streamCopilotResponse(prompt, settings.copilotModelId, cts, (chunk) => this.postLlmChunk(chunk));
       this.outputChannel.appendLine(`Copilot response received: ${accumulated.length} chars.`);
       this.postLlmDone(extractCodeBlock(accumulated));
+      void this.recordReceivedTokens(accumulated, settings.copilotModelId);
     } catch (err) {
       if (!cts.token.isCancellationRequested) {
         const message = err instanceof CopilotUnavailableError ? err.message : describeError(err);
@@ -1017,6 +1200,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
           <span id="linkedScenarioText"></span>
           <button id="unlinkScenarioBtn" class="btn-icon-small" title="Unlink this scenario">✕</button>
         </span>
+        <button id="clearApiDataBtn" class="btn btn-danger clear-data-btn" hidden title="Clear every Control Panel field, the linked/generated feature file, the AI Generated Code, and the LLM context built from them">Clear Data</button>
       </div>
       <div id="uiModeControls">
         <div class="toolbar-row">
@@ -1097,6 +1281,26 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
             <textarea id="codeEditArea" class="code-edit-area" spellcheck="false">// Click Start and interact with the codegen browser window.</textarea>
           </div>
         </div>
+      </div>
+    </div>
+  </details>
+
+  <details class="section" id="tokenMonitoringSection">
+    <summary>Token Monitoring</summary>
+    <div class="section-body">
+      <div class="token-bar-track">
+        <div id="tokenBarFill" class="token-bar-fill"></div>
+      </div>
+      <div class="token-stats-row">
+        <span id="tokenPercentLabel" class="token-percent-label">—</span>
+        <span id="tokenModelLabel" class="token-model-label"></span>
+      </div>
+      <div id="tokenUnavailableNote" class="token-unavailable-note">Enable "Link with GitHub Copilot LLM" and pick a model in Settings to see token usage.</div>
+      <div id="tokenBreakdown" class="token-breakdown" hidden>
+        <div class="token-breakdown-item"><span class="token-breakdown-label">Sent</span><span id="tokenSentValue" class="token-breakdown-value">0</span></div>
+        <div class="token-breakdown-item"><span class="token-breakdown-label">Received</span><span id="tokenReceivedValue" class="token-breakdown-value">0</span></div>
+        <div class="token-breakdown-item"><span class="token-breakdown-label">Total</span><span id="tokenTotalValue" class="token-breakdown-value">0</span></div>
+        <div class="token-breakdown-item"><span class="token-breakdown-label">Context limit</span><span id="tokenMaxValue" class="token-breakdown-value">0</span></div>
       </div>
     </div>
   </details>

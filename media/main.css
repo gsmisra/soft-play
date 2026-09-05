@@ -249,6 +249,11 @@ body.vscode-light .code-editor-wrap {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* API Automation only — pinned to the opposite end of the "Link Feature
+   File" row (that row has no justify-content:space-between of its own,
+   so auto margin is what actually pushes it there). */
+.clear-data-btn { margin-left: auto; flex: none; }
+
 .btn-icon-small {
   background: transparent;
   border: none;
@@ -1013,3 +1018,72 @@ body.vscode-light .api-panel {
   resize: none;
 }
 .api-raw-edit-area::placeholder { color: var(--api-text-dim); }
+
+/* ==========================================================================
+   Token Monitoring — a real-time, color-coded read on how much of the
+   currently selected model's own context window the current draft (UI
+   Automation recording, or API Automation request, plus everything else
+   that would be folded into the same prompt) would consume, using that
+   model's OWN tokenizer via VS Code's Language Model API (never a rough
+   character-count guess — see countModelTokens() in copilotClient.ts).
+   ========================================================================== */
+.token-bar-track {
+  height: 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--vscode-editor-background) 80%, var(--vscode-foreground) 20%);
+  overflow: hidden;
+}
+.token-bar-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  /* Smooth, continuous motion as the estimate updates -- the "real-time"
+     feel asked for -- rather than a jump-cut on every recompute. Width AND
+     color both animate; color is set inline per state (green/amber/red)
+     since it's chosen in JS from the live percentage, not a fixed CSS class. */
+  transition: width 0.4s ease, background-color 0.4s ease;
+  background: #3fb950; /* default/initial — JS overwrites per actual percentage */
+}
+.token-stats-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-top: 6px;
+  font-size: 0.82em;
+}
+.token-percent-label {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.token-model-label {
+  color: var(--vscode-descriptionForeground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60%;
+}
+.token-unavailable-note {
+  margin-top: 6px;
+  font-size: 0.8em;
+  font-style: italic;
+  color: var(--vscode-descriptionForeground);
+}
+.token-breakdown {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 14px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--vscode-panel-border);
+}
+.token-breakdown-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 0.82em;
+}
+.token-breakdown-label { color: var(--vscode-descriptionForeground); }
+.token-breakdown-value {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
