@@ -5,3 +5,4 @@ out-test-integration/
 .vscode-test/
 *.vsix
 .DS_Store
+.github/

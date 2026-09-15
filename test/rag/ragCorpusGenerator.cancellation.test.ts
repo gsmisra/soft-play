@@ -86,6 +86,11 @@ function resetState(responder: FakeState['responder']): void {
  * try/catch would swallow a missing implementation anyway, but a working
  * one is included for fidelity). */
 const fakeVsCode = {
+  /** The real `vscode.CancellationError` class `sendPrompt()`'s underlying
+   * `model.sendRequest()` rejects with when a cancellation token fires
+   * WHILE a real Copilot request is actually in flight ("End Process")
+   * — see the "End Process" cancellation test below. */
+  CancellationError: class CancellationError extends Error {},
   Uri: {
     file: fakeUri,
     joinPath: (base: FakeUri, ...parts: string[]) => fakeUri(path.posix.join(base.path, ...parts))
@@ -198,6 +203,29 @@ function validRecipeResponse(): string {
   );
 }
 
+/** A second, distinct valid response for the OTHER capability used below
+ * (multi-unit accumulation test) — validateSourceGrounding() rejects a
+ * response that doesn't actually describe the capability it was given, so
+ * reusing `validRecipeResponse()` (which only ever describes `Helper.find`)
+ * for a second, different capability would get REJECTED rather than
+ * succeed, undermining a test that needs TWO real successes to prove
+ * cumulative accumulation. */
+function validRecipeResponseForOther(): string {
+  return (
+    '---\n' +
+    'id: other-other\n' +
+    'title: Find an Other row by id\n' +
+    'tags: [other]\n' +
+    'automationMode: [ui, api]\n' +
+    'language: [java]\n' +
+    '---\n\n' +
+    'API: public int other(int id)\n' +
+    '```java\n' +
+    'var result = Other.other(1);\n' +
+    '```\n'
+  );
+}
+
 test('a NORMAL (uncancelled) generation actually writes a recipe — the control case the cancellation tests below are meaningful against', async () => {
   resetState(async () => validRecipeResponse());
   const token = { isCancellationRequested: false };
@@ -288,4 +316,141 @@ test('F14: with MULTIPLE files queued, cancellation arriving after the first one
   // is caught by the loop-top check before ever reaching the model.
   assert.equal(callCount, 1, 'the model must never be called again once cancellation has been observed');
   assert.equal(counts.skipped, 2, 'both files end up skipped — one from the mid-flight race, one from the loop-top check');
+});
+
+test('"End Process": a real in-flight-abort (vscode.CancellationError thrown by sendPrompt) is reported as skipped/cancelled, never as a failure', async () => {
+  resetState(async (_prompt, token) => {
+    // Unlike the "mid-response" race above (the model finishes and
+    // RESOLVES with a valid recipe after cancellation was noticed), this
+    // simulates VS Code's Language Model API actually ABORTING the
+    // request the instant the token fires — model.sendRequest() rejects
+    // instead of resolving. This is the real, documented shape of
+    // "End Process" hitting a request that's genuinely in flight.
+    token.isCancellationRequested = true;
+    throw new fakeVsCode.CancellationError();
+  });
+  const token = { isCancellationRequested: false };
+  const counts = await generateRagCorpus({
+    modelId: 'fake-model',
+    files: [{ fileName: 'Helper.java', content: HELPER_JAVA }],
+    workspaceRoot: fakeUri('/fake-workspace'),
+    cancellationToken: token,
+    onProgress: (p) => state.progress.push(p),
+    confirmOverwrite: async () => true
+  });
+  assert.equal(counts.skipped, 1, 'an aborted in-flight request must count as skipped/cancelled');
+  assert.equal(counts.succeeded, 0);
+  assert.equal(counts.failed, 0, '"End Process" must never be reported as a failure — the user asked for this, nothing went wrong');
+  assert.equal(state.writes.length, 0, 'nothing must be written once the in-flight request was aborted');
+  const skippedEntry = state.progress.find((p) => p.status === 'skipped');
+  assert.ok(skippedEntry, 'the aborted request must be reported as "skipped", never "error"');
+  assert.match(skippedEntry!.message ?? '', /Cancelled/);
+  assert.ok(!state.progress.some((p) => p.status === 'error'), 'no progress entry should ever be reported as an error for a user-requested cancellation');
+});
+
+test('a genuine failure (not a cancellation) that happens to occur AFTER cancellation was already requested is still reported as skipped — cancellation wins', async () => {
+  // Defensive: once the user has clicked "End Process", ANY error surfacing
+  // from that point on for an in-flight unit should read as "cancelled",
+  // not as a spurious failure — checking cancellationToken.isCancellationRequested
+  // directly (not just `instanceof CancellationError`) covers a provider
+  // that rejects with some OTHER error shape once aborted.
+  resetState(async (_prompt, token) => {
+    token.isCancellationRequested = true;
+    throw new Error('ECONNRESET (fake): the aborted connection surfaced as a generic network error, not CancellationError');
+  });
+  const token = { isCancellationRequested: false };
+  const counts = await generateRagCorpus({
+    modelId: 'fake-model',
+    files: [{ fileName: 'Helper.java', content: HELPER_JAVA }],
+    workspaceRoot: fakeUri('/fake-workspace'),
+    cancellationToken: token,
+    onProgress: (p) => state.progress.push(p),
+    confirmOverwrite: async () => true
+  });
+  assert.equal(counts.skipped, 1);
+  assert.equal(counts.failed, 0);
+});
+
+test('tokensSoFar: present (0/0) from the very first progress event, then accumulates real sent+received counts as units complete', async () => {
+  resetState(async () => validRecipeResponse());
+  const token = { isCancellationRequested: false };
+  const progressEvents: { status: string; tokensSoFar?: { sent: number; received: number } }[] = [];
+  const counts = await generateRagCorpus({
+    modelId: 'fake-model',
+    files: [{ fileName: 'Helper.java', content: HELPER_JAVA }],
+    workspaceRoot: fakeUri('/fake-workspace'),
+    cancellationToken: token,
+    onProgress: (p) => progressEvents.push(p as typeof progressEvents[number]),
+    confirmOverwrite: async () => true
+  });
+  assert.equal(counts.succeeded, 1);
+  assert.ok(progressEvents.every((p) => p.tokensSoFar), 'every progress event must carry a tokensSoFar field');
+  const startedEvent = progressEvents.find((p) => p.status === 'started');
+  assert.deepEqual(startedEvent!.tokensSoFar, { sent: 0, received: 0 }, 'nothing sent/received yet the moment a unit merely starts');
+  const successEvent = progressEvents.find((p) => p.status === 'success');
+  // fakeCopilotClient.countModelTokens() always answers { count: 200 } —
+  // one call for the prompt (sent) and one for the raw response (received)
+  // per unit; the THIRD countModelTokens() call this same unit also makes
+  // (sizing the SAVED recipe content, for the "over target" note) is a
+  // separate, purely informational measurement and must NOT be folded into
+  // either total — it's checking a file already written, not billing an
+  // additional Copilot request.
+  assert.deepEqual(successEvent!.tokensSoFar, { sent: 200, received: 200 });
+});
+
+test('tokensSoFar accumulates CUMULATIVELY across multiple units — the second unit\'s total includes the first\'s', async () => {
+  resetState(async (prompt) => (prompt.includes('public int other') ? validRecipeResponseForOther() : validRecipeResponse()));
+  const token = { isCancellationRequested: false };
+  const progressEvents: { fileName: string; status: string; tokensSoFar?: { sent: number; received: number } }[] = [];
+  const counts = await generateRagCorpus({
+    modelId: 'fake-model',
+    files: [
+      { fileName: 'Helper.java', content: HELPER_JAVA },
+      { fileName: 'Other.java', content: 'package acme;\npublic class Other {\n  public int other(int id) {\n    return id;\n  }\n}\n' }
+    ],
+    workspaceRoot: fakeUri('/fake-workspace'),
+    cancellationToken: token,
+    onProgress: (p) => progressEvents.push(p as typeof progressEvents[number]),
+    confirmOverwrite: async () => true
+  });
+  assert.equal(counts.succeeded, 2);
+  const successEvents = progressEvents.filter((p) => p.status === 'success');
+  assert.equal(successEvents.length, 2);
+  assert.deepEqual(successEvents[0].tokensSoFar, { sent: 200, received: 200 }, 'first unit');
+  assert.deepEqual(successEvents[1].tokensSoFar, { sent: 400, received: 400 }, 'second unit adds on top of the first, never resets');
+});
+
+test('tokensSoFar: a unit skipped WITHOUT ever calling the model (already cancelled) contributes nothing — totals stay at zero', async () => {
+  resetState(async () => validRecipeResponse());
+  const token = { isCancellationRequested: true }; // already cancelled — the model is never called at all
+  const progressEvents: { status: string; tokensSoFar?: { sent: number; received: number } }[] = [];
+  await generateRagCorpus({
+    modelId: 'fake-model',
+    files: [{ fileName: 'Helper.java', content: HELPER_JAVA }],
+    workspaceRoot: fakeUri('/fake-workspace'),
+    cancellationToken: token,
+    onProgress: (p) => progressEvents.push(p as typeof progressEvents[number]),
+    confirmOverwrite: async () => true
+  });
+  assert.ok(progressEvents.length > 0);
+  progressEvents.forEach((p) => assert.deepEqual(p.tokensSoFar, { sent: 0, received: 0 }));
+});
+
+test('tokensSoFar: a unit that reaches the model but is cancelled mid-flight (sendPrompt aborts) still counts the prompt as sent', async () => {
+  resetState(async () => {
+    throw new fakeVsCode.CancellationError();
+  });
+  const token = { isCancellationRequested: false };
+  const progressEvents: { status: string; tokensSoFar?: { sent: number; received: number } }[] = [];
+  const counts = await generateRagCorpus({
+    modelId: 'fake-model',
+    files: [{ fileName: 'Helper.java', content: HELPER_JAVA }],
+    workspaceRoot: fakeUri('/fake-workspace'),
+    cancellationToken: token,
+    onProgress: (p) => progressEvents.push(p as typeof progressEvents[number]),
+    confirmOverwrite: async () => true
+  });
+  assert.equal(counts.skipped, 1);
+  const skippedEvent = progressEvents.find((p) => p.status === 'skipped');
+  assert.deepEqual(skippedEvent!.tokensSoFar, { sent: 200, received: 0 }, 'the prompt genuinely reached Copilot before the abort — it counts; no response ever came back, so received stays 0');
 });

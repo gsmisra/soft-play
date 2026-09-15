@@ -51,6 +51,7 @@ type InboundMessage =
   | { type: 'listModels' }
   | { type: 'openArchitectureDoc' }
   | { type: 'generateRagCorpus'; payload: { files: UploadedFile[] } }
+  | { type: 'cancelRagGeneration' }
   | { type: 'expandRagZip'; payload: { fileName: string; base64: string } }
   | { type: 'checkRagFreshness' }
   | { type: 'saveSemanticApiKey'; payload: { apiKey: string } }
@@ -129,6 +130,8 @@ export class SettingsPanel implements vscode.Disposable {
       await this.openArchitectureDoc();
     } else if (message.type === 'generateRagCorpus') {
       await this.handleGenerateRagCorpus(message.payload.files);
+    } else if (message.type === 'cancelRagGeneration') {
+      this.handleCancelRagGeneration();
     } else if (message.type === 'expandRagZip') {
       await this.handleExpandRagZip(message.payload.fileName, message.payload.base64);
     } else if (message.type === 'checkRagFreshness') {
@@ -352,6 +355,41 @@ export class SettingsPanel implements vscode.Disposable {
   }
 
   /**
+   * "End Process" — user-initiated hard stop for an in-flight "Generate RAG
+   * Corpus format" batch. Just fires the SAME `CancellationTokenSource`
+   * `handleGenerateRagCorpus()` already threads through every await point
+   * inside `generateRagCorpus()` — including straight into `vscode.lm`'s
+   * `model.sendRequest()` (llm/copilotClient.ts's `sendPrompt()`), so an
+   * ACTUAL in-flight Copilot request is aborted immediately by VS Code's
+   * own Language Model API, not merely ignored once it eventually resolves
+   * on its own. There's no separate "kill" to build here — the cancellation
+   * plumbing already existed (previously only reachable by closing the
+   * whole Settings panel, see `dispose()`); this is just the missing UI
+   * trigger for it.
+   *
+   * Deliberately does NOT dispose/clear `this.ragGenerationCts` here — the
+   * in-flight `generateRagCorpus()` call is still running (every remaining
+   * unit's own cancellation check now sees `isCancellationRequested`,
+   * reports itself 'skipped', and the loop finishes almost immediately) and
+   * still needs its own `cts` to keep matching `this.ragGenerationCts` so
+   * its final `ragGenerationDone` summary isn't mistaken for a stale/
+   * superseded batch and dropped (see the `this.ragGenerationCts !== cts`
+   * guards above) — that summary is what resets the webview's "End
+   * Process" button back to "Generate".
+   *
+   * Never touches disk: every recipe already written to `.github/rag`
+   * earlier in this SAME batch (or any prior run) is untouched — cancelling
+   * only ever skips whichever unit(s) hadn't been written yet. Nothing
+   * "stored in memory" outlives this call either — `generateRagCorpus()`'s
+   * only per-batch state (`sourceMappedCache`, the existing-targets map) is
+   * local to that one function call and is freed the moment it returns,
+   * which happens right after this cancellation propagates.
+   */
+  private handleCancelRagGeneration(): void {
+    this.ragGenerationCts?.cancel();
+  }
+
+  /**
    * "Check Freshness" (Reusable Components section) — the Settings panel's
    * own front-end for Phase 5's active source-staleness check (see
    * rag/ragFreshnessService.ts, rag/ragFreshnessChecker.ts), so a user can
@@ -565,6 +603,16 @@ export class SettingsPanel implements vscode.Disposable {
       color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
       border: 1px solid var(--vscode-panel-border);
     }
+    /* "End Process" (Generate RAG Corpus Format) — solid red, deliberately
+       distinct from every other button here so a destructive/stop action
+       reads as one at a glance, not tied to a VS Code theme variable (same
+       posture as media/main.css's own .btn-danger-confirm for "Kill All
+       Browsers"/"Clear Data"). */
+    .btn-danger {
+      background: #a1260d;
+      color: #fff;
+    }
+    .btn-danger:hover:not(:disabled) { background: #c42b0f; }
     .rag-dropzone {
       display: flex;
       align-items: center;
@@ -613,6 +661,17 @@ export class SettingsPanel implements vscode.Disposable {
       padding: 0 4px;
     }
     .rag-file-remove:hover { color: var(--vscode-errorForeground, #f14c4c); }
+    /* Live running Copilot token total for the current "Generate RAG Corpus
+       Format" batch — same informational tone as the Control Panel's own
+       "Token Monitoring" breakdown values, scoped here since this batch's
+       token usage is independent of that section's own current-draft
+       estimate (a separate webview, a separate LLM usage stream). */
+    .rag-token-usage {
+      margin-top: 8px;
+      font-size: 0.85em;
+      color: var(--vscode-descriptionForeground);
+    }
+    .rag-token-usage b { color: var(--vscode-foreground); font-weight: 600; }
     .rag-progress {
       margin-top: 12px;
       max-height: 160px;
@@ -866,8 +925,12 @@ export class SettingsPanel implements vscode.Disposable {
     />
   </div>
   <div id="ragFileList" class="rag-file-list"></div>
+  <div id="ragTokenUsage" class="rag-token-usage" hidden>
+    Tokens used so far (this GitHub Copilot model) — Sent: <b id="ragTokensSent">0</b> · Received: <b id="ragTokensReceived">0</b> · Total: <b id="ragTokensTotal">0</b>
+  </div>
   <div style="display: flex; justify-content: flex-end; margin-top: 10px;">
     <button type="button" id="ragGenerateBtn" class="btn" disabled>Generate</button>
+    <button type="button" id="ragEndProcessBtn" class="btn btn-danger" hidden>End Process</button>
   </div>
   <div id="ragProgress" class="rag-progress" hidden></div>
 
@@ -1006,7 +1069,20 @@ export class SettingsPanel implements vscode.Disposable {
       const ragBrowseBtn = document.getElementById('ragBrowseBtn');
       const ragFileListEl = document.getElementById('ragFileList');
       const ragGenerateBtn = document.getElementById('ragGenerateBtn');
+      const ragEndProcessBtn = document.getElementById('ragEndProcessBtn');
       const ragProgressEl = document.getElementById('ragProgress');
+      const ragTokenUsageEl = document.getElementById('ragTokenUsage');
+      const ragTokensSentEl = document.getElementById('ragTokensSent');
+      const ragTokensReceivedEl = document.getElementById('ragTokensReceived');
+      const ragTokensTotalEl = document.getElementById('ragTokensTotal');
+
+      function ragUpdateTokenUsage(tokensSoFar) {
+        if (!tokensSoFar) return;
+        ragTokenUsageEl.hidden = false;
+        ragTokensSentEl.textContent = tokensSoFar.sent.toLocaleString();
+        ragTokensReceivedEl.textContent = tokensSoFar.received.toLocaleString();
+        ragTokensTotalEl.textContent = (tokensSoFar.sent + tokensSoFar.received).toLocaleString();
+      }
       // Generous enough for a real source/config file, small enough to
       // guard against a pathological paste bloating the Copilot prompt —
       // this content is read entirely into memory and sent as-is.
@@ -1133,13 +1209,31 @@ export class SettingsPanel implements vscode.Disposable {
 
       ragGenerateBtn.addEventListener('click', () => {
         if (ragPendingFiles.length === 0) return;
-        ragGenerateBtn.disabled = true;
+        ragGenerateBtn.hidden = true;
+        ragEndProcessBtn.hidden = false;
+        ragEndProcessBtn.disabled = false;
+        ragEndProcessBtn.textContent = 'End Process';
         ragProgressEl.hidden = false;
         ragProgressEl.innerHTML = '';
+        ragTokenUsageEl.hidden = true; // a fresh batch's own totals start over, not from the last batch's tail
         vscode.postMessage({
           type: 'generateRagCorpus',
           payload: { files: ragPendingFiles.map((f) => ({ fileName: f.fileName, relativePath: f.relativePath || '', content: f.content })) }
         });
+      });
+
+      ragEndProcessBtn.addEventListener('click', () => {
+        // Disabled immediately (not hidden) — stays in place as feedback
+        // that the click registered, until the in-flight batch's own
+        // 'ragGenerationDone' (always sent, win or cancel) swaps it back to
+        // "Generate". Recipes already saved earlier in this batch, and
+        // anything already in .github/rag from a prior run, are never
+        // touched by this — only whichever unit(s) haven't been written
+        // yet are skipped.
+        ragEndProcessBtn.disabled = true;
+        ragEndProcessBtn.textContent = 'Ending…';
+        ragAppendProgressLine('', 'started', 'Ending process — cancelling the in-flight Copilot request and skipping any remaining files…');
+        vscode.postMessage({ type: 'cancelRagGeneration' });
       });
 
       document.querySelectorAll('input[name="browserChannel"]').forEach((radio) => {
@@ -1256,6 +1350,7 @@ export class SettingsPanel implements vscode.Disposable {
         if (message.type === 'ragGenerationProgress') {
           const p = message.payload;
           ragAppendProgressLine(p.fileName, p.status, p.message);
+          ragUpdateTokenUsage(p.tokensSoFar);
           return;
         }
         if (message.type === 'ragGenerationDone') {
@@ -1267,10 +1362,21 @@ export class SettingsPanel implements vscode.Disposable {
             // Only clear the queue on a real attempt (not the early-exit
             // "Copilot isn't set up" error above) — a genuine failure per
             // file already stays visible in the progress log for review,
-            // but the pending list itself is done with regardless.
+            // but the pending list itself is done with regardless. This
+            // also covers "End Process": a cancelled batch still lands here
+            // (skipped units just count toward the skipped total), so the
+            // queue clears the exact same way a completed one does.
             ragPendingFiles = [];
             ragUpdateFileListUI();
           }
+          // Always restore "Generate" in place of "End Process" here —
+          // this is the ONE terminal message every batch ends with, whether
+          // it ran to completion, failed outright, or was cancelled via
+          // "End Process" above.
+          ragEndProcessBtn.hidden = true;
+          ragEndProcessBtn.disabled = false;
+          ragEndProcessBtn.textContent = 'End Process';
+          ragGenerateBtn.hidden = false;
           ragGenerateBtn.disabled = ragPendingFiles.length === 0;
           return;
         }

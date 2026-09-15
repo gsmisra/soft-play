@@ -73,6 +73,16 @@ export interface GenerationProgress {
   fileName: string;
   status: 'started' | 'success' | 'skipped' | 'error';
   message?: string;
+  /** Running total of REAL tokens (each model's own tokenizer, via
+   * `countModelTokens()` — same primitive that already powers Standard
+   * mode's own "Token Monitoring" segment) consumed by this batch SO FAR —
+   * every prompt actually sent, plus every response actually received,
+   * across every unit processed up to and including this one event. Lets
+   * a caller show a live running total next to "End Process" so the user
+   * can judge remaining Copilot quota before deciding whether to keep
+   * going. Always present (0/0 before the first unit starts) — never
+   * `undefined` — so a UI can bind to it unconditionally. */
+  tokensSoFar: { sent: number; received: number };
 }
 
 const RAG_FOLDER_SEGMENTS = ['.github', 'rag'];
@@ -289,6 +299,17 @@ export async function generateRagCorpus(options: GenerateRagCorpusOptions): Prom
   const { modelId, files, workspaceRoot, cancellationToken, onProgress, confirmOverwrite } = options;
   const ragFolder = vscode.Uri.joinPath(workspaceRoot, ...RAG_FOLDER_SEGMENTS);
 
+  // Live running total of REAL tokens consumed by this batch so far — see
+  // GenerationProgress.tokensSoFar's own doc comment. `emitProgress()`
+  // (used everywhere in this function that used to call `onProgress()`
+  // directly) stamps the CURRENT totals onto every event automatically, so
+  // neither total needs repeating at each of this function's many
+  // individual progress call sites.
+  let sentTokensTotal = 0;
+  let receivedTokensTotal = 0;
+  const emitProgress = (progress: Omit<GenerationProgress, 'tokensSoFar'>): void =>
+    onProgress({ ...progress, tokensSoFar: { sent: sentTokensTotal, received: receivedTokensTotal } });
+
   // Batch-level setup — creating .github/rag, reading the bundled prompt
   // instructions, expanding files into per-capability units, resolving
   // target paths, and the one overwrite-confirm dialog — used to run
@@ -331,7 +352,7 @@ export async function generateRagCorpus(options: GenerateRagCorpusOptions): Prom
     for (const file of files) {
       const deferredCount = countDeferredCapabilities(file.fileName, file.content);
       if (deferredCount > 0) {
-        onProgress({
+        emitProgress({
           fileName: file.fileName,
           status: 'skipped',
           message: `This file has ${deferredCount} additional public method(s) beyond the ${MAX_CAPABILITIES_PER_FILE}-per-file extraction limit — they were NOT generated. Split this file or re-upload it in smaller pieces to cover the rest.`
@@ -372,7 +393,7 @@ export async function generateRagCorpus(options: GenerateRagCorpusOptions): Prom
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     for (const file of files) {
-      onProgress({ fileName: file.fileName, status: 'error', message: `Could not start generation: ${message}` });
+      emitProgress({ fileName: file.fileName, status: 'error', message: `Could not start generation: ${message}` });
     }
     return { succeeded: 0, skipped: 0, failed: files.length };
   }
@@ -412,13 +433,13 @@ export async function generateRagCorpus(options: GenerateRagCorpusOptions): Prom
     const targetName = targets[i];
     const resolution = resolutions[i];
     if (cancellationToken.isCancellationRequested) {
-      onProgress({ fileName: label, status: 'skipped', message: 'Cancelled.' });
+      emitProgress({ fileName: label, status: 'skipped', message: 'Cancelled.' });
       skipped += 1;
       continue;
     }
     if (resolution.status === 'duplicate') {
       const other = units[resolution.matchesIndex!];
-      onProgress({
+      emitProgress({
         fileName: label,
         status: 'skipped',
         message: `Identical duplicate of "${other.label}" already in this batch — skipped rather than generating it twice.`
@@ -429,7 +450,7 @@ export async function generateRagCorpus(options: GenerateRagCorpusOptions): Prom
     if (resolution.status === 'conflict') {
       const other = units[resolution.matchesIndex!];
       failed += 1;
-      onProgress({
+      emitProgress({
         fileName: label,
         status: 'error',
         message:
@@ -440,12 +461,12 @@ export async function generateRagCorpus(options: GenerateRagCorpusOptions): Prom
       continue;
     }
     if (existing.has(targetName) && !overwriteApproved) {
-      onProgress({ fileName: label, status: 'skipped', message: `${targetName} already exists — not overwritten.` });
+      emitProgress({ fileName: label, status: 'skipped', message: `${targetName} already exists — not overwritten.` });
       skipped += 1;
       continue;
     }
 
-    onProgress({ fileName: label, status: 'started' });
+    emitProgress({ fileName: label, status: 'started' });
     try {
       // The file's real location within the uploaded project (and, for
       // Java, its own authoritative `package` declaration) — ground truth
@@ -458,8 +479,25 @@ export async function generateRagCorpus(options: GenerateRagCorpusOptions): Prom
       // for how the model is told to use (and when to distrust) this.
       const javaPackage = extractJavaPackageDeclaration(file.content);
       const prompt = buildCapabilityPrompt(instructions, file, capability, javaPackage);
+      // Measured BEFORE sending, using the SAME real-tokenizer primitive
+      // ("Token Monitoring" section) already used elsewhere in this file
+      // for the saved-recipe size check below — counted here regardless of
+      // how this unit's own request turns out (cancelled mid-flight,
+      // rejected, or a genuine error), since the prompt has already left
+      // the machine and counts against the user's real Copilot quota the
+      // moment `sendPrompt()` is called, not only once a response comes
+      // back. The one rare exception — `sendPrompt()`'s own token-budget
+      // preflight rejecting an oversized prompt BEFORE any real request
+      // goes out — is deliberately not special-cased: keeping this simple
+      // is worth a negligible overcount in that uncommon case, for a
+      // monitoring figure that was never meant to be a precise billing
+      // ledger.
+      const promptMeasured = await countModelTokens(modelId, prompt, cancellationToken);
+      sentTokensTotal += promptMeasured?.count ?? 0;
       let response = '';
       await sendPrompt(modelId, prompt, (chunk) => (response += chunk), cancellationToken);
+      const responseMeasured = await countModelTokens(modelId, response, cancellationToken);
+      receivedTokensTotal += responseMeasured?.count ?? 0;
 
       // F14 fix: re-check AFTER the model call — the only cancellation
       // check before this point (at the TOP of this loop iteration) can't
@@ -473,7 +511,7 @@ export async function generateRagCorpus(options: GenerateRagCorpusOptions): Prom
       // 'skipped' (never 'success' — nothing was saved — and never
       // 'error', since nothing actually went wrong).
       if (cancellationToken.isCancellationRequested) {
-        onProgress({ fileName: label, status: 'skipped', message: 'Cancelled after the model responded — not saved.' });
+        emitProgress({ fileName: label, status: 'skipped', message: 'Cancelled after the model responded — not saved.' });
         skipped += 1;
         continue;
       }
@@ -530,7 +568,7 @@ export async function generateRagCorpus(options: GenerateRagCorpusOptions): Prom
         // human can decide whether it's salvageable by hand.
         failed += 1;
         const draftUri = await saveRejectedDraft(workspaceRoot, targetName, response, normalized.reason!);
-        onProgress({
+        emitProgress({
           fileName: label,
           status: 'error',
           message: `Rejected — ${normalized.reason} Raw response saved for review at "${vscode.workspace.asRelativePath(draftUri)}" (NOT indexed).`
@@ -559,7 +597,7 @@ export async function generateRagCorpus(options: GenerateRagCorpusOptions): Prom
       if (!revalidated.ok) {
         failed += 1;
         const draftUri = await saveRejectedDraft(workspaceRoot, targetName, finalContent, `Secret scrubbing left the recipe structurally invalid: ${revalidated.error}`);
-        onProgress({
+        emitProgress({
           fileName: label,
           status: 'error',
           message: `Rejected after secret scrubbing — the result is no longer a valid recipe (${revalidated.error}). Raw (scrubbed) response saved for review at "${vscode.workspace.asRelativePath(draftUri)}" (NOT indexed).`
@@ -597,19 +635,35 @@ export async function generateRagCorpus(options: GenerateRagCorpusOptions): Prom
       // effects") that must never happen once cancellation has been
       // requested.
       if (cancellationToken.isCancellationRequested) {
-        onProgress({ fileName: label, status: 'skipped', message: 'Cancelled — not saved.' });
+        emitProgress({ fileName: label, status: 'skipped', message: 'Cancelled — not saved.' });
         skipped += 1;
         continue;
       }
       await vscode.workspace.fs.writeFile(targetUri, new TextEncoder().encode(finalContent));
 
       succeeded += 1;
-      onProgress({
+      emitProgress({
         fileName: label,
         status: 'success',
         message: `Saved as ${targetName}${normalized.status === 'repaired' ? ` — ${normalized.reason}` : '.'}${sizeNote}${scrubNote}`
       });
     } catch (err) {
+      // "End Process": `sendPrompt()`/`countModelTokens()` above pass
+      // `cancellationToken` straight into `vscode.lm`'s own
+      // `model.sendRequest()` — when the token fires WHILE that request is
+      // actually in flight, VS Code aborts it immediately and rejects with
+      // a `vscode.CancellationError` (rather than letting it resolve
+      // normally, which is what the OTHER `isCancellationRequested` checks
+      // in this loop are for). This is a clean, user-requested stop, not a
+      // failure — report and count it exactly like every other
+      // cancellation checkpoint above ('skipped', never 'error'/'failed'),
+      // so ending the process mid-request never shows a spurious failure
+      // for whichever unit happened to be running at that moment.
+      if (err instanceof vscode.CancellationError || cancellationToken.isCancellationRequested) {
+        emitProgress({ fileName: label, status: 'skipped', message: 'Cancelled — not saved.' });
+        skipped += 1;
+        continue;
+      }
       // sendPrompt() (llm/copilotClient.ts) now runs its own token-budget
       // preflight before ever contacting Copilot — an oversized source
       // excerpt surfaces here as a PromptTooLargeError with a concrete
@@ -620,7 +674,7 @@ export async function generateRagCorpus(options: GenerateRagCorpusOptions): Prom
       // needed.
       failed += 1;
       const message = err instanceof CopilotUnavailableError ? err.message : err instanceof Error ? err.message : String(err);
-      onProgress({ fileName: label, status: 'error', message });
+      emitProgress({ fileName: label, status: 'error', message });
     }
   }
 

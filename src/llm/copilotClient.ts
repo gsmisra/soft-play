@@ -21,13 +21,61 @@ export interface CopilotModelInfo {
  * so the only correct approach is to ask VS Code at call time.
  */
 
+/** How long a resolved Copilot model list stays cached — see
+ * `resolveModels()`'s own doc comment. Short enough that a real change
+ * (signing in/out, a plan change exposing a new model) is picked up well
+ * within one interactive session; long enough to absorb the bursts of
+ * repeated lookups a single user action actually causes (one
+ * `sendPrompt()`/`countModelTokens()` call per RAG-corpus-batch unit, or
+ * every keystroke re-running a live Token Monitoring estimate). */
+const MODEL_LIST_TTL_MS = 10_000;
+const modelListCache = new TtlCache<'copilot', Promise<vscode.LanguageModelChat[]>>(1);
+
+/** Resolves Copilot's currently exposed chat models — the single call both
+ * `listCopilotModels()` and `findModel()` build on. `vscode.lm.selectChatModels()`
+ * is a real IPC round-trip to the Copilot Chat extension, not a free local
+ * lookup, and until this cache existed it was NEVER memoized: every single
+ * `sendPrompt()`/`countModelTokens()` call in this file re-resolved it from
+ * scratch, unlike `countModelTokens()`'s own result, which already was (see
+ * `tokenCountCache` below). A "Generate RAG Corpus format" batch (one
+ * `sendPrompt()` per capability — easily dozens for one file) or a live
+ * "Token Monitoring" estimate (re-run on every keystroke) previously
+ * repeated that exact same round-trip, for the exact same answer, many
+ * times in quick succession.
+ *
+ * Caches the PROMISE itself (not just its resolved value) so several
+ * callers racing during a cache miss share ONE in-flight request instead
+ * of each firing their own — and a REJECTED lookup is evicted immediately
+ * (never replayed from cache) so a transient failure (Copilot Chat still
+ * activating) doesn't lock in the same doomed promise for the rest of the
+ * TTL window; the very next caller gets a fresh attempt. */
+function resolveModels(): Promise<vscode.LanguageModelChat[]> {
+  const cached = modelListCache.get('copilot');
+  if (cached) {
+    return cached;
+  }
+  // Wrapped in a real Promise — `selectChatModels()` returns VS Code's own
+  // `Thenable`, which lacks `.catch()`/`.finally()`, both needed below.
+  const pending = Promise.resolve(vscode.lm.selectChatModels({ vendor: 'copilot' }));
+  modelListCache.set('copilot', pending, MODEL_LIST_TTL_MS);
+  pending.catch(() => modelListCache.delete('copilot'));
+  return pending;
+}
+
+/** Drops the cached model list — not currently wired to a command, exposed
+ * for tests (same "not wired to a command, exposed for tests/a future
+ * affordance" posture as `clearTokenCountCache()` below). */
+export function clearModelListCache(): void {
+  modelListCache.clear();
+}
+
 /** Lists Copilot's available chat models right now. Empty if GitHub Copilot
  * Chat isn't installed, the user isn't signed in, or no models are exposed —
  * callers should treat an empty list as "not available" and say so in the UI,
  * not throw. */
 export async function listCopilotModels(): Promise<CopilotModelInfo[]> {
   try {
-    const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+    const models = await resolveModels();
     return models.map((m) => ({ id: m.id, name: m.name, vendor: m.vendor, family: m.family }));
   } catch {
     return [];
@@ -39,7 +87,7 @@ export async function listCopilotModels(): Promise<CopilotModelInfo[]> {
  * exact same model handle every other Copilot call in this extension uses,
  * never a second/different resolution path. */
 export async function findModel(modelId: string): Promise<vscode.LanguageModelChat | undefined> {
-  const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+  const models = await resolveModels();
   return models.find((m) => m.id === modelId) ?? models[0];
 }
 
