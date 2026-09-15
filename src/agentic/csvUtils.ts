@@ -90,6 +90,98 @@ export function parseCsv(text: string): string[][] {
   return rows.map((r) => (r.length < width ? [...r, ...Array(width - r.length).fill('')] : r));
 }
 
+export class MalformedCsvError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MalformedCsvError';
+  }
+}
+
+/** F06: the SAME tokenizer as `parseCsv()` above, minus its final
+ * padding step — every row is returned at its OWN true width, never
+ * widened to match the widest row in the file. `parseCsv()` itself stays
+ * untouched (ingestion elsewhere depends on its padding leniency — "never
+ * let a data row reference an out-of-bounds header column" is the right
+ * behavior for reading an arbitrary UPLOADED file); this exists
+ * specifically for validating GENERATED output/a real example template,
+ * where a short header silently padded to look the right width is exactly
+ * the bug to catch, not paper over. Also rejects a genuinely unterminated
+ * quoted field (a `"` opened but never closed before EOF) — `parseCsv()`
+ * silently accepts that as "the rest of the file," which is never
+ * correct for output this extension is about to trust structurally. */
+export function parseCsvStrict(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let inQuotes = false;
+  let i = 0;
+  const n = text.length;
+
+  const endField = () => {
+    row.push(field);
+    field = '';
+  };
+  const endRow = () => {
+    endField();
+    rows.push(row);
+    row = [];
+  };
+
+  while (i < n) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') {
+          field += '"';
+          i += 2;
+          continue;
+        }
+        inQuotes = false;
+        i += 1;
+        continue;
+      }
+      field += ch;
+      i += 1;
+      continue;
+    }
+
+    if (ch === '"') {
+      inQuotes = true;
+      i += 1;
+      continue;
+    }
+    if (ch === ',') {
+      endField();
+      i += 1;
+      continue;
+    }
+    if (ch === '\r') {
+      if (text[i + 1] === '\n') {
+        i += 1;
+      }
+      endRow();
+      i += 1;
+      continue;
+    }
+    if (ch === '\n') {
+      endRow();
+      i += 1;
+      continue;
+    }
+    field += ch;
+    i += 1;
+  }
+
+  if (inQuotes) {
+    throw new MalformedCsvError('An opening quote (") is never closed before the end of the text.');
+  }
+  if (field.length > 0 || row.length > 0) {
+    endRow();
+  }
+
+  return rows;
+}
+
 /** Quotes a single CSV field only when required (contains a comma, quote,
  * or newline) — matches how most spreadsheet tools write CSV, so a
  * generated file's plain fields stay easy to read/diff. */

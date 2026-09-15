@@ -102,6 +102,9 @@ function loadObjectSpyPanelWithFakeVsCode(): { ObjectSpyPanel: new (...args: nev
       if (id === '../security/chatInstructionRedactor') {
         return { encryptCredentialsInFreeText: async (_ctx: unknown, text: string) => ({ text, count: 0 }) };
       }
+      if (id === '../security/passwordEncryptionSection') {
+        return { appendPasswordEncryptionSection: () => undefined };
+      }
       if (id === '../llm/copilotClient') {
         return {
           findModel: async () => ({ countTokens: async () => 100, maxInputTokens: 100_000 }),

@@ -8,7 +8,6 @@ import { FeatureFilePanel, LinkedScenario } from './featureFilePanel';
 import { AiCodePanel } from './aiCodePanel';
 import { GeneratedFeaturePanel } from './generatedFeaturePanel';
 import { CopilotUnavailableError, countModelTokens, extractCodeBlock, findModel, PromptTooLargeError, sendPrompt, sendPromptWithModel } from '../llm/copilotClient';
-import { PROMPT_TOKEN_SAFETY_MARGIN } from '../llm/tokenBudget';
 import { checkEnvironment } from '../execution/environmentCheck';
 import { executeGeneratedCode } from '../execution/testExecutor';
 import { ApiRequestDetails, SecretEncryptor, buildApiRequestSummary, extractApiBodyFieldNames, hasApiRequest } from '../api/apiRequestDetails';
@@ -17,12 +16,12 @@ import * as secretVault from '../security/secretVault';
 import { encryptPasswordLiteralsInCode } from '../security/uiPasswordRedactor';
 import { encryptCredentialsInFreeText } from '../security/chatInstructionRedactor';
 import { runVerifyFixAgent } from '../agent/verifyFixOrchestrator';
-import { getOrBuildRagIndex } from '../rag/ragIndexer';
+import { truncateForDialog, truncateForStatusLine } from '../agent/verifyFixTextTruncation';
+import { appendPasswordEncryptionSection } from '../security/passwordEncryptionSection';
 import { getOrBuildFreshnessReport, FreshnessReport } from '../rag/ragFreshnessService';
-import { resolveHybridRetrieveMatches } from '../rag/ragHybridConfig';
 import { RAG_DRAFTS_FOLDER_SEGMENTS } from '../rag/ragCorpusGenerator';
 import { parseRagFile } from '../rag/ragFrontmatter';
-import { formatRagPromptSection, RagMatch } from '../rag/ragRetriever';
+import { RagMatch } from '../rag/ragRetriever';
 import {
   planOperationsFromGherkinSteps,
   planOperationFromApiRequest,
@@ -30,8 +29,7 @@ import {
   withSharedContext,
   OperationPlan
 } from '../rag/ragOperationPlanner';
-import { retrieveForOperations, OperationRagCandidate } from '../rag/ragOperationRetrieval';
-import { packOperationCandidates, PackingDiagnostics } from '../rag/ragOperationPacking';
+import { packRagSection } from '../rag/ragPackingPipeline';
 import { prependRagTraceabilityBanner } from './ragTraceabilityBanner';
 import { findUncoveredSteps } from './stepCoverageChecker';
 import { AgenticModeController } from '../agentic/agenticModeController';
@@ -1353,7 +1351,10 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
         pythonCommand,
         automationMode: settings.automationMode,
         resourcesRoot: this.context.extensionUri.fsPath,
-        secretEnv: await secretVault.getSecretEnv(this.context)
+        secretEnv: await secretVault.getSecretEnv(this.context),
+        // F03: closes the same shared-tool race Agentic Mode's own verify
+        // path fixes — see verifyFixTools.ts's own doc comment on this field.
+        cancellationToken: cts.token
       },
       confirmRun: async (attempt, maxAttempts, lastErrorOutput) => {
         const choice = await vscode.window.showWarningMessage(
@@ -2124,38 +2125,6 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     return withSharedContext(basePlan, customInstructions);
   }
 
-  /** Logs the retrieved -> included -> operation-coverage breakdown for
-   * one RAG packing pass — kept as implementation diagnostics in the
-   * Output channel, per Phase 3's "keep implementation diagnostics in
-   * logs/inspection UI rather than adding verbose prose to every model
-   * prompt," never surfaced to the model itself. */
-  private logRagPackingResult(plan: OperationPlan, candidates: OperationRagCandidate[], includedMatches: RagMatch[], diagnostics: PackingDiagnostics | undefined): void {
-    if (candidates.length === 0) {
-      return;
-    }
-    this.outputChannel.appendLine(
-      `Reusable components (RAG): ${plan.operations.length} operation(s) planned (${plan.method}), ${candidates.length} distinct candidate(s) retrieved — ` +
-        `${candidates.map((c) => c.match.id).join(', ')}.`
-    );
-    if (includedMatches.length < candidates.length) {
-      const detail = diagnostics ? diagnostics.omitted.map((o) => `${o.id} (${o.reason})`).join(', ') : 'size cap';
-      this.outputChannel.appendLine(
-        `Reusable components (RAG): ${candidates.length - includedMatches.length} candidate(s) omitted from the prompt — ${detail}.`
-      );
-    }
-    if (diagnostics) {
-      const uncovered = diagnostics.operationCoverage.filter((c) => !c.covered);
-      if (uncovered.length > 0) {
-        this.outputChannel.appendLine(
-          `Reusable components (RAG): ${uncovered.length} of ${plan.operations.length} operation(s) have NO included RAG coverage (${uncovered.map((c) => c.operationId).join(', ')}).`
-        );
-      }
-      this.outputChannel.appendLine(
-        `Reusable components (RAG): packed section is ${diagnostics.tokensUnmeasured ? 'an UNMEASURED (char-capped) best effort' : `${diagnostics.countedTokens} measured token(s)`}.`
-      );
-    }
-  }
-
   /**
    * Builds the "Reusable components available" prompt section (see
    * rag/ragRetriever.ts) for the CURRENT request — or `''` when RAG is
@@ -2167,20 +2136,14 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
    * exactly what a real send would include, same reasoning as Auto
    * Password Encryption's own redaction pass being shared between the two).
    *
-   * Retrieves PER OPERATION (`buildOperationPlan()`/`retrieveForOperations()`
-   * — Phase 3), removing the old single-query `topK` ceiling that could
-   * never surface 3+ distinct required capabilities for one request, then
-   * packs against the ACTUAL resolved model's real remaining token budget
-   * (`mandatoryTokens` — the caller's own already-measured cost of
-   * everything else in the prompt) when that measurement is available;
-   * falls back to `formatRagPromptSection()`'s character-based packing
-   * (still benefiting from per-operation retrieval's wider coverage) when
-   * it isn't — an unmeasured request is never treated as license to
-   * over-include RAG content, only as "no live token guarantee available
-   * this time." Retrieval embedding itself never needs Auto Password
-   * Encryption's redaction pass first — it's pure local arithmetic
-   * (TF-IDF, see rag/tfidfEmbeddings.ts), so nothing computed from it ever
-   * leaves the machine, unlike the prompt text itself.
+   * Item 2 (dedupe): this method now just builds ITS OWN operation plan
+   * (Gherkin steps/API details/Playwright code — the one genuinely
+   * different piece between Standard and Agentic mode) and hands off to
+   * rag/ragPackingPipeline.ts's `packRagSection()` for everything after
+   * that (retrieve per operation, exclude known-stale recipes, pack
+   * against the real token budget, format) — the exact same pipeline
+   * agenticModeController.ts's own `buildRagSection()` now also calls,
+   * instead of each maintaining an independent copy of this logic.
    */
   private async buildRagSection(
     settings: ObjectSpySettings,
@@ -2197,141 +2160,19 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     model?: vscode.LanguageModelChat,
     cancellationToken?: vscode.CancellationToken
   ): Promise<{ section: string; matches: RagMatch[] }> {
-    const empty = { section: '', matches: [] as RagMatch[] };
     if (!settings.ragEnabled) {
-      return empty;
+      return { section: '', matches: [] };
     }
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
-    if (!workspaceRoot) {
-      return empty;
-    }
-    const index = await getOrBuildRagIndex(workspaceRoot, (message) =>
-      this.outputChannel.appendLine(`Reusable components (RAG): ${message}`)
-    );
-    if (!index) {
-      return empty;
-    }
-
     const plan = this.buildOperationPlan(isApiMode, playwrightCode, apiDetails, customInstructions, linkedScenario);
-    if (plan.operations.length === 0) {
-      return empty;
-    }
-    // Phase 6: `undefined` (the overwhelmingly common case — hybrid mode is
-    // off by default) falls straight through to retrieveForOperations()'s
-    // own default (plain lexical retrieveRagMatches()), zero behavior
-    // change. Only genuinely turns into hybrid (lexical+semantic RRF)
-    // retrieval when Settings has both the toggle AND a real
-    // endpoint/model configured — see ragHybridConfig.ts.
-    //
-    // A10: `cancellationToken` (this SAME generation request's own — the
-    // real "Start AI Code Generation" call site passes one; the live
-    // token-estimate call site has none, which is fine — see
-    // ragHybridConfig.ts's own doc comments) is bridged into a plain
-    // `AbortSignal` and forwarded to every per-operation semantic-embedding
-    // call this resolves to; `onSemanticFailure` reports a real (non-
-    // cancellation) semantic failure ONCE for this whole generation rather
-    // than once per operation.
-    const retrieveMatches = await resolveHybridRetrieveMatches(this.context, settings, {
-      cancellationToken,
-      onSemanticFailure: (message) =>
-        this.outputChannel.appendLine(`Reusable components (RAG): semantic (hybrid) retrieval failed for this request (${message}) — falling back to lexical-only matching for the rest of it.`)
-    });
-    if (retrieveMatches) {
-      this.outputChannel.appendLine('Reusable components (RAG): hybrid (lexical + semantic, RRF-fused) retrieval is active for this request.');
-    }
-
-    // Phase 5 -> Phase 3 wiring (F08/A08): a recipe whose OWN source is
-    // known stale/missing is hard-excluded from the prompt entirely,
-    // regardless of how well it otherwise scores — a recipe confirmed to
-    // no longer reflect its real source is never worth spending token
-    // budget on. Uses the CACHED report (forceRefresh: false) — this runs
-    // on every code-generation request, not just an explicit manual check,
-    // so it must stay fast; the cache invalidates itself automatically the
-    // moment a recipe or its source file actually changes (see
-    // ragFreshnessService.ts). Deliberately does NOT exclude
-    // `unverifiable`/`error`-state recipes — "can't tell" is never treated
-    // as "confirmed stale," so a legacy/hand-authored recipe with no
-    // provenance to check stays fully eligible.
-    //
-    // A08: fetched BEFORE retrieval (not after) and threaded INTO
-    // retrieveForOperations() itself — a known stale/missing recipe is now
-    // excluded from EACH operation's own per-operation top-k (and, in
-    // hybrid mode, from semantic embedding) rather than discarded from an
-    // already-truncated result afterward. Before this fix, a fresh, usable
-    // recipe ranked just outside the per-operation top-k was never even
-    // retrieved in the first place, so no amount of later filtering could
-    // recover it — reproduced case: four equally matching recipes, the
-    // top three stale, the fourth fresh; filtering only AFTER retrieval
-    // left zero eligible candidates even though a fresh, indexed helper
-    // genuinely existed.
-    const staleFilePaths = await this.getStaleRagFilePaths(workspaceRoot);
-
-    const candidates = await retrieveForOperations(index, plan.operations, settings.language, settings.automationMode, undefined, retrieveMatches, staleFilePaths);
-    if (candidates.length === 0) {
-      this.logRagPackingResult(plan, candidates, [], undefined);
-      return empty;
-    }
-
-    // F12: reuse an already-resolved model handle when the caller has one
-    // (runLlmRefinement()'s main path resolves ONE model up front and
-    // threads it through packing AND the actual send — see that method's
-    // own doc comment) rather than re-resolving by id string here, which
-    // previously meant packing's own `maxInputTokens`/tokenizer could,
-    // in principle, come from a DIFFERENT resolution than what
-    // ultimately sends and enforces the real admission check.
-    const resolvedModel = mandatoryTokens !== undefined ? model ?? (await findModel(settings.copilotModelId)) : undefined;
-    if (!resolvedModel || mandatoryTokens === undefined) {
-      // No live token count available this time (either the mandatory-
-      // prompt measurement failed, or the model itself can't be resolved)
-      // — fall back to formatRagPromptSection()'s own fence-safe
-      // character-based packing, still benefiting from per-operation
-      // retrieval's wider candidate coverage even without a real
-      // token-budget guarantee. Stale candidates are excluded here too,
-      // same as the token-budget path below.
-      const eligibleCandidates = candidates.filter((c) => !staleFilePaths.has(c.match.filePath));
-      const { section, includedMatches } = formatRagPromptSection(
-        eligibleCandidates.map((c) => c.match),
-        settings.language
-      );
-      this.logRagPackingResult(plan, candidates, includedMatches, undefined);
-      return { section, matches: includedMatches };
-    }
-
-    const packed = await packOperationCandidates(candidates, plan.operations, settings.language, {
-      maxInputTokens: resolvedModel.maxInputTokens,
-      safetyMargin: PROMPT_TOKEN_SAFETY_MARGIN,
+    return packRagSection(plan, {
+      extensionContext: this.context,
+      settings,
       mandatoryTokens,
-      staleFilePaths,
-      countTokens: async (text) => {
-        try {
-          return await resolvedModel.countTokens(text);
-        } catch {
-          return undefined;
-        }
-      }
+      model,
+      cancellationToken,
+      logPrefix: 'Reusable components (RAG)',
+      onLog: (message) => this.outputChannel.appendLine(message)
     });
-    this.logRagPackingResult(plan, candidates, packed.includedMatches, packed.diagnostics);
-    const { section, includedMatches } = packed;
-    return { section, matches: includedMatches };
-  }
-
-  /** The set of `RagMatch.filePath` values currently `stale` or `missing`
-   * per Phase 5's active freshness check — see `buildRagSection()`'s own
-   * doc comment on why this is fetched (cached, never forced) on every
-   * request rather than only via the explicit manual command. Failures
-   * (workspace not resolvable, freshness check itself erroring) degrade to
-   * "nothing known stale" — never blocks code generation on a diagnostic
-   * feature failing. */
-  private async getStaleRagFilePaths(workspaceRoot: vscode.Uri): Promise<Set<string>> {
-    try {
-      const report = await getOrBuildFreshnessReport(workspaceRoot, {
-        onWarn: (message) => this.outputChannel.appendLine(`RAG Source Freshness: ${message}`)
-      });
-      return new Set(report.entries.filter((e) => e.state === 'stale' || e.state === 'missing').map((e) => e.filePath));
-    } catch (err) {
-      this.outputChannel.appendLine(`RAG Source Freshness: could not check freshness for this request (${err instanceof Error ? err.message : String(err)}) — proceeding without excluding any recipe.`);
-      return new Set();
-    }
   }
 
   /**
@@ -2960,40 +2801,6 @@ function readApiAutomationInstructions(): string {
   return readFileCachedSync(path.join(__dirname, '..', '..', 'prompts', 'api-automation-instructions.md'));
 }
 
-// "Auto Password Encryption" — the mandatory standard (what an ENC[v1:...]
-// token means and the exact rules for handling it) plus the two
-// language-specific decrypt-helper implementations the LLM is told to copy
-// verbatim into the generated file. See security/secretVault.ts and
-// security/uiPasswordRedactor.ts for where the tokens themselves come from.
-function readPasswordEncryptionStandard(): string {
-  return readFileCachedSync(path.join(__dirname, '..', '..', 'prompts', 'password-encryption-standard.md'));
-}
-function readSecretVaultTemplate(language: 'java' | 'python'): string {
-  const file = language === 'java' ? 'secret-vault-java.txt' : 'secret-vault-python.txt';
-  return readFileCachedSync(path.join(__dirname, '..', '..', 'prompts', file));
-}
-
-/** Appends the Auto Password Encryption standard + decrypt-helper section
- * to a prompt's `parts`, but ONLY when `content` actually contains at least
- * one `ENC[` token — a request with no credentials in it stays exactly as
- * lean as it was before this feature existed, rather than every single
- * prompt paying for a section it doesn't need. */
-function appendPasswordEncryptionSection(parts: string[], content: string, language: 'java' | 'python'): void {
-  if (!content.includes(secretVault.TOKEN_MARKER)) {
-    return;
-  }
-  const standard = readPasswordEncryptionStandard();
-  const template = readSecretVaultTemplate(language);
-  if (standard) {
-    parts.push(`\n## Mandatory standard — Auto Password Encryption (encrypted credential(s) present above)\n${standard}`);
-  }
-  if (template) {
-    parts.push(
-      `\n## Decrypt helper — include this exact ${language === 'java' ? 'Java' : 'Python'} code verbatim in the generated file\n\`\`\`${language}\n${template}\n\`\`\``
-    );
-  }
-}
-
 /** S04: pytest-bdd needs an explicit `@scenario(<path>, '<name>')` binding
  * per test function — the model has no reliable way to invent the real
  * relative path to a feature file it never actually receives, and
@@ -3363,30 +3170,6 @@ function describeCopilotFailure(err: unknown, message: string, customInstruction
   return isEmptyModelResponseError(message) ? buildEmptyResponseGuidance(message, customInstructionFileCount, !!ragSection) : message;
 }
 
-
-/** Bounds how much of a raw compiler/test-runner error goes into a modal
- * confirmation dialog's `detail` text — a full multi-KB stack trace reads
- * fine in the Output channel but would just be an unreadable wall of text
- * in a small popup. Keeps the TAIL (same convention as
- * execution/testExecutor.ts's own tailOutput()) since the actual failure
- * reason is almost always at the end of compiler/test output, not the
- * start. Always points to the Output channel for the untruncated version. */
-const MAX_DIALOG_ERROR_CHARS = 800;
-function truncateForDialog(output: string): string {
-  const trimmed = output.trim();
-  const body = trimmed.length > MAX_DIALOG_ERROR_CHARS ? `…${trimmed.slice(-MAX_DIALOG_ERROR_CHARS)}` : trimmed;
-  return `${body}\n\n(Full output is in the SoftPlay Output channel.)`;
-}
-
-/** Same idea as `truncateForDialog()` but for the AI Generated Code panel's
- * one-line status text (see AiCodePanel.setVerifyStatus()) — collapsed to a
- * single line and capped much shorter, so "Attempt 2 failed: <error>"
- * reads as a status line, not a dumped stack trace. */
-const MAX_STATUS_LINE_ERROR_CHARS = 180;
-function truncateForStatusLine(output: string): string {
-  const singleLine = output.trim().replace(/\s+/g, ' ');
-  return singleLine.length > MAX_STATUS_LINE_ERROR_CHARS ? `…${singleLine.slice(-MAX_STATUS_LINE_ERROR_CHARS)}` : singleLine;
-}
 
 /** A short, concrete nudge toward the syntax that's actually idiomatic for
  * the selected language/runtime version — stating the version number alone

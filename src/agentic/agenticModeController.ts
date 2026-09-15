@@ -1,29 +1,33 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as fs from 'fs';
 import { ObjectSpySettings, SettingsStore } from '../settings/settingsStore';
 import { readFileCachedSync, readWorkspaceFileCached } from '../cache/fileCache';
 import { CopilotUnavailableError, countModelTokens, extractCodeBlock, findModel } from '../llm/copilotClient';
 import { VSCodeCopilotToolCallingModel } from '../agent/vscodeCopilotToolCallingModel';
-import { getOrBuildRagIndex } from '../rag/ragIndexer';
-import { formatRagPromptSection } from '../rag/ragRetriever';
+import { checkEnvironment } from '../execution/environmentCheck';
+import { runVerifyFixAgent } from '../agent/verifyFixOrchestrator';
+import { truncateForDialog, truncateForStatusLine } from '../agent/verifyFixTextTruncation';
+import * as secretVault from '../security/secretVault';
+import { validateFeatureFileStructure } from '../bdd/gherkinStructuralValidator';
+import { encryptPasswordLiteralsInCode } from '../security/uiPasswordRedactor';
+import { encryptCredentialsInFreeText, maskCredentialsForLogging } from '../security/chatInstructionRedactor';
+import { appendPasswordEncryptionSection } from '../security/passwordEncryptionSection';
 import { planOperationsFromAgenticSegments, chunkTextForOperations } from '../rag/ragOperationPlanner';
-import { retrieveForOperations } from '../rag/ragOperationRetrieval';
-import { resolveHybridRetrieveMatches } from '../rag/ragHybridConfig';
+import { packRagSection } from '../rag/ragPackingPipeline';
 import { RAG_DRAFTS_FOLDER_SEGMENTS } from '../rag/ragCorpusGenerator';
 import { parseRagFile } from '../rag/ragFrontmatter';
-import { getOrBuildFreshnessReport } from '../rag/ragFreshnessService';
-import { packOperationCandidates } from '../rag/ragOperationPacking';
-import { PROMPT_TOKEN_SAFETY_MARGIN } from '../llm/tokenBudget';
 import { AiCodePanel } from '../panel/aiCodePanel';
 import { GeneratedFeaturePanel } from '../panel/generatedFeaturePanel';
-import { buildAgenticAutomationCodeChain, buildAgenticFeatureFileChain, buildAgenticTestCaseCsvChain, buildAgenticHumanTurnText } from './agenticChains';
+import { buildAgenticAutomationCodeChain, buildAgenticFeatureFileChain, buildAgenticTestCaseCsvChain, buildAgenticHumanTurnText, AgenticGenerationInput } from './agenticChains';
+import type { Runnable } from '@langchain/core/runnables';
 import { buildCsvPreview, detectAgenticFileKind, extractSegmentForFile } from './textIngestion';
 import { parseXlsxBuffer, buildXlsxPreview } from './xlsxIngestion';
 import { parseDocxBuffer, buildDocxPreview } from './docxIngestion';
 import { parsePdfBuffer, buildPdfPreview } from './pdfIngestion';
 import { InvalidTestCaseCsvError, normalizeTestCaseCsvResponse } from './csvTestCaseGenerator';
-import { isStaleRequest } from './agenticRequestEpoch';
-import { buildAgenticActionShape } from './agenticActionShape';
+import { parseCsvStrict, stringifyCsv, MalformedCsvError } from './csvUtils';
+import { buildAgenticActionShape, AgenticActionKind } from './agenticActionShape';
 import {
   AGENTIC_LEGACY_UNSUPPORTED_EXTENSIONS,
   AGENTIC_MAX_SEGMENT_CHARS,
@@ -70,6 +74,16 @@ import {
 const AGENTIC_MAX_RAW_FILE_BYTES = 10 * 1024 * 1024;
 
 const JIRA_TEMPLATE_RELATIVE_PATH = ['.github', 'Jira_test_case_template.md'];
+/** Item 7: an OPTIONAL real example CSV a team may drop next to the MD
+ * instructions file above — same base name, `.csv` instead of `.md`.
+ * Unlike the MD file, this is NEVER auto-scaffolded (see
+ * `readCsvTemplateExample()`'s own doc comment for why) — purely "if it's
+ * there, use it; if not, behavior is 100% unchanged." */
+const CSV_TEMPLATE_RELATIVE_PATH = ['.github', 'Jira_test_case_template.csv'];
+
+/** F07: see `readCsvTemplateExample()`'s own doc comment for the exact
+ * distinction this makes possible. */
+type CsvTemplateReadResult = { status: 'absent' } | { status: 'invalid'; reason: string } | { status: 'ok'; header: string[]; exampleRows: string[][] };
 
 export interface AgenticIngestResult {
   accepted: AgenticFileMeta[];
@@ -113,6 +127,34 @@ export class AgenticModeController implements vscode.Disposable {
   private codeCancellation: vscode.CancellationTokenSource | undefined;
   private featureCancellation: vscode.CancellationTokenSource | undefined;
   private csvCancellation: vscode.CancellationTokenSource | undefined;
+  // Item 4: deliberately its OWN field, never shared with codeCancellation —
+  // see verifyAndFixAgenticCode()'s own doc comment for why.
+  private verifyCancellation: vscode.CancellationTokenSource | undefined;
+
+  /** F02: `generateAutomationCode()` and `verifyAndFixAgenticCode()` have
+   * independent CANCELLATION (correctly — cancelling one must never cancel
+   * the other's own in-flight work), but they write the SAME `aiCodePanel`.
+   * This tracks which operation currently has the right to actually commit
+   * to it (`finish()`/a final `setVerifyStatus()`/re-enabling the Verify
+   * button) — set the moment EITHER operation starts, so starting one
+   * immediately supersedes the other's own eventual commit, without
+   * touching the other's unrelated cancellation token. See
+   * `isCurrentOperation()`'s own doc comment for the full ownership
+   * contract this and the per-kind cancellation fields together form. */
+  private aiCodePanelOwner: vscode.CancellationTokenSource | undefined;
+
+  /** F02: a simple monotonic counter giving every `verifyAndFixAgenticCode()`
+   * invocation its OWN scratch subdirectory — so two overlapping verify
+   * runs (e.g. a fast double-click, or a stale run still finishing after a
+   * new one started) can never share/corrupt each other's build
+   * artifacts, unlike sharing one fixed `.../agentic/<mode>/<language>`
+   * path across every invocation. */
+  private verifyOperationSeq = 0;
+
+  /** Same role as ObjectSpyPanel.MAX_VERIFY_ATTEMPTS — a hard cap on how
+   * many times Agentic Mode's own "Verify & Fix Code" actually EXECUTES
+   * the candidate code. */
+  private static readonly MAX_VERIFY_ATTEMPTS = 5;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -126,7 +168,7 @@ export class AgenticModeController implements vscode.Disposable {
     // apply for the SIDEBAR's own Start/View button (see their own doc
     // comments below). Without this, clicking Regenerate on already-open
     // content would silently do nothing, since content already exists.
-    this.aiCodePanel = new AiCodePanel(context, () => void this.generateAutomationCode(true), () => undefined, 'Agentic Mode — AI Generated Code');
+    this.aiCodePanel = new AiCodePanel(context, () => void this.generateAutomationCode(true), () => void this.verifyAndFixAgenticCode(), 'Agentic Mode — AI Generated Code');
     this.generatedFeaturePanel = new GeneratedFeaturePanel(context, () => void this.generateFeatureFile(true), 'Agentic Mode — Generated Feature File');
   }
 
@@ -138,6 +180,9 @@ export class AgenticModeController implements vscode.Disposable {
     this.featureCancellation?.dispose();
     this.csvCancellation?.cancel();
     this.csvCancellation?.dispose();
+    this.verifyCancellation?.cancel();
+    this.verifyCancellation?.dispose();
+    this.aiCodePanelOwner = undefined;
     this.aiCodePanel.dispose();
     this.generatedFeaturePanel.dispose();
   }
@@ -164,6 +209,10 @@ export class AgenticModeController implements vscode.Disposable {
     this.csvCancellation?.cancel();
     this.csvCancellation?.dispose();
     this.csvCancellation = undefined;
+    this.verifyCancellation?.cancel();
+    this.verifyCancellation?.dispose();
+    this.verifyCancellation = undefined;
+    this.aiCodePanelOwner = undefined;
 
     // Dropping every reference to the Map's own AgenticIngestedFile entries
     // (raw text AND any parsedXlsx/parsedDocx/parsedPdf structure) is what
@@ -199,6 +248,42 @@ export class AgenticModeController implements vscode.Disposable {
   // for the full reasoning on why this must be checked explicitly, every
   // time, immediately before any output/file/UI side effect, rather than
   // assumed from whether `chain.invoke()` itself threw.
+
+  /** F01/F08: the generalized "is THIS specific operation still the one
+   * that owns `field`?" check — used everywhere a `generate*()`/
+   * `verifyAndFixAgenticCode()` method needs to decide, after an `await`,
+   * whether it's still safe to commit a side effect (UI update, file
+   * write, token count). Three independent signals, ALL required:
+   * (1) `this[field] === cts` — a NEWER operation of the SAME kind hasn't
+   * superseded this one (the existing `isStaleRequest()`-style identity
+   * check every `generate*()` method already used); (2) `this.sessionEpoch
+   * === epoch` — `reset()`/`dispose()` hasn't run since this operation's
+   * own epoch was captured, even if (as `verifyAndFixAgenticCode()` used
+   * to allow, F01) that happened BEFORE this operation ever got around to
+   * assigning `this[field]` in the first place — a stale operation from a
+   * cleared session must never be mistaken for current just because
+   * nothing else has started since; (3) the token itself isn't already
+   * cancelled — matches every existing A13 check's own belt-and-suspenders
+   * reasoning (a provider can resolve successfully even after
+   * cancellation was requested). Callers MUST capture `epoch =
+   * this.sessionEpoch` and create+assign `cts` to `field` SYNCHRONOUSLY,
+   * before their first `await` — capturing either one late reopens
+   * exactly the gap this exists to close. */
+  private isCurrentOperation(
+    field: 'featureCancellation' | 'codeCancellation' | 'csvCancellation' | 'verifyCancellation',
+    cts: vscode.CancellationTokenSource,
+    epoch: number
+  ): boolean {
+    return this[field] === cts && this.sessionEpoch === epoch && !cts.token.isCancellationRequested;
+  }
+
+  /** F02: whether `cts` currently owns the SHARED `aiCodePanel` — see
+   * `aiCodePanelOwner`'s own doc comment. Checked in addition to (never
+   * instead of) `isCurrentOperation()` for that operation's OWN
+   * cancellation field, immediately before any `aiCodePanel` mutation. */
+  private ownsAiCodePanel(cts: vscode.CancellationTokenSource): boolean {
+    return this.aiCodePanelOwner === cts;
+  }
 
   // ------------------------------------------------------------------
   // Ingestion
@@ -570,16 +655,15 @@ export class AgenticModeController implements vscode.Disposable {
     return planOperationsFromAgenticSegments(this.lastUserRequest, fileSegments);
   }
 
-  /** Retrieves per operation and packs against the ACTUAL resolved model's
-   * real remaining token budget when `mandatoryTokens` (the caller's own
-   * already-measured cost of everything else in the prompt) is available;
-   * falls back to formatRagPromptSection()'s character-based packing
-   * (still benefiting from per-operation retrieval's wider coverage) when
-   * it isn't. `model`, when the caller already resolved one (every
-   * generation call site here does, via `resolveModel()`, before this is
-   * called), is reused rather than re-resolved — see
-   * objectSpyPanel.ts's own `buildRagSection()` for the identical pattern
-   * and its own doc comment on the full reasoning. */
+  /** Item 2 (dedupe): builds ITS OWN operation plan (from ingested-file
+   * segments — the one genuinely different piece between Standard and
+   * Agentic mode) and hands off to rag/ragPackingPipeline.ts's
+   * `packRagSection()` for everything after that (retrieve per operation,
+   * exclude known-stale recipes, pack against the real token budget,
+   * format) — the exact same pipeline `objectSpyPanel.ts`'s own
+   * `buildRagSection()` now also calls, instead of each maintaining an
+   * independent copy of this logic (previously duplicated here almost
+   * verbatim, per this method's own since-removed doc comment). */
   private async buildRagSection(
     settings: ObjectSpySettings,
     mandatoryTokens: number | undefined,
@@ -589,101 +673,17 @@ export class AgenticModeController implements vscode.Disposable {
     if (!settings.ragEnabled) {
       return '';
     }
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
-    if (!workspaceRoot) {
-      return '';
-    }
-    const index = await getOrBuildRagIndex(workspaceRoot, (message) => this.outputChannel.appendLine(`Agentic Mode RAG: ${message}`));
-    if (!index) {
-      return '';
-    }
-
     const plan = this.buildOperationPlan();
-    if (plan.operations.length === 0) {
-      return '';
-    }
-    // Phase 6 — see objectSpyPanel.ts's buildRagSection() for the identical
-    // pattern and its own doc comment: `undefined` (hybrid mode off, the
-    // default) falls straight through to plain lexical retrieval.
-    //
-    // A10: `cancellationToken` (this SAME generation request's own — every
-    // real call site below passes one) is bridged into a plain
-    // `AbortSignal` and forwarded to every per-operation semantic-embedding
-    // call this resolves to; `onSemanticFailure` reports a real (non-
-    // cancellation) semantic failure ONCE for this whole generation — see
-    // ragHybridConfig.ts's own doc comments for exactly what each does and
-    // why cancellation must never trigger this fallback-reporting path.
-    const retrieveMatches = await resolveHybridRetrieveMatches(this.context, settings, {
-      cancellationToken,
-      onSemanticFailure: (message) =>
-        this.outputChannel.appendLine(`Agentic Mode RAG: semantic (hybrid) retrieval failed for this request (${message}) — falling back to lexical-only matching for the rest of it.`)
-    });
-    if (retrieveMatches) {
-      this.outputChannel.appendLine('Agentic Mode RAG: hybrid (lexical + semantic, RRF-fused) retrieval is active for this request.');
-    }
-
-    // A08 — see objectSpyPanel.ts's buildRagSection() for the identical
-    // pattern and its own doc comment: fetched BEFORE retrieval (not
-    // after) and threaded INTO retrieveForOperations() itself, so a known
-    // stale/missing recipe is excluded from EACH operation's own
-    // per-operation top-k (and, in hybrid mode, from semantic embedding)
-    // rather than discarded from an already-truncated result afterward —
-    // the fix for a real reproduced gap where a fresh, usable recipe
-    // ranked just outside the per-operation top-k was never even
-    // retrieved, so no amount of later filtering could recover it.
-    const staleFilePaths = await this.getStaleRagFilePaths(workspaceRoot);
-
-    const candidates = await retrieveForOperations(index, plan.operations, settings.language, settings.automationMode, undefined, retrieveMatches, staleFilePaths);
-    if (candidates.length === 0) {
-      return '';
-    }
-    this.outputChannel.appendLine(
-      `Agentic Mode RAG: ${plan.operations.length} operation(s) planned, ${candidates.length} distinct candidate(s) retrieved — ${candidates.map((c) => c.match.id).join(', ')}.`
-    );
-
-    const resolvedModel = mandatoryTokens !== undefined ? (model ?? (await findModel(settings.copilotModelId))) : undefined;
-    if (!resolvedModel || mandatoryTokens === undefined) {
-      const eligibleCandidates = candidates.filter((c) => !staleFilePaths.has(c.match.filePath));
-      return formatRagPromptSection(
-        eligibleCandidates.map((c) => c.match),
-        settings.language
-      ).section;
-    }
-
-    const packed = await packOperationCandidates(candidates, plan.operations, settings.language, {
-      maxInputTokens: resolvedModel.maxInputTokens,
-      safetyMargin: PROMPT_TOKEN_SAFETY_MARGIN,
+    const { section } = await packRagSection(plan, {
+      extensionContext: this.context,
+      settings,
       mandatoryTokens,
-      staleFilePaths,
-      countTokens: async (text) => {
-        try {
-          return await resolvedModel.countTokens(text);
-        } catch {
-          return undefined;
-        }
-      }
+      model,
+      cancellationToken,
+      logPrefix: 'Agentic Mode RAG',
+      onLog: (message) => this.outputChannel.appendLine(message)
     });
-    if (packed.includedMatches.length < candidates.length) {
-      this.outputChannel.appendLine(
-        `Agentic Mode RAG: ${candidates.length - packed.includedMatches.length} candidate(s) omitted from the prompt — ` +
-          `${packed.diagnostics.omitted.map((o) => `${o.id} (${o.reason})`).join(', ')}.`
-      );
-    }
-    return packed.section;
-  }
-
-  /** See ObjectSpyPanel.getStaleRagFilePaths()'s own doc comment — the
-   * identical pattern for Agentic Mode. */
-  private async getStaleRagFilePaths(workspaceRoot: vscode.Uri): Promise<Set<string>> {
-    try {
-      const report = await getOrBuildFreshnessReport(workspaceRoot, {
-        onWarn: (message) => this.outputChannel.appendLine(`Agentic Mode RAG Source Freshness: ${message}`)
-      });
-      return new Set(report.entries.filter((e) => e.state === 'stale' || e.state === 'missing').map((e) => e.filePath));
-    } catch (err) {
-      this.outputChannel.appendLine(`Agentic Mode RAG Source Freshness: could not check freshness for this request (${err instanceof Error ? err.message : String(err)}) — proceeding without excluding any recipe.`);
-      return new Set();
-    }
+    return section;
   }
 
   private readSeniorQeInstructions(): string {
@@ -717,11 +717,94 @@ export class AgenticModeController implements vscode.Disposable {
     }
   }
 
+  /** F07/F06: the team's own REAL example CSV, if they dropped one at
+   * `.github/Jira_test_case_template.csv` — grounds both the prompt
+   * (see `buildCsvTemplateExampleSection()`) and the response validation
+   * (`generateTestCaseCsv()`'s call to `normalizeTestCaseCsvResponse()`)
+   * in the team's actual Jira import shape, rather than only the free-text
+   * column spec in the MD instructions file. Deliberately NEVER
+   * auto-scaffolded like the MD file is — a fabricated example CSV with
+   * made-up data would actively mislead the model, so this is either
+   * genuinely present (a real file the team maintains) or absent.
+   *
+   * F07: a THREE-way result — `'absent'` (no workspace, or the file
+   * genuinely doesn't exist — the common, unconfigured case, zero
+   * behavior change) is now distinguished from `'invalid'` (the file
+   * EXISTS but fails to parse, or its header is empty/has duplicate
+   * column names) — previously both collapsed into the same `undefined`,
+   * so a team with a genuinely broken template silently got treated as if
+   * they had none at all, with no indication anything was wrong. */
+  private async readCsvTemplateExample(): Promise<CsvTemplateReadResult> {
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!workspaceRoot) {
+      return { status: 'absent' };
+    }
+    const uri = vscode.Uri.joinPath(workspaceRoot, ...CSV_TEMPLATE_RELATIVE_PATH);
+    let bytes: Uint8Array;
+    try {
+      bytes = await vscode.workspace.fs.readFile(uri);
+    } catch {
+      return { status: 'absent' }; // doesn't exist — the normal, unconfigured case
+    }
+    let rows: string[][];
+    try {
+      rows = parseCsvStrict(new TextDecoder('utf-8').decode(bytes)).filter((row) => row.some((cell) => cell.trim().length > 0));
+    } catch (err) {
+      return { status: 'invalid', reason: err instanceof MalformedCsvError ? err.message : String(err) };
+    }
+    if (rows.length === 0) {
+      return { status: 'invalid', reason: 'The file has no parseable rows at all.' };
+    }
+    const [header, ...exampleRows] = rows;
+    if (header.every((cell) => cell.trim().length === 0)) {
+      return { status: 'invalid', reason: 'The file\'s header row is empty.' };
+    }
+    const seen = new Set<string>();
+    for (const cell of header) {
+      const trimmed = cell.trim();
+      if (!trimmed) {
+        return { status: 'invalid', reason: 'The header row has one or more empty column names.' };
+      }
+      if (seen.has(trimmed)) {
+        return { status: 'invalid', reason: `The header row has a duplicate column name: "${trimmed}".` };
+      }
+      seen.add(trimmed);
+    }
+    return { status: 'ok', header, exampleRows };
+  }
+
+  /** At most 2 example rows verbatim — a concrete few-shot pattern for
+   * realistic value density/formatting is the point, not reproducing the
+   * whole file; capped by ROW COUNT rather than `agenticExtractionUtils.ts`'s
+   * `capSegment()` (that helper's 60,000-char budget is sized for a whole
+   * ingested source FILE, a completely different scale than a couple of
+   * short template rows). */
+  private buildCsvTemplateExampleSection(template: { header: string[]; exampleRows: string[][] }): string {
+    const sample = stringifyCsv([template.header, ...template.exampleRows.slice(0, 2)]).trimEnd();
+    return (
+      `\n## Real example CSV template (from .github/Jira_test_case_template.csv) — your output MUST use EXACTLY ` +
+      `these ${template.header.length} column(s), in this exact order and with this exact header row. Study the ` +
+      `example row(s) below for realistic value density/formatting — every generated data row must be as fully ` +
+      `populated as they are; never leave a cell blank unless a column is genuinely inapplicable to that step.\n` +
+      `\`\`\`csv\n${sample}\n\`\`\``
+    );
+  }
+
   private async buildSystemInstructions(settings: ObjectSpySettings, ragSection: string, includeCsvTemplate: boolean): Promise<string> {
     const parts: string[] = [];
     if (includeCsvTemplate) {
       const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
       parts.push(workspaceRoot ? await this.readOrScaffoldJiraTemplate(workspaceRoot) : readFileCachedSync(path.join(__dirname, '..', '..', 'prompts', 'Jira_test_case_template.md')));
+      const csvTemplateExample = await this.readCsvTemplateExample();
+      if (csvTemplateExample.status === 'ok') {
+        parts.push(this.buildCsvTemplateExampleSection(csvTemplateExample));
+      } else if (csvTemplateExample.status === 'invalid') {
+        // F07: surfaced here too (not just at validation time) — the
+        // model should know its own grounding is missing, and the user
+        // sees this in the Output channel even before a response comes
+        // back, rather than only learning about it from a later error.
+        this.outputChannel.appendLine(`Agentic Mode: .github/Jira_test_case_template.csv exists but could not be used — ${csvTemplateExample.reason}`);
+      }
     } else {
       const isApiMode = settings.automationMode === 'api';
       parts.push(isApiMode ? this.readApiAutomationInstructions() : this.readSeniorQeInstructions());
@@ -803,8 +886,20 @@ export class AgenticModeController implements vscode.Disposable {
     });
   }
 
-  private async recordReceivedTokens(settings: ObjectSpySettings, text: string): Promise<void> {
+  /** F08: `isCurrent`, when given, is re-checked AFTER `countModelTokens()`'s
+   * own await — this method previously updated `this.lastReceivedTokens`/
+   * broadcast a token estimate UNCONDITIONALLY once its count resolved, so
+   * an old, already-superseded (or Clear-Data-cleared) operation's own
+   * late-arriving count could silently overwrite what a NEWER operation
+   * (or Clear Data's own "nothing to estimate yet" reset) had just shown.
+   * Callers pass their own `isCurrentOperation(...)` result AT THE MOMENT
+   * this resolves; omitted only by call sites with no operation identity
+   * of their own to check against. */
+  private async recordReceivedTokens(settings: ObjectSpySettings, text: string, isCurrent?: () => boolean): Promise<void> {
     const result = await countModelTokens(settings.copilotModelId, text);
+    if (isCurrent && !isCurrent()) {
+      return;
+    }
     this.lastReceivedTokens = result?.count ?? 0;
     this.getSidebarWebview()?.postMessage({
       type: 'tokenEstimate',
@@ -872,6 +967,50 @@ export class AgenticModeController implements vscode.Disposable {
     }
   }
 
+  /** Item 1 (dedupe): the identical LLM-call sequence every `generate*()`
+   * action below shares — resolve the model, build the ingested context,
+   * build this action's own immutable shape (A14), measure the mandatory
+   * (non-RAG) token cost, pack the RAG section against that budget, build
+   * the final system instructions, and invoke the chain. Returns the
+   * SETTINGS object it actually used alongside the result — not a fresh
+   * `this.settingsStore.get()` — so a caller's own post-generation step
+   * (`recordReceivedTokens()`) measures against the exact same model this
+   * request was actually sent to, even if the user changed Settings while
+   * this call's own `await`s were in flight.
+   *
+   * Deliberately stops HERE: committing the result (a panel's `.finish()`
+   * vs. CSV's own file-write/webview-status sequence) stays in each
+   * `generate*()` method below — those three tails are genuinely different
+   * in kind, not just cosmetically, and folding them into this same method
+   * would trade real duplication for a harder-to-read hooks/options
+   * parameter. */
+  private async runAgenticChain(
+    kind: AgenticActionKind,
+    cts: vscode.CancellationTokenSource,
+    chainFactory: (model: VSCodeCopilotToolCallingModel) => Runnable<AgenticGenerationInput, string>
+  ): Promise<{ result: string; settings: ObjectSpySettings }> {
+    const settings = this.settingsStore.get();
+    const chatModel = await this.resolveModel(settings);
+    const ingestedContext = this.buildIngestedContext(true);
+    // A14: the complete, immutable shape of this ONE action — computed
+    // ONCE and reused for BOTH the mandatory-only measurement below AND
+    // the actual chain.invoke() call — see buildAgenticActionShape()'s own
+    // doc comment for the exact bug this closes (measuring against a
+    // SMALLER structure than what's actually sent).
+    const shape = buildAgenticActionShape(kind, this.lastUserRequest, settings.language, settings.languageVersion);
+    // Measure the MANDATORY (non-RAG) cost first, reusing the model
+    // already resolved above — see buildRagSection()'s own doc comment.
+    const mandatorySystemInstructions = (await this.buildSystemInstructions(settings, '', shape.includeCsvTemplate)) + shape.directiveSuffix;
+    const mandatoryTokens = await this.measureAgenticRequestTokens(chatModel, mandatorySystemInstructions, ingestedContext, shape.effectiveUserRequest);
+    const ragSection = await this.buildRagSection(settings, mandatoryTokens, chatModel, cts.token);
+    const systemInstructions = (await this.buildSystemInstructions(settings, ragSection, shape.includeCsvTemplate)) + shape.directiveSuffix;
+    const chainLabel: Record<AgenticActionKind, string> = { feature: 'feature-file', code: 'automation-code', csv: 'manual-test-case-CSV' };
+    this.outputChannel.appendLine(`Agentic Mode — invoking the LangChain ${chainLabel[kind]} chain (ChatPromptTemplate -> Copilot -> StringOutputParser)...`);
+    const chain = chainFactory(new VSCodeCopilotToolCallingModel(chatModel, cts.token));
+    const result = await chain.invoke({ systemInstructions, ingestedContext, userRequest: shape.effectiveUserRequest });
+    return { result, settings };
+  }
+
   /** `forceRegenerate` — false (the default, used by the sidebar's own
    * "Start AI Feature File Generation"/"View AI Feature File Generation"
    * button) means: if a feature file is ALREADY sitting in memory from an
@@ -889,7 +1028,7 @@ export class AgenticModeController implements vscode.Disposable {
       return;
     }
 
-    const settings = this.settingsStore.get();
+    const epoch = this.sessionEpoch;
     this.featureCancellation?.cancel();
     this.featureCancellation?.dispose();
     const cts = new vscode.CancellationTokenSource();
@@ -898,27 +1037,7 @@ export class AgenticModeController implements vscode.Disposable {
     this.generatedFeaturePanel.show();
     this.generatedFeaturePanel.startGenerating();
     try {
-      const chatModel = await this.resolveModel(settings);
-      const ingestedContext = this.buildIngestedContext(true);
-      // A14: the complete, immutable shape of this ONE action — computed
-      // ONCE and reused for BOTH the mandatory-only measurement below AND
-      // the actual chain.invoke() call — see buildActionShape()'s own doc
-      // comment for the exact bug this closes (measuring against a
-      // SMALLER structure than what's actually sent).
-      const shape = buildAgenticActionShape('feature', this.lastUserRequest, settings.language, settings.languageVersion);
-      // Measure the MANDATORY (non-RAG) cost first, reusing the model
-      // already resolved above — see buildRagSection()'s own doc comment.
-      const mandatorySystemInstructions = (await this.buildSystemInstructions(settings, '', shape.includeCsvTemplate)) + shape.directiveSuffix;
-      const mandatoryTokens = await this.measureAgenticRequestTokens(chatModel, mandatorySystemInstructions, ingestedContext, shape.effectiveUserRequest);
-      const ragSection = await this.buildRagSection(settings, mandatoryTokens, chatModel, cts.token);
-      const systemInstructions = (await this.buildSystemInstructions(settings, ragSection, shape.includeCsvTemplate)) + shape.directiveSuffix;
-      this.outputChannel.appendLine('Agentic Mode — invoking the LangChain feature-file chain (ChatPromptTemplate -> Copilot -> StringOutputParser)...');
-      const chain = buildAgenticFeatureFileChain(new VSCodeCopilotToolCallingModel(chatModel, cts.token));
-      const result = await chain.invoke({
-        systemInstructions,
-        ingestedContext,
-        userRequest: shape.effectiveUserRequest
-      });
+      const { result, settings } = await this.runAgenticChain('feature', cts, buildAgenticFeatureFileChain);
       // A13: checked HERE — immediately before the FIRST output/UI side
       // effect this method commits — never assumed from whether
       // `chain.invoke()` itself threw (it may not have: see
@@ -927,19 +1046,42 @@ export class AgenticModeController implements vscode.Disposable {
       // result is discarded silently — reset()/a newer "Start"/"Regenerate"
       // click already owns whatever the user is now looking at, and this
       // response no longer corresponds to it.
-      if (isStaleRequest(cts, this.featureCancellation)) {
+      if (!this.isCurrentOperation('featureCancellation', cts, epoch)) {
         return;
       }
-      this.generatedFeaturePanel.finish(result.trim());
+      // Recorded regardless of whether validation below passes — the model
+      // genuinely responded and consumed real tokens either way, matching
+      // generateTestCaseCsv()'s own "record before validating" order.
+      void this.recordReceivedTokens(settings, result, () => this.isCurrentOperation('featureCancellation', cts, epoch));
+      // F09: a deterministic structural validation pass — see
+      // bdd/gherkinStructuralValidator.ts's own doc comment for its exact,
+      // explicitly-scoped checks (an unterminated doc string, a mismatched
+      // Examples table, and Item 5's original "at least one real Scenario
+      // block" check) and why this is NOT a claim of full Gherkin-spec
+      // conformance. Also normalizes exactly one outer Markdown fence, so
+      // a fenced-but-otherwise-valid feature is both ACCEPTED and saved
+      // WITHOUT the fence, rather than either wrongly rejected or saved
+      // with the fence still embedded in it. The raw response is never
+      // silently discarded on a failure — logged in full to the Output
+      // channel, so nothing is lost even though the panel itself only
+      // shows the error.
+      const validation = validateFeatureFileStructure(result.trim());
+      if (!validation.ok) {
+        this.outputChannel.appendLine(`Agentic Mode — feature file generation failed structural validation: ${validation.reason} Raw response:\n${result.trim()}`);
+        this.generatedFeaturePanel.showError(
+          `The generated content doesn't parse as a valid Gherkin feature file (${validation.reason}) — see the SoftPlay Output channel for the raw response. Try regenerating, or refine your request.`
+        );
+        return;
+      }
+      this.generatedFeaturePanel.finish(validation.normalized);
       this.postGenerationState();
-      void this.recordReceivedTokens(settings, result);
       cts.dispose(); // A13: a request that actually completed no longer needs its own token source kept around
     } catch (err) {
       // A13: an old request's own REJECTION must not overwrite a NEWER,
       // still-in-flight (or already-finished) request's panel state either
       // — checked before `showError()` for the exact same reason as the
       // success path above.
-      if (isStaleRequest(cts, this.featureCancellation)) {
+      if (!this.isCurrentOperation('featureCancellation', cts, epoch)) {
         return;
       }
       const message = err instanceof CopilotUnavailableError ? err.message : err instanceof Error ? err.message : String(err);
@@ -956,55 +1098,372 @@ export class AgenticModeController implements vscode.Disposable {
       return;
     }
 
-    const settings = this.settingsStore.get();
+    const epoch = this.sessionEpoch;
     this.codeCancellation?.cancel();
     this.codeCancellation?.dispose();
     const cts = new vscode.CancellationTokenSource();
     this.codeCancellation = cts;
+    // F02: claimed the moment this operation starts — see the field's own
+    // doc comment for why this must happen regardless of whatever
+    // `verifyAndFixAgenticCode()` might independently still be doing.
+    this.aiCodePanelOwner = cts;
 
-    this.aiCodePanel.setLanguage(settings.language);
+    this.aiCodePanel.setLanguage(this.settingsStore.get().language);
     this.aiCodePanel.show();
-    // "Verify & Fix Code" isn't wired up for Agentic Mode yet (this
-    // instance's onVerify is a deliberate no-op — see the constructor) —
-    // disabled rather than left silently non-functional, so clicking it
-    // never looks like it did nothing.
+    // Item 4: "Verify & Fix Code" is now wired up for Agentic Mode too
+    // (see verifyAndFixAgenticCode() below) — disabled only DURING
+    // generation, exactly like Standard mode's own AiCodePanel, rather than
+    // permanently disabled as a stub.
     this.aiCodePanel.setVerifyButtonEnabled(false);
     this.aiCodePanel.startGenerating();
     try {
-      const chatModel = await this.resolveModel(settings);
-      const ingestedContext = this.buildIngestedContext(true);
-      // A14 — see generateFeatureFile()'s identical shape construction and
-      // buildActionShape()'s own doc comment for the full reasoning.
-      const shape = buildAgenticActionShape('code', this.lastUserRequest, settings.language, settings.languageVersion);
-      // Measure the MANDATORY (non-RAG) cost first, reusing the model
-      // already resolved above — see buildRagSection()'s own doc comment.
-      const mandatorySystemInstructions = (await this.buildSystemInstructions(settings, '', shape.includeCsvTemplate)) + shape.directiveSuffix;
-      const mandatoryTokens = await this.measureAgenticRequestTokens(chatModel, mandatorySystemInstructions, ingestedContext, shape.effectiveUserRequest);
-      const ragSection = await this.buildRagSection(settings, mandatoryTokens, chatModel, cts.token);
-      const systemInstructions = (await this.buildSystemInstructions(settings, ragSection, shape.includeCsvTemplate)) + shape.directiveSuffix;
-      this.outputChannel.appendLine('Agentic Mode — invoking the LangChain automation-code chain (ChatPromptTemplate -> Copilot -> StringOutputParser)...');
-      const chain = buildAgenticAutomationCodeChain(new VSCodeCopilotToolCallingModel(chatModel, cts.token));
-      const result = await chain.invoke({
-        systemInstructions,
-        ingestedContext,
-        userRequest: shape.effectiveUserRequest
-      });
+      const { result, settings } = await this.runAgenticChain('code', cts, buildAgenticAutomationCodeChain);
       // A13 — see generateFeatureFile()'s identical check and
       // agenticRequestEpoch.ts's own doc comment for the full reasoning.
-      if (isStaleRequest(cts, this.codeCancellation)) {
+      // F02: ALSO requires still owning the shared panel — a verify run
+      // that started after this one must not have its own eventual result
+      // overwritten by this now-superseded generation.
+      if (!this.isCurrentOperation('codeCancellation', cts, epoch) || !this.ownsAiCodePanel(cts)) {
         return;
       }
       this.aiCodePanel.finish(extractCodeBlock(result));
+      this.aiCodePanel.setVerifyButtonEnabled(true);
+      // Item 5: the validation loop for generated code is "Verify & Fix
+      // Code" itself (Item 4) — never auto-triggered (that would silently
+      // compile/run code the user never asked to execute, crossing the
+      // "a human approves every execution" line — see verifyFixAgent.ts's
+      // own doc comment), just made visibly available the moment there's
+      // something to verify.
+      // F09: precise about what's automatic (this generation) vs. manual
+      // (the click) — nothing executes without the user's own approval.
+      this.aiCodePanel.setVerifyStatus('Generated. Click "Verify & Fix Code" to compile/run it — nothing executes without your approval.', 'info');
       this.postGenerationState();
-      void this.recordReceivedTokens(settings, result);
+      void this.recordReceivedTokens(settings, result, () => this.isCurrentOperation('codeCancellation', cts, epoch) && this.ownsAiCodePanel(cts));
       cts.dispose();
     } catch (err) {
-      if (isStaleRequest(cts, this.codeCancellation)) {
+      if (!this.isCurrentOperation('codeCancellation', cts, epoch) || !this.ownsAiCodePanel(cts)) {
         return;
       }
       const message = err instanceof CopilotUnavailableError ? err.message : err instanceof Error ? err.message : String(err);
       this.aiCodePanel.showError(message);
       this.outputChannel.appendLine(`Agentic Mode — automation code generation failed: ${message}`);
+    }
+  }
+
+  /**
+   * Item 4: "Verify & Fix Code" for Total Agentic Mode's own generated
+   * code — mirrors `objectSpyPanel.ts`'s `verifyAndFixCode()`/
+   * `runVerifyFixAgentPath()` almost exactly (same environment check, same
+   * scratch-dir-under-globalStorage convention, the SAME `runVerifyFixAgent()`
+   * tool-calling agent with the SAME three tools and the SAME human-
+   * confirm-per-execution contract — see agent/verifyFixAgent.ts's own doc
+   * comment on why every execution needs a human's explicit go-ahead
+   * regardless of which mode generated the code). Zero new agent-loop code.
+   *
+   * The one real adaptation: Standard mode's "original context" is a
+   * recorded Playwright/API request; Agentic Mode has no such thing —
+   * instead, the fixing agent is given the SAME ingested-file context and
+   * user request that produced the code in the first place, so it can
+   * re-derive what the code was actually supposed to do. If a feature file
+   * was ALSO generated this session, its content is written to a scratch
+   * file and handed to `read_feature_file` the same way Standard mode's
+   * linked scenario is — otherwise that tool simply reports nothing linked
+   * (see verifyFixTools.ts's own `undefined`-handling).
+   *
+   * Uses its OWN `verifyCancellation` field — deliberately NOT shared with
+   * `codeCancellation` (the generation flow). Standard mode originally
+   * shared one field between generation and verify/fix and had to retrofit
+   * `llmCancellationOwner` after finding a real cross-flow cancellation bug
+   * (see objectSpyPanel.ts's own doc comment on that field) — a separate
+   * field here avoids ever needing that fix in the first place.
+   */
+  private async verifyAndFixAgenticCode(): Promise<void> {
+    // F01: reserved SYNCHRONOUSLY, before ANY await below — see
+    // `isCurrentOperation()`'s own doc comment for exactly why. Previously
+    // this only happened much later (after the editor-read/environment-
+    // check/mkdir/feature-write awaits), so a reset()/Clear Data during any
+    // of those had nothing yet to cancel, and this method could still go on
+    // to start the agent for a session the user had just cleared.
+    const epoch = this.sessionEpoch;
+    this.verifyCancellation?.cancel();
+    this.verifyCancellation?.dispose();
+    const cts = new vscode.CancellationTokenSource();
+    this.verifyCancellation = cts;
+    // F02: claims the shared aiCodePanel immediately — a fresh
+    // generateAutomationCode() click starting after this point must not
+    // let THIS run's own eventual commit land on top of it, and vice versa.
+    this.aiCodePanelOwner = cts;
+    // F02: this operation's own scratch subdirectory — never shared with
+    // any other verify invocation (overlapping runs, or a stale one still
+    // finishing after a newer click), so build artifacts can never collide.
+    const operationId = ++this.verifyOperationSeq;
+
+    const isCurrent = () => this.isCurrentOperation('verifyCancellation', cts, epoch) && this.ownsAiCodePanel(cts);
+
+    const settings = this.settingsStore.get();
+    const isApiMode = settings.automationMode === 'api';
+    if (!settings.copilotEnabled || !settings.copilotModelId) {
+      if (isCurrent()) {
+        this.aiCodePanel.setVerifyStatus('Enable "Link with GitHub Copilot LLM" (Control Panel) and pick a model in Settings first.', 'error');
+      }
+      return;
+    }
+
+    const initialCode = await this.aiCodePanel.requestCurrentCode();
+    if (!isCurrent()) {
+      return;
+    }
+    if (!initialCode.trim()) {
+      void vscode.window.showWarningMessage('Nothing to verify — generate some AI code first.');
+      return;
+    }
+
+    this.aiCodePanel.setVerifyButtonEnabled(false);
+    try {
+      this.aiCodePanel.setVerifyStatus('Checking the local environment…', 'info');
+      const env = await checkEnvironment(settings.language, settings.automationMode, this.context.extensionUri.fsPath, this.context.globalStorageUri.fsPath);
+      if (!isCurrent()) {
+        return;
+      }
+      this.outputChannel.appendLine(`Agentic Mode Verify & Fix Code — environment check (${settings.language}, ${isApiMode ? 'API' : 'UI'} mode): ${env.ok ? 'OK' : 'FAILED'} — ${env.message}`);
+      if (!env.ok) {
+        this.aiCodePanel.setVerifyStatus(env.message, 'error');
+        void vscode.window.showErrorMessage(`SoftPlay: ${env.message}`);
+        return;
+      }
+      const pythonCommand = settings.language === 'python' ? env.pythonCommand ?? 'python' : '';
+
+      // F02: a separate 'agentic' subtree — never the same directory
+      // Standard mode's own verify/fix scratch dir uses — PLUS this one
+      // operation's own `verify-<operationId>` leaf, so no two verify runs
+      // (Standard vs. Agentic, or two overlapping Agentic ones) ever share
+      // build artifacts.
+      const scratchDir = path.join(this.context.globalStorageUri.fsPath, 'test-runner', 'agentic', settings.automationMode, settings.language, `verify-${operationId}`);
+      await fs.promises.mkdir(scratchDir, { recursive: true });
+      if (!isCurrent()) {
+        return;
+      }
+
+      // If a feature file was ALSO generated this session, give the agent
+      // something real to read via read_feature_file — written fresh every
+      // run so an edit to the Generated Feature File panel is picked up.
+      let linkedFeatureFilePath: string | undefined;
+      if (this.generatedFeaturePanel.hasContent()) {
+        linkedFeatureFilePath = path.join(scratchDir, 'generated.feature');
+        await fs.promises.writeFile(linkedFeatureFilePath, this.generatedFeaturePanel.getContent(), 'utf8');
+        if (!isCurrent()) {
+          return;
+        }
+      }
+
+      // F04: redact BEFORE any of this reaches a prompt — see
+      // security/passwordEncryptionSection.ts's own doc comment for
+      // exactly what these two redactors do and don't catch (password-
+      // shaped `.fill()`/`.type()` calls; connection-string/labeled-field
+      // credentials in free text — never a claim of universal secret
+      // detection). The agent operates on these ENCRYPTED versions
+      // throughout — its own run_code calls execute the encrypted
+      // candidate, never a plaintext one — so the model only ever
+      // sees/produces `ENC[...]` tokens. The runtime master key itself
+      // (`secretEnv` below) is unaffected — it already only ever reaches
+      // the executed child process's environment, never a prompt string.
+      const encryptedCode = (await encryptPasswordLiteralsInCode(this.context, initialCode, settings.language)).code;
+      const ingestedContextRaw = this.buildIngestedContext(true);
+      const encryptedIngestedContext = (await encryptCredentialsInFreeText(this.context, ingestedContextRaw)).text;
+      const encryptedUserRequest = (await encryptCredentialsInFreeText(this.context, this.lastUserRequest)).text;
+      if (!isCurrent()) {
+        return;
+      }
+
+      const builtInStandard = isApiMode ? this.readApiAutomationInstructions() : this.readSeniorQeInstructions();
+      // F04: the SAME mandatory standard + decrypt-helper section Standard
+      // mode's own fix-prompt builder appends — included whenever an
+      // ENC[...] token is actually present above, teaching the fixing
+      // agent to PRESERVE the token/helper through a repair rather than
+      // "simplifying" it back toward plaintext.
+      const encryptionParts: string[] = [];
+      appendPasswordEncryptionSection(encryptionParts, `${encryptedIngestedContext}\n${encryptedUserRequest}\n${encryptedCode}`, settings.language);
+      const encryptionSection = encryptionParts.join('\n\n');
+
+      const systemPrompt =
+        `You are an expert ${isApiMode ? 'API' : 'UI/Playwright'} test automation engineer working on an enterprise ` +
+        `QA codebase, operating as an autonomous fixing agent with tools. Your job: make the given ${settings.language} ` +
+        `file actually compile/run correctly, using the tools you're given rather than guessing blind.\n\n` +
+        `Rules:\n` +
+        `1. Call run_code FIRST with the file exactly as given, before changing anything — this captures the real, ` +
+        `current error.\n` +
+        `2. If it fails, use read_file and/or read_feature_file if you need more context, then call run_code again ` +
+        `with your corrected version of the COMPLETE file (never a diff or snippet).\n` +
+        `3. Fix ONLY what's necessary to resolve the reported error. Do not restructure or rewrite parts of the code ` +
+        `that aren't implicated by it. Keep the same class/file name, the same target language/runtime version` +
+        `${isApiMode ? '' : ', the same browser-executable launch override (never remove or weaken it)'}, and the ` +
+        `overall structure — this is a targeted fix, not a rewrite.\n` +
+        `4. Every fixed version you submit via run_code must still follow the mandatory refinement standard below, ` +
+        `in full.\n` +
+        `5. If run_code reports the user declined to run it, stop immediately — do not call any other tool.\n` +
+        (builtInStandard ? `\n## Mandatory refinement standard — every version you submit must follow every part of this\n${builtInStandard}` : '') +
+        encryptionSection;
+
+      const userPrompt =
+        `## Ingested input files and the original request this code was generated from (the ground truth for what ` +
+        `this code is supposed to do — refer back to this if the error suggests something was implemented incorrectly)\n` +
+        `${encryptedIngestedContext || '(no files were ingested for this generation)'}\n\n---\n\nThe original request:\n${encryptedUserRequest || '(none — the ingested files alone were the ask)'}\n\n` +
+        `## Current file to verify and, if necessary, fix\n\`\`\`${settings.language}\n${encryptedCode}\n\`\`\``;
+
+      this.outputChannel.appendLine(
+        `Agentic Mode Verify & Fix Code (agent) — starting with Copilot model "${settings.copilotModelId}": system prompt is ${systemPrompt.length} chars, user prompt is ${userPrompt.length} chars.`
+      );
+
+      let lastShownCode = encryptedCode;
+      let lastKnownError: string | undefined;
+      const result = await runVerifyFixAgent({
+        modelId: settings.copilotModelId,
+        systemPrompt,
+        userPrompt,
+        maxAttempts: AgenticModeController.MAX_VERIFY_ATTEMPTS,
+        maxSteps: AgenticModeController.MAX_VERIFY_ATTEMPTS * 3 + 2,
+        cancellationToken: cts.token,
+        runCodeDeps: {
+          language: settings.language,
+          scratchDir,
+          linkedFeatureFilePath,
+          pythonCommand,
+          automationMode: settings.automationMode,
+          resourcesRoot: this.context.extensionUri.fsPath,
+          secretEnv: await secretVault.getSecretEnv(this.context),
+          // F03: rechecked by the shared tool itself immediately before
+          // executing, AFTER confirmRun() resolves — closes the race where
+          // a Clear Data/cancel fires while the confirmation dialog is
+          // still open and "Yes" is answered afterward. See
+          // verifyFixTools.ts's own doc comment on this field.
+          cancellationToken: cts.token
+        },
+        confirmRun: async (attempt, maxAttempts, lastErrorOutput) => {
+          const choice = await vscode.window.showWarningMessage(
+            attempt === 1
+              ? `Run the AI-generated code now to verify it ${isApiMode ? 'compiles/parses' : 'executes headless'} without errors?`
+              : `Attempt ${attempt} of ${maxAttempts}: re-run the agent-fixed code to verify it now ${isApiMode ? 'compiles/parses' : 'executes headless'} without errors?`,
+            lastErrorOutput ? { modal: true, detail: truncateForDialog(lastErrorOutput) } : { modal: true },
+            'Yes',
+            'No'
+          );
+          return choice === 'Yes';
+        },
+        onOutput: (line) => this.outputChannel.appendLine(maskCredentialsForLogging(line)),
+        onStep: (log) => {
+          // F04: masked before it ever reaches the Output channel — a tool
+          // call/result can carry the model's own candidate code or the
+          // executor's raw stdout/stderr, either of which could still
+          // contain a plaintext value despite the encryption pass above
+          // (e.g. a fix that reverts a token, or an error message that
+          // echoes an input value back).
+          this.outputChannel.appendLine(`Agentic Mode Verify & Fix Code (agent) — [${log.kind}${log.toolName ? `:${log.toolName}` : ''}] ${maskCredentialsForLogging(log.detail)}`);
+          if (!isCurrent()) {
+            return;
+          }
+          if (log.kind === 'tool_call' && log.toolName === 'run_code') {
+            try {
+              const args = JSON.parse(log.detail) as { code?: string };
+              if (typeof args.code === 'string' && args.code !== lastShownCode) {
+                lastShownCode = args.code;
+                this.aiCodePanel.finish(args.code);
+                this.postGenerationState();
+              }
+            } catch {
+              // Malformed tool-call args JSON — cosmetic only.
+            }
+          }
+          if (log.kind === 'tool_result' && log.toolName === 'run_code') {
+            try {
+              const parsed = JSON.parse(log.detail) as { signal?: string; output?: string };
+              if (parsed.signal !== 'success' && typeof parsed.output === 'string') {
+                lastKnownError = parsed.output;
+              }
+            } catch {
+              // Malformed/unexpected tool-result JSON — nothing to react to.
+            }
+          }
+        }
+      });
+
+      if (!isCurrent()) {
+        return;
+      }
+
+      switch (result.stopReason) {
+        case 'success': {
+          const compileOnly = Boolean(result.raw?.compileOnly);
+          const apiCallOutcome = result.raw?.apiCallOutcome as 'passed' | 'failed' | 'not-run' | undefined;
+          if (result.finalCode) {
+            this.aiCodePanel.finish(result.finalCode);
+            this.postGenerationState();
+          }
+          if (compileOnly) {
+            this.aiCodePanel.setVerifyStatus(
+              'Compiled successfully — BDD step definitions have no generated runner to fully execute yet, so this is a compile check, not a confirmed run.',
+              'success'
+            );
+          } else if (isApiMode) {
+            this.aiCodePanel.setVerifyStatus(
+              apiCallOutcome === 'failed'
+                ? 'Code Correctness Confirmed — no syntax errors. The live API call itself returned an error response (see the SoftPlay Output channel) — recheck the endpoint URL/credentials and try again in your own IDE/test package.'
+                : 'Code Correctness Confirmed — compiled cleanly and the API call succeeded.',
+              'success'
+            );
+          } else {
+            this.aiCodePanel.setVerifyStatus('Code Correctness Confirmed — ran headless without errors.', 'success');
+          }
+          return;
+        }
+        case 'declined':
+          this.aiCodePanel.setVerifyStatus(
+            `${result.summary}${lastKnownError ? ` Last error: ${truncateForStatusLine(lastKnownError)}` : ''} Current code's errors are shown in the SoftPlay Output channel for manual fixing.`,
+            'error'
+          );
+          return;
+        case 'max_steps':
+          this.aiCodePanel.setVerifyStatus(`${result.summary}${lastKnownError ? ` Last error: ${truncateForStatusLine(lastKnownError)}` : ''}`, 'error');
+          return;
+        case 'no_further_action':
+          this.aiCodePanel.setVerifyStatus(
+            `Copilot stopped without a confirmed fix: ${result.summary}${lastKnownError ? ` Last error: ${truncateForStatusLine(lastKnownError)}` : ''}`,
+            'error'
+          );
+          return;
+        case 'cancelled':
+          return;
+        case 'error': {
+          const message = result.error instanceof Error ? result.error.message : String(result.error ?? result.summary);
+          this.aiCodePanel.setVerifyStatus(`Verify & Fix Code failed: ${message}`, 'error');
+          this.outputChannel.appendLine(`Agentic Mode Verify & Fix Code — the tool-calling agent failed unexpectedly: ${message}`);
+          return;
+        }
+      }
+    } catch (err) {
+      // F05: covers the preflight (env check, mkdir, feature-file write,
+      // secretVault.getSecretEnv(), model resolution) throwing — the
+      // previous `try/finally` had no `catch` at all, so any of these
+      // could become an unhandled rejection (the panel callback invokes
+      // this method with `void`) and leave the user stuck on the last
+      // in-progress status forever. Never falls back to a legacy loop
+      // (Agentic Mode has none) and never re-runs an already-approved
+      // execution — just reports what happened.
+      if (!isCurrent()) {
+        return;
+      }
+      if (cts.token.isCancellationRequested) {
+        return; // cancellation is cancellation, not a failure to report
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      this.aiCodePanel.setVerifyStatus(`Verify & Fix Code failed: ${message}`, 'error');
+      this.outputChannel.appendLine(`Agentic Mode Verify & Fix Code — failed before/during orchestration: ${message}`);
+    } finally {
+      // F02: an old, already-superseded operation must never re-enable a
+      // button a NEWER operation (generation or a fresher verify) is still
+      // using.
+      if (this.ownsAiCodePanel(cts)) {
+        this.aiCodePanel.setVerifyButtonEnabled(true);
+      }
     }
   }
 
@@ -1031,7 +1490,7 @@ export class AgenticModeController implements vscode.Disposable {
       }
     }
 
-    const settings = this.settingsStore.get();
+    const epoch = this.sessionEpoch;
     this.csvCancellation?.cancel();
     this.csvCancellation?.dispose();
     const cts = new vscode.CancellationTokenSource();
@@ -1040,36 +1499,25 @@ export class AgenticModeController implements vscode.Disposable {
     const webview = this.getSidebarWebview();
     webview?.postMessage({ type: 'agentic:csvStatus', payload: { state: 'generating' } });
     try {
-      const chatModel = await this.resolveModel(settings);
-      const ingestedContext = this.buildIngestedContext(true);
-      // A14 — see generateFeatureFile()'s identical shape construction and
-      // buildActionShape()'s own doc comment for the full reasoning. CSV
-      // has no directiveSuffix to append (see that method's own comment on
-      // why), but still shares the SAME "measure exactly what gets sent"
-      // fix for its own effective (fallback-substituted) user request.
-      const shape = buildAgenticActionShape('csv', this.lastUserRequest, settings.language, settings.languageVersion);
-      // Measure the MANDATORY (non-RAG) cost first, reusing the model
-      // already resolved above — see buildRagSection()'s own doc comment.
-      const mandatorySystemInstructions = (await this.buildSystemInstructions(settings, '', shape.includeCsvTemplate)) + shape.directiveSuffix;
-      const mandatoryTokens = await this.measureAgenticRequestTokens(chatModel, mandatorySystemInstructions, ingestedContext, shape.effectiveUserRequest);
-      const ragSection = await this.buildRagSection(settings, mandatoryTokens, chatModel, cts.token);
-      const systemInstructions = (await this.buildSystemInstructions(settings, ragSection, shape.includeCsvTemplate)) + shape.directiveSuffix;
-      this.outputChannel.appendLine('Agentic Mode — invoking the LangChain manual-test-case-CSV chain (ChatPromptTemplate -> Copilot -> StringOutputParser)...');
-      const chain = buildAgenticTestCaseCsvChain(new VSCodeCopilotToolCallingModel(chatModel, cts.token));
-      const result = await chain.invoke({
-        systemInstructions,
-        ingestedContext,
-        userRequest: shape.effectiveUserRequest
-      });
+      const { result, settings } = await this.runAgenticChain('csv', cts, buildAgenticTestCaseCsvChain);
       // A13 — see generateFeatureFile()'s identical check and
       // agenticRequestEpoch.ts's own doc comment for the full reasoning.
       // Checked here BEFORE directory creation/write/status-reporting even
       // starts.
-      if (isStaleRequest(cts, this.csvCancellation)) {
+      if (!this.isCurrentOperation('csvCancellation', cts, epoch)) {
         return;
       }
-      const normalized = normalizeTestCaseCsvResponse(result);
-      void this.recordReceivedTokens(settings, result);
+      // Item 7/F07: grounds validation in the team's REAL example CSV when
+      // one exists and is valid at .github/Jira_test_case_template.csv —
+      // `'absent'` (the common, unconfigured case) behaves exactly as
+      // before this feature existed. `'invalid'` is now a real, actionable
+      // error (F07) rather than silently falling through as if unconfigured.
+      const csvTemplateExample = await this.readCsvTemplateExample();
+      if (csvTemplateExample.status === 'invalid') {
+        throw new Error(`.github/Jira_test_case_template.csv exists but could not be used: ${csvTemplateExample.reason} Fix or remove it, then try again.`);
+      }
+      const normalized = normalizeTestCaseCsvResponse(result, csvTemplateExample.status === 'ok' ? csvTemplateExample : undefined);
+      void this.recordReceivedTokens(settings, result, () => this.isCurrentOperation('csvCancellation', cts, epoch));
 
       const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
       if (!workspaceRoot) {
@@ -1082,28 +1530,43 @@ export class AgenticModeController implements vscode.Disposable {
       // ACTUAL write below (the review's own explicit "reset immediately
       // before write" scenario) — never assume nothing changed just
       // because it didn't a few lines up.
-      if (isStaleRequest(cts, this.csvCancellation)) {
+      if (!this.isCurrentOperation('csvCancellation', cts, epoch)) {
         return;
       }
       const fileName = `manual-test-cases-${timestampForFileName()}.csv`;
       const outUri = vscode.Uri.joinPath(outDir, fileName);
       await vscode.workspace.fs.writeFile(outUri, new TextEncoder().encode(normalized.content));
+      // F08: re-checked AFTER the write itself resolves — a reset()/newer
+      // click landing DURING the write must not let this stale operation
+      // still claim `lastCsvUri`, report "done," or open the file. The
+      // write already happened and its file is left on disk (timestamped,
+      // never colliding with another run's own output) — simply never
+      // treated as this session's "current" CSV, and never opened.
+      if (!this.isCurrentOperation('csvCancellation', cts, epoch)) {
+        return;
+      }
       this.lastCsvUri = outUri;
       this.postGenerationState();
       cts.dispose();
 
       webview?.postMessage({
         type: 'agentic:csvStatus',
-        payload: { state: 'done', message: `Saved ${normalized.rowCount} step row(s), ${normalized.columnCount} column(s) to ${vscode.workspace.asRelativePath(outUri)}.` }
+        payload: { state: 'done', message: `Saved ${normalized.rowCount} step row(s), ${normalized.columnCount} column(s) to ${vscode.workspace.asRelativePath(outUri)}.${normalized.populationNote}` }
       });
       const document = await vscode.workspace.openTextDocument(outUri);
+      // F08: one more boundary — opening the document is itself an await;
+      // a reset()/newer click between the message above and the editor
+      // actually opening must not surface a stale document either.
+      if (!this.isCurrentOperation('csvCancellation', cts, epoch)) {
+        return;
+      }
       await vscode.window.showTextDocument(document, { viewColumn: vscode.ViewColumn.Beside, preview: false });
     } catch (err) {
       // A13: an old/superseded/cancelled request's own rejection (or an
       // error thrown by this method's own body, e.g. "no workspace open")
       // must not report a stale status over a newer request's own
       // in-progress or already-completed one.
-      if (isStaleRequest(cts, this.csvCancellation)) {
+      if (!this.isCurrentOperation('csvCancellation', cts, epoch)) {
         return;
       }
       const message =

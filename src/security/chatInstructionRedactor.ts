@@ -112,3 +112,26 @@ export async function encryptCredentialsInFreeText(context: vscode.ExtensionCont
 
   return { text: labelValuePass.text, count };
 }
+
+/** F04: a purely SYNCHRONOUS sibling of `encryptCredentialsInFreeText()`
+ * for LOGGING, not prompt content — a log line has no need for a
+ * reversible `ENC[...]` token (nothing ever decrypts a log line back into
+ * a working credential), so this just masks a match to a fixed
+ * `[REDACTED]` placeholder using the SAME two detection patterns, with no
+ * vault/async round-trip. Used by Total Agentic Mode's Verify & Fix Code
+ * (`agenticModeController.ts`) to sanitize tool call/result text before it
+ * reaches the Output channel — the exact same residual-risk scope as
+ * `encryptCredentialsInFreeText()` itself (password-shaped `.fill()`/
+ * `.type()` calls are uiPasswordRedactor.ts's job, not this function's;
+ * a free-text secret in neither of these two shapes is not detected). */
+export function maskCredentialsForLogging(text: string): string {
+  if (!text) {
+    return text;
+  }
+  return text
+    .replace(CONNECTION_STRING_CREDENTIAL_PATTERN, (_full, scheme: string, username: string) => `${scheme}${username}:[REDACTED]@`)
+    .replace(LABEL_VALUE_PATTERN, (_full, label: string, separator: string, dq?: string, sq?: string, bare?: string) => {
+      const quote = dq !== undefined ? '"' : sq !== undefined ? "'" : '';
+      return `${label}${separator}${quote}[REDACTED]${quote}`;
+    });
+}

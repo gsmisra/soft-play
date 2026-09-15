@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import type * as vscode from 'vscode';
 import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
 import { executeGeneratedCode, ExecutionResult } from '../execution/testExecutor';
@@ -74,6 +75,19 @@ export interface RunCodeToolDeps {
    * approving another run with no idea what just went wrong. */
   confirmRun: (attempt: number, maxAttempts: number, lastErrorOutput?: string) => Promise<boolean>;
   onOutput: (line: string) => void;
+  /** F03: rechecked IMMEDIATELY AFTER `confirmRun()` resolves, before
+   * `execute()` is ever called — closes a real race `confirmRun()`'s own
+   * await can't protect against on its own: a Clear Data/cancel firing
+   * WHILE the confirmation dialog is still open, answered "Yes" anyway
+   * once it's back. Checking cancellation only BETWEEN agent turns (the
+   * orchestrator's own loop) can't catch this — the race is entirely
+   * inside this one tool call's own await. Optional so an existing caller
+   * that never passes it (there are none left after this fix, but the
+   * field itself must not become a breaking required addition) behaves
+   * exactly as before — never blocked. Shared by BOTH Standard mode's
+   * `objectSpyPanel.ts` and Total Agentic Mode's `agenticModeController.ts`,
+   * since this tool itself is shared. */
+  cancellationToken?: vscode.CancellationToken;
   /** Test-only override for `executeGeneratedCode()` — see
    * `ExecuteGeneratedCodeFn` above. Never set by real callers
    * (verifyFixOrchestrator.ts), which always get the real implementation. */
@@ -103,6 +117,13 @@ export function createRunCodeTool(deps: RunCodeToolDeps) {
       const proceed = await deps.confirmRun(attempt, deps.maxAttempts, deps.lastFailureOutput.value);
       if (!proceed) {
         return JSON.stringify({ signal: 'declined', summary: `The user declined to run attempt ${attempt} of ${deps.maxAttempts}.` });
+      }
+      // F03: rechecked HERE, immediately after confirmRun() resolves and
+      // before execute() is ever called — the confirmation dialog's own
+      // await is exactly the window a Clear Data/cancel firing WHILE it was
+      // open, answered "Yes" afterward, would otherwise slip through.
+      if (deps.cancellationToken?.isCancellationRequested) {
+        return JSON.stringify({ signal: 'declined', summary: 'Cancelled before this attempt actually ran.' });
       }
 
       deps.onOutput(`Verify & Fix Code (agent) — running attempt ${attempt}/${deps.maxAttempts}…`);

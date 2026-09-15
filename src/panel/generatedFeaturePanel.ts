@@ -52,6 +52,17 @@ export class GeneratedFeaturePanel implements vscode.Disposable {
     return this.featureText.trim().length > 0;
   }
 
+  /** Item 4 (Agentic Mode Verify & Fix Code): the raw in-memory feature-file
+   * text, for a caller that needs to hand it to something other than this
+   * panel's own webview — e.g. agenticModeController.ts writing it to a
+   * scratch file so the fix-agent's `read_feature_file` tool has something
+   * real to read, the same way Standard mode's linked-scenario feature file
+   * does. Empty string when nothing's been generated yet — same convention
+   * as `hasContent()`. */
+  getContent(): string {
+    return this.featureText;
+  }
+
   show(): void {
     if (this.panel) {
       this.panel.reveal(vscode.ViewColumn.Beside);
