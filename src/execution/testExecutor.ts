@@ -134,6 +134,20 @@ const JUNIT_JUPITER_VERSION = '5.11.0';
 const SLF4J_VERSION = '2.0.13';
 const CUCUMBER_VERSION = '7.18.0';
 const JUNIT_PLATFORM_SUITE_VERSION = '1.11.0';
+const SUREFIRE_PLUGIN_VERSION = '3.2.5';
+/** The ONLY version of `maven-compiler-plugin` actually vendored in
+ * `resources/java/m2repo` (see that folder's own README) — explicitly
+ * pinned in the generated pom (see `javaPomXml()` below) rather than left
+ * to Maven's own environment-dependent default-plugin-binding resolution,
+ * which is exactly what caused a real, reported failure: on a locked-down
+ * machine with no Maven Central egress, Maven silently fell back to
+ * whatever its own defaults resolved to given only this bundled repo —
+ * this SAME 3.1 — but with NOTHING in the pom pinning it explicitly, that
+ * was an accident of environment rather than a guarantee. Deliberately
+ * this old (pre-`maven.compiler.release`-support) version, not a newer
+ * one — see `javaPomXml()`'s own doc comment on why `source`/`target`
+ * (not `release`) are used for exactly this reason. */
+const COMPILER_PLUGIN_VERSION = '3.1';
 
 /**
  * Playwright Java's own "driver-bundle" dependency ships Node.js binaries
@@ -221,7 +235,8 @@ export function javaPomXml(bdd: boolean, automationMode: AutomationMode, resourc
   <artifactId>SoftPlay-runner</artifactId>
   <version>1.0.0</version>
   <properties>
-    <maven.compiler.release>${languageVersion}</maven.compiler.release>
+    <maven.compiler.source>${languageVersion}</maven.compiler.source>
+    <maven.compiler.target>${languageVersion}</maven.compiler.target>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
   </properties>
   <dependencies>${primaryDep}
@@ -241,8 +256,13 @@ export function javaPomXml(bdd: boolean, automationMode: AutomationMode, resourc
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>${COMPILER_PLUGIN_VERSION}</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
-        <version>3.2.5</version>${surefireConfig}
+        <version>${SUREFIRE_PLUGIN_VERSION}</version>${surefireConfig}
       </plugin>
     </plugins>
   </build>
