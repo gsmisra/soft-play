@@ -396,3 +396,58 @@ test('runLlmRefinement(): unrelated chat instructions never pull in the database
   assert.equal(c.output, '// ok');
   assert.equal(c.errored, undefined);
 });
+
+// ---------------------------------------------------------------------
+// RAG usage reminder (buildRagUsageReminder() in objectSpyPanel.ts) — a
+// user reported that offered reusable components were ignored by the LLM
+// (banner: "N reusable components were offered... no call evidence was
+// observed"). Root cause: the full "## Reusable components available"
+// section is placed early in the prompt, well before the Linked
+// Gherkin/free-text-instructions sections — both of which this codebase's
+// own existing comments already document as deliberately placed LAST
+// because "a model weighs what it reads most recently more heavily". This
+// verifies the fix: a short restatement of the RAG usage rule is now ALSO
+// placed at the very end (recency), right before the free-text
+// instructions block, whenever a RAG section was actually included.
+// ---------------------------------------------------------------------
+
+test('runLlmRefinement(): a non-empty RAG section gets a recency-boosted usage reminder near the end of the prompt', async () => {
+  let capturedPrompt = '';
+  const c = makeController((p) => {
+    capturedPrompt = p;
+  });
+  c.nativeGeneratedCode = 'some recorded code';
+  c.linkedScenario = undefined;
+  c.buildRagSection = async () => ({
+    section: '\n## Reusable components available — reuse ONLY the ones that genuinely fit\n### 1. Query Postgres (id: `pg-1`)',
+    matches: [{ id: 'pg-1' }]
+  });
+
+  await c.runLlmRefinement([], 'some recorded code', '');
+
+  assert.match(capturedPrompt, /Reusable components reminder \(read this again before writing the final code\)/);
+  assert.match(capturedPrompt, /copy its import statement EXACTLY, character for character/);
+  // Recency: the reminder must appear AFTER the full RAG section itself,
+  // not merely somewhere in the prompt.
+  const ragSectionIndex = capturedPrompt.indexOf('Reusable components available — reuse ONLY');
+  const reminderIndex = capturedPrompt.indexOf('Reusable components reminder');
+  assert.ok(ragSectionIndex >= 0 && reminderIndex > ragSectionIndex, 'the reminder must come AFTER the full RAG section, not before it');
+  assert.equal(c.output, '// ok');
+  assert.equal(c.errored, undefined);
+});
+
+test('runLlmRefinement(): no RAG section means no usage reminder either (zero cost when RAG had nothing to offer)', async () => {
+  let capturedPrompt = '';
+  const c = makeController((p) => {
+    capturedPrompt = p;
+  });
+  c.nativeGeneratedCode = 'some recorded code';
+  c.linkedScenario = undefined;
+  c.buildRagSection = async () => ({ section: '', matches: [] });
+
+  await c.runLlmRefinement([], 'some recorded code', '');
+
+  assert.doesNotMatch(capturedPrompt, /Reusable components reminder/);
+  assert.equal(c.output, '// ok');
+  assert.equal(c.errored, undefined);
+});

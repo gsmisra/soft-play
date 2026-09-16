@@ -106,15 +106,15 @@ test('when counting is unavailable, the unmeasured policy is followed and clearl
 
 test('a candidate covering ONLY an already-covered operation is reported as "duplicate", not "budget"', async () => {
   // Measured directly with these exact IDs: 1 recipe (100-char body) ->
-  // ~1293 chars (~324 tokens); 2 such recipes together -> ~1499 chars
-  // (~375 tokens). A 340-token budget fits exactly one, forcing the
+  // ~1584 chars (~396 tokens); 2 such recipes together -> ~1790 chars
+  // (~448 tokens). A 420-token budget fits exactly one, forcing the
   // lower-scored, same-operation "redundant" one to be dropped.
   const candidates = [
     candidate('helper-primary', ['op-0'], 100, 0.9),
     candidate('helper-redundant', ['op-0'], 100, 0.5) // same operation, lower score — genuinely redundant
   ];
   const operations = [op('op-0')];
-  const result = await packOperationCandidates(candidates, operations, 'java', options({ maxInputTokens: 340, safetyMargin: 1 }));
+  const result = await packOperationCandidates(candidates, operations, 'java', options({ maxInputTokens: 420, safetyMargin: 1 }));
   assert.deepEqual(result.includedMatches.map((m) => m.id), ['helper-primary']);
   const redundantOmission = result.diagnostics.omitted.find((o) => o.id === 'helper-redundant');
   assert.ok(redundantOmission, 'helper-redundant must be omitted under this budget');
@@ -123,16 +123,16 @@ test('a candidate covering ONLY an already-covered operation is reported as "dup
 
 test('coverage-first ordering: an uncovered operation is prioritized over a redundant extra for an already-covered one', async () => {
   // Measured directly with these exact IDs: 3 recipes (100-char bodies)
-  // -> ~1681 chars (~421 tokens); the 2 that survive dropping the last
-  // (redundant + b) -> ~1481 chars (~371 tokens). A 390-token budget
-  // fits exactly those 2, not all 3.
+  // -> ~1972 chars (~493 tokens); the 2 that survive dropping the last
+  // (redundant, keeping primary+b) -> ~1766 chars (~442 tokens). A
+  // 460-token budget fits exactly those 2, not all 3.
   const candidates = [
     candidate('helper-redundant', ['op-0'], 100, 0.95), // highest score, but op-0 gets covered either way
     candidate('helper-primary', ['op-0'], 100, 0.9),
     candidate('helper-b', ['op-1'], 100, 0.5) // lower score, but the ONLY thing covering op-1
   ];
   const operations = [op('op-0'), op('op-1')];
-  const result = await packOperationCandidates(candidates, operations, 'java', options({ maxInputTokens: 390, safetyMargin: 1 }));
+  const result = await packOperationCandidates(candidates, operations, 'java', options({ maxInputTokens: 460, safetyMargin: 1 }));
   const includedIds = result.includedMatches.map((m) => m.id);
   assert.ok(includedIds.includes('helper-b'), 'the only candidate covering op-1 should be prioritized over a redundant op-0 duplicate');
   assert.equal(includedIds.length, 2, 'exactly 2 of the 3 should fit under this budget');
@@ -141,15 +141,15 @@ test('coverage-first ordering: an uncovered operation is prioritized over a redu
 test('deterministic tie-breaking: equal-priority candidates always order the same way regardless of input order', async () => {
   // Both cover a DIFFERENT, not-yet-covered operation with the SAME score
   // — a genuine tie broken only by capability ID. Measured directly with
-  // these exact IDs: 1 recipe (100-char body) -> ~1275 chars (~319
-  // tokens); both together -> ~1457 chars (~365 tokens). A 340-token
+  // these exact IDs: 1 recipe (100-char body) -> ~1566 chars (~392
+  // tokens); both together -> ~1748 chars (~437 tokens). A 410-token
   // budget fits exactly one, so which one gets kept must be deterministic
   // either way.
   const a = candidate('helper-a', ['op-0'], 100, 0.9);
   const b = candidate('helper-b', ['op-1'], 100, 0.9);
   const operations = [op('op-0'), op('op-1')];
-  const resultForward = await packOperationCandidates([a, b], operations, 'java', options({ maxInputTokens: 340, safetyMargin: 1 }));
-  const resultReversed = await packOperationCandidates([b, a], operations, 'java', options({ maxInputTokens: 340, safetyMargin: 1 }));
+  const resultForward = await packOperationCandidates([a, b], operations, 'java', options({ maxInputTokens: 410, safetyMargin: 1 }));
+  const resultReversed = await packOperationCandidates([b, a], operations, 'java', options({ maxInputTokens: 410, safetyMargin: 1 }));
   assert.equal(resultForward.includedMatches.length, 1, 'only one of the two should fit under this budget');
   assert.deepEqual(
     resultForward.includedMatches.map((m) => m.id),

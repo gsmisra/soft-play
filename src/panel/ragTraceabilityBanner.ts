@@ -26,6 +26,31 @@ import type { RagMatch } from '../rag/ragRetriever';
  * used"/"verified" — that distinction is the whole point of this file.
  */
 
+/** The two independent heuristic signals behind `hasObservedCallEvidence()`,
+ * exposed separately so a caller can tell "used per its traceability
+ * comment, but its own import string was never found anywhere in the
+ * code" apart from a genuinely clean match with BOTH signals present — the
+ * exact situation a model that adds the comment but writes the wrong (or
+ * no) import for it produces, which a single boolean can't distinguish.
+ * See `hasObservedCallEvidence()`'s own doc comment for what each signal
+ * does and doesn't prove. */
+export interface CallEvidenceDetail {
+  hasTraceabilityComment: boolean;
+  hasImportSymbol: boolean;
+}
+
+/** Computes both signals at once — the shared implementation behind
+ * `hasObservedCallEvidence()` (which two callers, and every existing test,
+ * already depend on as a plain boolean) and
+ * `prependRagTraceabilityBanner()`'s finer-grained import-alignment
+ * caveat below. */
+export function detectCallEvidence(code: string, match: RagMatch, language: 'java' | 'python'): CallEvidenceDetail {
+  const hasTraceabilityComment = code.includes(`RAG match: ${match.id}`);
+  const importSymbols = match.imports?.[language] ?? [];
+  const hasImportSymbol = importSymbols.some((imp) => imp.trim().length > 0 && code.includes(imp));
+  return { hasTraceabilityComment, hasImportSymbol };
+}
+
 /** Whether `code` shows OBSERVED (heuristic, not verified) evidence that
  * `match` was called — checked two ways: (1) the model followed
  * rag/ragRetriever.ts's own "add a `RAG match: <id> (from <source file>)`
@@ -39,11 +64,8 @@ import type { RagMatch } from '../rag/ragRetriever';
  * would both satisfy this check too). Neither signal is proof — see this
  * file's own top-level doc comment. */
 export function hasObservedCallEvidence(code: string, match: RagMatch, language: 'java' | 'python'): boolean {
-  if (code.includes(`RAG match: ${match.id}`)) {
-    return true;
-  }
-  const importSymbols = match.imports?.[language] ?? [];
-  return importSymbols.some((imp) => imp.trim().length > 0 && code.includes(imp));
+  const { hasTraceabilityComment, hasImportSymbol } = detectCallEvidence(code, match, language);
+  return hasTraceabilityComment || hasImportSymbol;
 }
 
 export interface TraceabilityBannerResult {
@@ -97,8 +119,10 @@ export function prependRagTraceabilityBanner(
     return { code, observedMatches: [] };
   }
   const c = language === 'python' ? '#' : '//';
-  const observedMatches = matches.filter((m) => hasObservedCallEvidence(code, m, language));
-  if (observedMatches.length === 0) {
+  const evidenceByMatch = matches.map((m) => ({ match: m, evidence: detectCallEvidence(code, m, language) }));
+  const observed = evidenceByMatch.filter((e) => e.evidence.hasTraceabilityComment || e.evidence.hasImportSymbol);
+  const observedMatches = observed.map((e) => e.match);
+  if (observed.length === 0) {
     // No heuristic evidence for anything — still worth a single honest
     // line (never silently drop this information) rather than either a
     // full banner implying components with no evidence were used, or
@@ -109,10 +133,25 @@ export function prependRagTraceabilityBanner(
       observedMatches: []
     };
   }
-  const unobservedCount = matches.length - observedMatches.length;
+  const unobservedCount = matches.length - observed.length;
   const banner = [
     `${c} ── RAG-matched reusable component(s) — call evidence OBSERVED (heuristic, not verified) ──`,
-    ...observedMatches.map((m) => `${c} - "${m.title}" (id: ${m.id}) — from ${relativePathOf(m.filePath)}`),
+    ...observed.map(({ match: m, evidence }) => {
+      // Comment present but the recipe's OWN declared import string was
+      // never independently found anywhere in the code — the exact
+      // situation a model that adds the traceability comment but writes
+      // the wrong (or no) import for it produces, which a plain "was this
+      // used" boolean can't distinguish from a genuinely clean match. Only
+      // raised when the recipe actually HAS a declared import for this
+      // language to compare against — a component with none (e.g. a
+      // config/data-only helper) has nothing to flag here.
+      const declaredImports = m.imports?.[language] ?? [];
+      const importCaveat =
+        evidence.hasTraceabilityComment && !evidence.hasImportSymbol && declaredImports.length > 0
+          ? " ⚠ used per its traceability comment, but its own declared import wasn't found verbatim in this file — double-check the import/package path actually matches."
+          : '';
+      return `${c} - "${m.title}" (id: ${m.id}) — from ${relativePathOf(m.filePath)}${importCaveat}`;
+    }),
     unobservedCount > 0 ? `${c} (${unobservedCount} additional component(s) were offered but showed no observed call evidence, omitted above.)` : undefined,
     `${c} ────────────────────────────────────────────────────────────────────`,
     ''

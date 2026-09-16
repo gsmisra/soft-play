@@ -99,3 +99,41 @@ test('uses "#" comment syntax for python, "//" for java', () => {
   assert.match(result.code, /^#/);
   assert.doesNotMatch(result.code.split('\n')[0], /^\/\//);
 });
+
+// --- import-alignment caveat (comment present, but the recipe's own
+// declared import string never independently found in the code) ---------
+
+test('a match used per its traceability comment WITH its own import also present gets no import caveat', () => {
+  const match = makeMatch({ id: 'postgres-helper', imports: { java: ['com.acme.testutil.PostgresHelper'] } });
+  const code = '// RAG match: postgres-helper (from postgres-helper.md)\nimport com.acme.testutil.PostgresHelper;\nPostgresHelper.queryOne(conn, sql);';
+  const result = prependRagTraceabilityBanner(code, [match], 'java', relativePathOf);
+  assert.doesNotMatch(result.code, /double-check the import\/package path/);
+});
+
+test('a match used per its traceability comment WITHOUT its own import present anywhere gets an explicit import-mismatch caveat', () => {
+  const match = makeMatch({ id: 'postgres-helper', imports: { java: ['com.acme.testutil.PostgresHelper'] } });
+  // The model added the traceability comment, and calls something plausibly
+  // named the same, but the recipe's OWN fully-qualified import string is
+  // nowhere in this file — exactly the case the user reported: the model
+  // used the component conceptually but didn't align the import path.
+  const code = '// RAG match: postgres-helper (from postgres-helper.md)\nimport com.other.pkg.PostgresHelper;\nPostgresHelper.queryOne(conn, sql);';
+  const result = prependRagTraceabilityBanner(code, [match], 'java', relativePathOf);
+  assert.match(result.code, /postgres-helper.*double-check the import\/package path actually matches/);
+  // Still correctly counted as observed — this is a caveat, not a
+  // demotion back to "no evidence".
+  assert.deepEqual(result.observedMatches, [match]);
+});
+
+test('a match with no declared imports for this language at all never gets a spurious import caveat', () => {
+  const match = makeMatch({ id: 'config-helper', imports: undefined });
+  const code = '// RAG match: config-helper (from config-helper.md)\nvar x = ConfigHelper.get();';
+  const result = prependRagTraceabilityBanner(code, [match], 'java', relativePathOf);
+  assert.doesNotMatch(result.code, /double-check the import\/package path/);
+});
+
+test('a match used via import-symbol evidence alone (no comment at all) never gets the comment-only caveat', () => {
+  const match = makeMatch({ id: 'postgres-helper', imports: { java: ['com.acme.testutil.PostgresHelper'] } });
+  const code = 'import com.acme.testutil.PostgresHelper;\nPostgresHelper.queryOne(conn, sql);';
+  const result = prependRagTraceabilityBanner(code, [match], 'java', relativePathOf);
+  assert.doesNotMatch(result.code, /double-check the import\/package path/);
+});

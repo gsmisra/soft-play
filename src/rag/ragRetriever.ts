@@ -472,13 +472,16 @@ const RAG_SECTION_HEADER = [
   'These are LEXICAL retrieval matches, not verified fits — each surfaced because its title/tags/path/code ' +
     "shares vocabulary with this request, not because it was confirmed to be right for this specific step. " +
     "Before reusing one, check its operation, parameter types/order, and preconditions actually match what this " +
-    'step needs. If they do: add the exact import shown below and call it exactly as shown in its example — ' +
-    "don't reimplement it, don't modify its own implementation. If they don't (different operation, mismatched " +
-    "parameters, an unmet precondition, or just the wrong tool), write fresh code instead — never force an " +
-    "unrelated or partially-fitting component in just because it was retrieved. Using NONE of them is a valid " +
-    'outcome. TRACEABILITY (only for a component you actually use): the first time you call it, add a one-line ' +
-    'comment directly above the call, in this exact form (this language\'s own comment syntax): "RAG match: ' +
-    '<component id> (from <source file>)", using the exact id/source file shown below.'
+    "step needs. If they do, you MUST use it instead of writing equivalent logic yourself from scratch — call it " +
+    "exactly as shown in its example, without modifying its own implementation, AND copy its import statement " +
+    "EXACTLY as printed under \"Required imports\" below, character for character — never invent, abbreviate, " +
+    "shorten, or restructure the package path, even if a different path looks equally plausible to you. If they " +
+    "don't genuinely fit (different operation, mismatched parameters, an unmet precondition, or just the wrong " +
+    "tool), write fresh code instead — never force an unrelated or partially-fitting component in just because it " +
+    "was retrieved. Using NONE of them is a valid outcome when none genuinely fit. TRACEABILITY (only for a " +
+    "component you actually use): the first time you call it, add a one-line comment directly above the call, in " +
+    'this exact form (this language\'s own comment syntax): "RAG match: <component id> (from <source file>)", ' +
+    'using the exact id/source file shown below.'
 ].join('\n');
 
 /** `importEntries` are parsed import entries (see `importsFor()`) —

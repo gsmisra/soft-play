@@ -3018,6 +3018,13 @@ async function buildApiLlmPrompt(
     }
   }
 
+  // Recency-boosted restatement of the RAG usage rule — see
+  // buildRagUsageReminder()'s own doc comment.
+  const ragReminder = buildRagUsageReminder(ragSection);
+  if (ragReminder) {
+    parts.push(ragReminder);
+  }
+
   // Free-text instructions from the chat composer ("Add any details for
   // the AI to follow…") — deliberately LAST, same reasoning as
   // buildLlmPrompt()'s identical block: a model weighs what it reads most
@@ -3264,6 +3271,39 @@ function describeCopilotFailure(
   return isEmptyModelResponseError(message) ? buildEmptyResponseGuidance(message, customInstructionFileCount, !!ragSection, measuredTokens) : message;
 }
 
+/**
+ * A short reminder restating the "## Reusable components available"
+ * section's own usage rule, placed at the very END of the prompt —
+ * immediately before the free-text "Additional instructions from the
+ * user" block, i.e. the LAST thing the model reads before generating (same
+ * position/reasoning as that block's own doc comment, and the Linked
+ * Gherkin section's S02 restatement above it: "a model weighs what it
+ * reads most recently more heavily", and this document alone can run well
+ * over a thousand lines by the time RAG's full section — placed much
+ * earlier, right after the mandatory refinement standard — is reached).
+ *
+ * This is PRIMACY (the full section, with each component's title/body/
+ * imports) plus RECENCY (this short restatement) for the same instruction,
+ * not a duplicate of the same content — the full section is never
+ * repeated here, only the compliance rule itself: use a genuinely-fitting
+ * component instead of reimplementing it, and copy its import EXACTLY.
+ * `''` when there's no RAG section to remind about, so a request RAG had
+ * nothing to offer for costs nothing extra here either. */
+function buildRagUsageReminder(ragSection: string): string {
+  if (!ragSection) {
+    return '';
+  }
+  return (
+    `\n## ⚠ Reusable components reminder (read this again before writing the final code)\n` +
+    `Earlier in this prompt, under "## Reusable components available", you were offered existing helper(s) to ` +
+    `reuse. Before writing any new code from scratch, check that section again: for each one, if its operation, ` +
+    `parameters, and preconditions genuinely match what you're building here, you MUST use it instead of writing ` +
+    `equivalent logic yourself — and when you do, copy its import statement EXACTLY, character for character, ` +
+    `from that section's own "Required imports" list, never a guessed, abbreviated, or restructured package path. ` +
+    `If none of them genuinely fit this specific step, using none is still correct — never force an unrelated or ` +
+    `partially-fitting one in just to satisfy this reminder.`
+  );
+}
 
 /** A short, concrete nudge toward the syntax that's actually idiomatic for
  * the selected language/runtime version — stating the version number alone
@@ -3536,6 +3576,15 @@ function buildLlmPrompt(
         parts.push(pythonBinding);
       }
     }
+  }
+
+  // Recency-boosted restatement of the RAG usage rule — see
+  // buildRagUsageReminder()'s own doc comment for why this needs to be
+  // repeated here rather than trusting the full section stated much
+  // earlier (right after the mandatory refinement standard) alone.
+  const ragReminder = buildRagUsageReminder(ragSection);
+  if (ragReminder) {
+    parts.push(ragReminder);
   }
 
   // Free-text instructions from the chat composer ("Add any details for
