@@ -1158,6 +1158,19 @@
     stagedInstructions.push(text);
     chatInput.value = '';
     autoResizeChatInput();
+    notifyChatInstructionsStaged();
+  }
+
+  // Keeps the extension host's `lastCustomInstructions` continuously in
+  // sync with every message actually staged so far -- independent of
+  // whether "Start AI Code Generation"/"Start AI Feature File Generation"
+  // has been (or will ever be) clicked for it, so a later "Regenerate AI
+  // Code" click (a separate webview panel with no chat box of its own)
+  // still picks up a message staged after the most recent full send.
+  // Deliberately only the STAGED bubbles, never the still-unsent draft --
+  // see chatInstructionsStaged's own doc comment in objectSpyPanel.ts.
+  function notifyChatInstructionsStaged() {
+    vscode.postMessage({ type: 'chatInstructionsStaged', payload: { customInstructions: stagedInstructions.join('\n\n') } });
   }
 
   function appendChatBubble(text) {

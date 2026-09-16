@@ -56,6 +56,20 @@ type InboundMessage =
   | { type: 'browseApiFormFile'; payload: { rowId: number } }
   | { type: 'clearApiData' }
   | { type: 'updateDraftContext'; payload: { code: string; customInstructions: string; selectedFiles: string[]; apiDetails?: ApiRequestDetails } }
+  /** Posted every time the sidebar's chat composer actually STAGES a
+   * message (Enter/➤ — see stageChatMessage() in main.js) — independent of
+   * whether "Start AI Code Generation"/"Start AI Feature File Generation"
+   * has been (or will ever be) clicked for it. Keeps `lastCustomInstructions`
+   * continuously in sync with every message the user has actually sent,
+   * so a LATER "Regenerate AI Code" click (a completely separate webview
+   * panel with no chat box of its own — see regenerateAiCode()'s own doc
+   * comment) — or a fresh generation started without retyping anything —
+   * still picks up a message staged after the most recent full send.
+   * Deliberately NOT the same as `updateDraftContext`'s customInstructions
+   * (which also includes whatever's still unsent/being typed, for the
+   * live token-estimate PREVIEW only) — typing must never itself count as
+   * "sent" here, only an actually staged bubble does. */
+  | { type: 'chatInstructionsStaged'; payload: { customInstructions: string } }
   // Total Agentic Mode — routed straight to AgenticModeController/
   // AgenticIngestionPanel (agentic/agenticModeController.ts,
   // panel/agenticIngestionPanel.ts); ObjectSpyPanel itself never inspects
@@ -528,6 +542,13 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
           message.payload.selectedFiles,
           message.payload.apiDetails
         );
+        break;
+      case 'chatInstructionsStaged':
+        // Same assignment sendToLlm()/generateFeatureFile() already make —
+        // see this message type's own doc comment above for why this needs
+        // to happen independently of either of those actually being
+        // triggered.
+        this.lastCustomInstructions = message.payload.customInstructions.trim();
         break;
       case 'agentic:ready':
         this.agenticController.postFileList();

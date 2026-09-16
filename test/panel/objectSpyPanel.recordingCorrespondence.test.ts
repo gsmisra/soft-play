@@ -209,6 +209,11 @@ interface FakeController {
   getEncryptSecret: () => (plaintext: string) => Promise<string>;
   runLlmRefinement: (instructions: unknown[], code: string, customInstructions: string) => Promise<void>;
   recordingMayNotCoverScenario: (scenario: TestScenario | undefined) => boolean;
+  lastCustomInstructions: string;
+  lastApiRequestDetails: undefined;
+  selectedInstructionFiles: string[];
+  handleMessage: (message: unknown) => Promise<void>;
+  regenerateAiCode: () => Promise<void>;
 }
 
 function makeController(capturePrompt: (prompt: string) => void): FakeController {
@@ -228,6 +233,9 @@ function makeController(capturePrompt: (prompt: string) => void): FakeController
   c.outputChannel = { appendLine: () => undefined };
   c.nativeGeneratedCode = '';
   c.recordingAssociatedScenarioKey = undefined;
+  c.lastCustomInstructions = '';
+  c.lastApiRequestDetails = undefined;
+  c.selectedInstructionFiles = [];
   c.buildRagSection = async () => ({ section: '', matches: [] });
   c.recordReceivedTokens = async () => undefined;
   c.postLlmStart = () => undefined;
@@ -448,6 +456,56 @@ test('runLlmRefinement(): no RAG section means no usage reminder either (zero co
   await c.runLlmRefinement([], 'some recorded code', '');
 
   assert.doesNotMatch(capturedPrompt, /Reusable components reminder/);
+  assert.equal(c.output, '// ok');
+  assert.equal(c.errored, undefined);
+});
+
+// ---------------------------------------------------------------------
+// chatInstructionsStaged wiring — a user asked: if a second chat message
+// is sent while (or after) a generation is already in flight, is it added
+// to the LLM context too? Answer traced from the real code: "Start AI Code
+// Generation" already accumulates every staged chat message correctly
+// (main.js's `stagedInstructions`/`collectInstructionsForGeneration()`),
+// but "Regenerate AI Code" lives in a COMPLETELY SEPARATE webview panel
+// with no chat box of its own — it only ever reads
+// `this.lastCustomInstructions`, which was previously updated ONLY by an
+// actual sendToLlm()/generateFeatureFile() call. A message staged in the
+// sidebar chat but never followed by clicking "Start AI Code Generation"
+// again was silently invisible to a "Regenerate AI Code" click. Fixed by
+// a new `chatInstructionsStaged` message, posted the moment a chat message
+// is actually staged (not merely typed), that keeps
+// `lastCustomInstructions` continuously in sync.
+// ---------------------------------------------------------------------
+
+test('handleMessage(chatInstructionsStaged) updates lastCustomInstructions, trimmed', async () => {
+  const c = makeController(() => undefined);
+  await c.handleMessage({ type: 'chatInstructionsStaged', payload: { customInstructions: '  message one\n\nmessage two  ' } });
+  assert.equal(c.lastCustomInstructions, 'message one\n\nmessage two');
+});
+
+test('a message staged AFTER the last "Start AI Code Generation" send is still picked up by a later "Regenerate AI Code" click', async () => {
+  let capturedPrompt = '';
+  const c = makeController((p) => {
+    capturedPrompt = p;
+  });
+  c.nativeGeneratedCode = 'some recorded code';
+  c.linkedScenario = undefined;
+
+  // Simulates: user sent "first message" via Start AI Code Generation
+  // earlier (lastCustomInstructions already set from that real send)...
+  c.lastCustomInstructions = 'first message';
+  // ...then, WITHOUT clicking "Start AI Code Generation" again, staged a
+  // second message in the sidebar chat box (main.js posts this the moment
+  // Enter/➤ is pressed) — before this fix, this text never reached the
+  // extension host at all until/unless a fresh full send happened.
+  await c.handleMessage({ type: 'chatInstructionsStaged', payload: { customInstructions: 'first message\n\nsecond message' } });
+
+  // Now the user clicks "Regenerate AI Code" in the separate AI Generated
+  // Code panel — it has no chat box of its own and relies entirely on
+  // lastCustomInstructions.
+  await c.regenerateAiCode();
+
+  assert.match(capturedPrompt, /second message/, 'the message staged after the last real send must still reach the regenerated prompt');
   assert.equal(c.output, '// ok');
   assert.equal(c.errored, undefined);
 });
