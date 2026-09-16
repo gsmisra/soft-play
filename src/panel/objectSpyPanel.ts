@@ -1784,6 +1784,13 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     // retry-without-RAG fallback in the catch block too, rather than each
     // independently re-resolving by model id string.
     let resolvedModel: vscode.LanguageModelChat | undefined;
+    // The exact prompt actually handed to streamCopilotResponse() below —
+    // kept in this outer scope (rather than the try block's own `const
+    // prompt`) so the catch block can, ONLY on a genuine failure, measure
+    // its REAL token count for `buildEmptyResponseGuidance()` — see that
+    // function's own doc comment on why a request that already measured
+    // comfortably under budget must not still be blamed on size.
+    let lastSentPrompt = '';
     try {
       builtIn = isApiMode ? readApiAutomationInstructions() : readSeniorQeInstructions();
       // Auto Password Encryption — never send a recorded password/credential
@@ -1896,6 +1903,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
             suggestedBaseName,
             recordingMismatch
           );
+      lastSentPrompt = prompt;
       // Diagnostic trail for exactly the question "was X actually sent, and
       // did a response come back?" — check the SoftPlay Output channel
       // (View -> Output -> SoftPlay) rather than needing to guess from a
@@ -1995,6 +2003,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
               suggestedBaseName,
               recordingMismatch
             );
+        lastSentPrompt = fallbackPrompt;
         this.postLlmStart(suggestedBaseName);
         try {
           const accumulated = await this.streamCopilotResponse(fallbackPrompt, settings.copilotModelId, cts, (chunk) => this.postLlmChunk(chunk), resolvedModel);
@@ -2016,12 +2025,14 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
           // Failed even WITHOUT RAG — the RAG section was never the actual
           // bottleneck, so say so plainly rather than leaving the user
           // thinking dropping RAG should have fixed it.
-          this.postLlmError(describeCopilotFailure(retryErr, retryMessage, instructions.length, ''));
+          const retryMeasured = await measureFailedPromptTokens(resolvedModel, lastSentPrompt);
+          this.postLlmError(describeCopilotFailure(retryErr, retryMessage, instructions.length, '', retryMeasured));
           return;
         }
       }
 
-      this.postLlmError(describeCopilotFailure(err, message, instructions.length, ragSection));
+      const measured = await measureFailedPromptTokens(resolvedModel, lastSentPrompt);
+      this.postLlmError(describeCopilotFailure(err, message, instructions.length, ragSection, measured));
     }
   }
 
@@ -3142,17 +3153,82 @@ function isEmptyModelResponseError(message: string): boolean {
   return normalized.includes('no choices') || normalized.includes('empty response') || normalized.includes('no completion');
 }
 
+/** A failed request's own actual token usage, measured REACTIVELY (only
+ * once a request has already failed) so `buildEmptyResponseGuidance()` can
+ * ground its explanation in real numbers instead of always defaulting to
+ * "the prompt was too large" — see that function's own doc comment for why
+ * this matters. `undefined` when there's no resolved model to count
+ * against, `prompt` is empty (nothing was actually sent yet), or the count
+ * itself throws — degrades to the old, size-agnostic wording, never a
+ * crash. Deliberately reactive (never measured on the success path) so
+ * this adds zero extra cost/latency to the overwhelming common case where
+ * nothing fails at all. */
+async function measureFailedPromptTokens(model: vscode.LanguageModelChat | undefined, prompt: string): Promise<{ sentTokens: number; maxInputTokens: number } | undefined> {
+  if (!model || !prompt) {
+    return undefined;
+  }
+  try {
+    return { sentTokens: await model.countTokens(prompt), maxInputTokens: model.maxInputTokens };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Fraction of a model's own `maxInputTokens` below which the request's
+ * OWN measured size is treated as "comfortably fits" — i.e. clear enough
+ * to actively rule out "the prompt was too large" as this failure's cause,
+ * not merely "didn't hit the hard PromptTooLargeError preflight." A generous
+ * threshold (half the model's real limit) deliberately errs toward NOT
+ * blaming size only when the evidence against it is strong. */
+const EMPTY_RESPONSE_SIZE_UNLIKELY_THRESHOLD = 0.5;
+
 /** Turns the raw, cryptic "Response contained no choices."-style provider
- * error into something the user can actually ACT on — this failure has no
- * single fixed cause (it's the model backend's own way of saying "this
- * request couldn't be completed", commonly but not exclusively an
- * oversized prompt for the selected model's context window), so this
- * names the concrete levers that actually shrink a request rather than
- * leaving the user to guess. `ragWasStillIncluded` distinguishes "this
- * failed WITH RAG content included, an automatic retry without it is
- * about to run/already ran" from "this failed even withOUT RAG — RAG was
- * never the actual bottleneck" so the guidance doesn't misdirect blame. */
-function buildEmptyResponseGuidance(rawMessage: string, customInstructionFileCount: number, ragWasStillIncluded: boolean): string {
+ * error into something the user can actually ACT on. This failure has no
+ * single fixed cause — it's the model backend's own generic way of saying
+ * "this request couldn't be completed" — and an oversized prompt is only
+ * ONE possible reason, not the only one. Unconditionally leading with "the
+ * prompt was probably too large" is actively misleading whenever
+ * `measuredTokens` shows the request measured well under the model's own
+ * limit: this extension's OWN preflight budget check (llm/copilotClient.ts's
+ * `PromptTooLargeError`) already runs BEFORE every request and would have
+ * refused to even send a genuinely oversized one, so reaching this "no
+ * choices" branch at all already means that check passed. When the
+ * measured evidence clearly rules size out, this instead points at the
+ * other realistic causes: a transient Copilot backend hiccup, a Copilot
+ * Chat sign-in/connectivity problem, or — notably common on a locked-down
+ * corporate/enterprise GitHub Copilot deployment — an organization-level
+ * content-exclusion or policy filter silently rejecting this specific
+ * request's content. `ragWasStillIncluded` distinguishes "this failed WITH
+ * RAG content included, an automatic retry without it is about to run/
+ * already ran" from "this failed even withOUT RAG — RAG was never the
+ * actual bottleneck" so the size-related guidance (when still shown)
+ * doesn't misdirect blame. */
+function buildEmptyResponseGuidance(
+  rawMessage: string,
+  customInstructionFileCount: number,
+  ragWasStillIncluded: boolean,
+  measuredTokens?: { sentTokens: number; maxInputTokens: number }
+): string {
+  const usageFraction = measuredTokens ? measuredTokens.sentTokens / measuredTokens.maxInputTokens : undefined;
+  const sizeUnlikely = usageFraction !== undefined && usageFraction < EMPTY_RESPONSE_SIZE_UNLIKELY_THRESHOLD;
+
+  const measurementNote = measuredTokens
+    ? `This request measured ${measuredTokens.sentTokens.toLocaleString()} of the selected model's ${measuredTokens.maxInputTokens.toLocaleString()}-token limit ` +
+      `(${Math.round((measuredTokens.sentTokens / measuredTokens.maxInputTokens) * 100)}%)${sizeUnlikely ? ' — well within budget, so an oversized prompt is unlikely to be the actual cause here' : ''}. `
+    : '';
+
+  if (sizeUnlikely) {
+    return (
+      `Copilot returned an empty response (no choices). ${measurementNote}` +
+      `Since size doesn't appear to be the cause, this is more likely a transient Copilot backend issue, a Copilot Chat ` +
+      `sign-in/connectivity problem, or — common on a locked-down corporate/enterprise GitHub Copilot deployment — an ` +
+      `organization-level content-exclusion or policy filter rejecting this specific request. Try again; confirm Copilot ` +
+      `Chat itself is signed in and responds normally outside SoftPlay; or check with whoever administers your ` +
+      `organization's GitHub Copilot policy about content-exclusion rules that might apply to this workspace. Check the ` +
+      `SoftPlay Output channel for the exact prompt size breakdown. Raw provider error: ${rawMessage}`
+    );
+  }
+
   const levers = [
     customInstructionFileCount > 0 ? `uncheck some of the ${customInstructionFileCount} checked Custom Instructions file(s)` : undefined,
     'select fewer Gherkin steps in the linked scenario (partial-selection mode sends a smaller prompt)',
@@ -3161,8 +3237,8 @@ function buildEmptyResponseGuidance(rawMessage: string, customInstructionFileCou
   ].filter((lever): lever is string => !!lever);
   return (
     `Copilot returned an empty response (no choices) — this usually means the combined prompt was too large or ` +
-    `otherwise rejected by the model backend, not a bug in the code you recorded. Things that actually shrink the ` +
-    `request: ${levers.join('; ')}. Check the SoftPlay Output channel for the exact prompt size breakdown. ` +
+    `otherwise rejected by the model backend, not a bug in the code you recorded. ${measurementNote}Things that actually ` +
+    `shrink the request: ${levers.join('; ')}. Check the SoftPlay Output channel for the exact prompt size breakdown. ` +
     `Raw provider error: ${rawMessage}`
   );
 }
@@ -3173,12 +3249,19 @@ function buildEmptyResponseGuidance(rawMessage: string, customInstructionFileCou
  * than wrapped in `buildEmptyResponseGuidance()`'s "empty response (no
  * choices)" wording, which would misdescribe a request this extension
  * itself declined to send. An "empty response" style error still gets
- * that guidance; anything else is shown as-is. */
-function describeCopilotFailure(err: unknown, message: string, customInstructionFileCount: number, ragSection: string): string {
+ * that guidance (now evidence-aware — see `measuredTokens`); anything else
+ * is shown as-is. */
+function describeCopilotFailure(
+  err: unknown,
+  message: string,
+  customInstructionFileCount: number,
+  ragSection: string,
+  measuredTokens?: { sentTokens: number; maxInputTokens: number }
+): string {
   if (err instanceof PromptTooLargeError) {
     return message;
   }
-  return isEmptyModelResponseError(message) ? buildEmptyResponseGuidance(message, customInstructionFileCount, !!ragSection) : message;
+  return isEmptyModelResponseError(message) ? buildEmptyResponseGuidance(message, customInstructionFileCount, !!ragSection, measuredTokens) : message;
 }
 
 
