@@ -19,6 +19,7 @@ function makeExecutionResult(overrides: Partial<ExecutionResult> = {}): Executio
 function baseDeps(overrides: Partial<RunCodeToolDeps> = {}): RunCodeToolDeps {
   return {
     language: 'python',
+    languageVersion: '3.11',
     scratchDir: '/fake/scratch',
     linkedFeatureFilePath: undefined,
     pythonCommand: 'python',
@@ -130,4 +131,40 @@ test('refuses to execute once the attempt budget is exhausted, without consultin
   assert.ok(typeof parsed.error === 'string' && parsed.error.length > 0);
   assert.equal(confirmCalls, 0);
   assert.equal(executions, 0);
+});
+
+// A user reported "Verify & Fix Code" ignoring Settings' selected Java/
+// Python version entirely (only Java 17 ever worked) — root cause was
+// executeGeneratedCode() never even receiving the selected version at all.
+// This locks in that RunCodeToolDeps.languageVersion actually reaches the
+// real execute() call, for both languages Settings offers a version
+// selector for.
+test('deps.languageVersion is passed through to execute() exactly as given, for Java', async () => {
+  let receivedLanguageVersion: string | undefined;
+  const deps = baseDeps({
+    language: 'java',
+    languageVersion: '11',
+    executeFn: async (_language, _code, _scratchDir, _linkedFeatureFilePath, _pythonCommand, _automationMode, _resourcesRoot, _secretEnv, languageVersion) => {
+      receivedLanguageVersion = languageVersion;
+      return makeExecutionResult({ success: true });
+    }
+  });
+  const runCode = createRunCodeTool(deps);
+  await runCode.invoke({ code: 'public class Foo {}' });
+  assert.equal(receivedLanguageVersion, '11');
+});
+
+test('deps.languageVersion is passed through to execute() exactly as given, for Python', async () => {
+  let receivedLanguageVersion: string | undefined;
+  const deps = baseDeps({
+    language: 'python',
+    languageVersion: '3.9',
+    executeFn: async (_language, _code, _scratchDir, _linkedFeatureFilePath, _pythonCommand, _automationMode, _resourcesRoot, _secretEnv, languageVersion) => {
+      receivedLanguageVersion = languageVersion;
+      return makeExecutionResult({ success: true });
+    }
+  });
+  const runCode = createRunCodeTool(deps);
+  await runCode.invoke({ code: 'print(1)' });
+  assert.equal(receivedLanguageVersion, '3.9');
 });

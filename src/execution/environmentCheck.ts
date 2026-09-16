@@ -86,26 +86,61 @@ function run(
   });
 }
 
+/** Extracts the JDK's own MAJOR version number from `java -version`'s
+ * output (always printed to stderr, which `run()` already folds into
+ * `output`) — handles both the modern single-number scheme (Java 9+, e.g.
+ * `java version "17.0.9" ...` / `openjdk version "21.0.1" ...` -> 17 / 21)
+ * and the legacy `1.x` scheme (Java 8 and earlier, e.g. `java version
+ * "1.8.0_281"` -> 8, where the real major version is the SECOND
+ * component). `undefined` if the output doesn't contain a recognizable
+ * version string at all (a genuinely unexpected `java -version` output —
+ * treated as "can't verify," never as a silent pass). */
+export function parseJavaMajorVersion(versionOutput: string): number | undefined {
+  const match = versionOutput.match(/version\s+"(\d+)(?:\.(\d+))?/);
+  if (!match) {
+    return undefined;
+  }
+  const first = parseInt(match[1], 10);
+  return first === 1 && match[2] ? parseInt(match[2], 10) : first;
+}
+
 /**
  * "Take necessary steps beforehand to assert all the necessary Maven, Java
  * and other environmental parameters are in place" — verifies `java` and
- * `mvn` are both on PATH and report their versions, without installing or
- * modifying anything: an enterprise/bank environment is not somewhere this
- * extension should silently mutate. On failure, `message` names exactly
- * what's missing and points at the standard way to install it.
+ * `mvn` are both on PATH, report their versions, AND that the installed
+ * JDK's own major version is actually new enough to compile/run for
+ * `languageVersion` (the user's Settings selection — see
+ * `LANGUAGE_VERSIONS.java` in settingsStore.ts, currently `['11','17','21']`)
+ * — without installing or modifying anything: an enterprise/bank
+ * environment is not somewhere this extension should silently mutate.
+ *
+ * The version check matters because `javac`/Maven's `maven.compiler.release`
+ * can target any release UP TO the running JDK's own major version, never
+ * a NEWER one — a JDK 11 installation genuinely cannot compile targeting
+ * release 17 or 21 at all, regardless of what the generated code looks
+ * like. Catching that HERE, with a clear, actionable message naming both
+ * the selected version and what's actually installed, replaces what would
+ * otherwise be a cryptic `javac`/Maven "invalid target release" error
+ * discovered only much later, deep inside a "Verify & Fix Code" attempt,
+ * and misleadingly blamed on the generated code rather than the
+ * environment. A NEWER installed JDK targeting an OLDER selected version
+ * (e.g. Settings says 11, the machine has JDK 21) is always fine — see
+ * `testExecutor.ts`'s `javaPomXml()`, which uses `maven.compiler.release`
+ * for exactly this reason (not separate `source`/`target`, which alone
+ * wouldn't also reject accidental use of newer JDK APIs).
  */
-export function checkJavaEnvironment(): Promise<EnvironmentCheckResult> {
-  return cached('java', checkJavaEnvironmentUncached);
+export function checkJavaEnvironment(languageVersion: string): Promise<EnvironmentCheckResult> {
+  return cached(`java:${languageVersion}`, () => checkJavaEnvironmentUncached(languageVersion));
 }
 
-async function checkJavaEnvironmentUncached(): Promise<EnvironmentCheckResult> {
+async function checkJavaEnvironmentUncached(languageVersion: string): Promise<EnvironmentCheckResult> {
   const java = await run('java', ['-version']);
   if (java.code !== 0) {
     return {
       ok: false,
       message:
         'Java (JDK) was not found on PATH — "java -version" failed. Install a JDK ' +
-        '(17 or newer recommended) and ensure it is on PATH before executing generated Java code.'
+        `(version ${languageVersion} or newer) and ensure it is on PATH before executing generated Java code.`
     };
   }
   const mvn = await run('mvn', ['-version'], undefined, true);
@@ -119,6 +154,20 @@ async function checkJavaEnvironmentUncached(): Promise<EnvironmentCheckResult> {
   }
   const javaVersionLine = java.output.split('\n')[0]?.trim() || 'java';
   const mvnVersionLine = mvn.output.split('\n')[0]?.trim() || 'mvn';
+
+  const requestedMajor = parseInt(languageVersion, 10);
+  const installedMajor = parseJavaMajorVersion(java.output);
+  if (installedMajor !== undefined && !Number.isNaN(requestedMajor) && installedMajor < requestedMajor) {
+    return {
+      ok: false,
+      message:
+        `Settings has Java ${languageVersion} selected, but the installed JDK reports version ${installedMajor} ` +
+        `(${javaVersionLine}) — a JDK can only compile/run for its OWN version or older, never a newer one. ` +
+        `Install a JDK ${languageVersion} or newer (a newer JDK can still target ${languageVersion}), or select ` +
+        `${installedMajor} in Settings instead if that's the version you actually meant to test against.`
+    };
+  }
+
   return { ok: true, message: `${javaVersionLine} · ${mvnVersionLine}` };
 }
 
@@ -166,21 +215,27 @@ function tailForMessage(output: string): string {
  * behavior (report what's missing, install nothing) on any other OS.
  *
  * Provisions (once, lazily — reused on every later call) a DEDICATED
- * virtual environment per mode under the extension's own global storage,
- * NEVER the user's system/base Python, so this never mutates an environment
- * outside the extension's own control. Returns that venv's own python
- * executable as `pythonCommand` — every subsequent compile-check/pytest run
- * uses it instead of the system interpreter.
+ * virtual environment per (mode, languageVersion) pair under the
+ * extension's own global storage, NEVER the user's system/base Python, so
+ * this never mutates an environment outside the extension's own control.
+ * Returns that venv's own python executable as `pythonCommand` — every
+ * subsequent compile-check/pytest run uses it instead of the system
+ * interpreter. Keyed by `languageVersion` too (not just `automationMode`)
+ * — a venv is created FROM `basePythonCommand` and permanently inherits
+ * its exact Python version, so reusing one venv directory across a
+ * Settings switch between e.g. Python 3.9 and 3.11 would silently keep
+ * running the OLD version's interpreter regardless of the new selection.
  */
 async function ensureOfflinePythonEnv(
   basePythonCommand: string,
   resourcesRoot: string,
   storageDir: string,
-  automationMode: AutomationMode
+  automationMode: AutomationMode,
+  languageVersion: string
 ): Promise<EnvironmentCheckResult & { pythonCommand?: string }> {
   const packages = OFFLINE_PYTHON_PACKAGES[automationMode];
   const modeLabel = automationMode === 'api' ? 'API' : 'UI';
-  const venvDir = path.join(storageDir, `${automationMode}-python-env`);
+  const venvDir = path.join(storageDir, `${automationMode}-python-${languageVersion}-env`);
   const venvPython = venvPythonPath(venvDir);
   const wheelsDir = path.join(resourcesRoot, 'resources', 'python', 'wheels');
 
@@ -230,11 +285,78 @@ async function ensureOfflinePythonEnv(
   };
 }
 
+/** Extracts "major.minor" from a `python --version`/`py -X.Y --version`
+ * output line, e.g. "Python 3.11.4" -> "3.11" — `undefined` if the output
+ * doesn't look like a Python version line at all. */
+export function extractPythonMajorMinor(versionOutput: string): string | undefined {
+  const match = versionOutput.match(/Python\s+(\d+)\.(\d+)/i);
+  return match ? `${match[1]}.${match[2]}` : undefined;
+}
+
 /**
- * Same idea for Python: verifies a `python` (or `python3`) interpreter is on
- * PATH, then self-provisions the pip packages the generated test file
- * actually needs — see `ensureOfflinePythonEnv()` — whenever `resourcesRoot`
- * and `storageDir` are supplied (the extension's real callers always pass
+ * Resolves a real Python interpreter matching `languageVersion` (e.g.
+ * "3.11") EXACTLY (major.minor) — the fix for Settings' Python version
+ * selector previously being entirely decorative for "Verify & Fix Code":
+ * this used to always grab whichever of `python`/`python3` happened to be
+ * first on PATH, with no regard for which version the user actually
+ * selected. Tried in this order, returning the first real match:
+ *
+ * 1. The Windows "py" launcher with an explicit version selector
+ *    (`py -3.11`) — the standard, most reliable way multiple Python
+ *    versions coexist on one Windows machine (this extension's stated
+ *    scope for offline/bundled provisioning elsewhere in this file).
+ *    Resolved to its own absolute interpreter path via `-c "import sys;
+ *    print(sys.executable)"` so the returned value is a single, plain,
+ *    directly-invocable executable path — matching what every
+ *    `pythonCommand` consumer already expects (one command, not a
+ *    launcher+flag pair).
+ * 2. A directly-named `pythonX.Y` binary on PATH (common on macOS/Linux via
+ *    pyenv/Homebrew/apt; occasionally present on Windows too from a manual
+ *    install) — verified by actually running `--version` and checking it
+ *    reports the SAME version, never assumed from the name alone.
+ * 3. Whichever of `python`/`python3` is already on PATH, IF its own
+ *    reported version already matches exactly — the common case where a
+ *    user has exactly one Python installed, matching whatever they picked
+ *    in Settings, so no extra resolution work is ever needed.
+ *
+ * `undefined` when NONE of the above resolves to the requested version —
+ * the caller reports this as a clear, actionable "not found" message
+ * naming the exact version, rather than silently falling back to a
+ * MISMATCHED interpreter that would produce a confusing failure much
+ * later, deep inside "Verify & Fix Code", misleadingly blamed on the
+ * generated code instead of the environment.
+ */
+async function resolvePythonInterpreterForVersion(languageVersion: string): Promise<string | undefined> {
+  if (process.platform === 'win32') {
+    const viaLauncher = await run('py', [`-${languageVersion}`, '-c', 'import sys; print(sys.executable)']);
+    if (viaLauncher.code === 0) {
+      const resolvedPath = viaLauncher.output.trim().split('\n').pop()?.trim();
+      if (resolvedPath && fs.existsSync(resolvedPath)) {
+        return resolvedPath;
+      }
+    }
+  }
+  for (const candidate of [`python${languageVersion}`, `python${languageVersion.replace('.', '')}`]) {
+    const result = await run(candidate, ['--version']);
+    if (result.code === 0 && extractPythonMajorMinor(result.output) === languageVersion) {
+      return candidate;
+    }
+  }
+  for (const candidate of ['python', 'python3']) {
+    const result = await run(candidate, ['--version']);
+    if (result.code === 0 && extractPythonMajorMinor(result.output) === languageVersion) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Same idea for Python: verifies an interpreter matching `languageVersion`
+ * (see `resolvePythonInterpreterForVersion()`) is available, then
+ * self-provisions the pip packages the generated test file actually needs
+ * — see `ensureOfflinePythonEnv()` — whenever `resourcesRoot` and
+ * `storageDir` are supplied (the extension's real callers always pass
  * both; they're optional only so this function stays testable/callable
  * without a live extension context) and, for UI mode, the current OS is one
  * the bundled wheels actually support (Windows). Otherwise falls back to
@@ -244,38 +366,36 @@ async function ensureOfflinePythonEnv(
 export function checkPythonEnvironment(
   automationMode: AutomationMode = 'ui',
   resourcesRoot?: string,
-  storageDir?: string
+  storageDir?: string,
+  languageVersion = '3.11'
 ): Promise<EnvironmentCheckResult & { pythonCommand?: string }> {
-  const key = `python:${automationMode}:${resourcesRoot ?? ''}:${storageDir ?? ''}`;
-  return cached(key, () => checkPythonEnvironmentUncached(automationMode, resourcesRoot, storageDir));
+  const key = `python:${automationMode}:${languageVersion}:${resourcesRoot ?? ''}:${storageDir ?? ''}`;
+  return cached(key, () => checkPythonEnvironmentUncached(automationMode, languageVersion, resourcesRoot, storageDir));
 }
 
 async function checkPythonEnvironmentUncached(
   automationMode: AutomationMode,
+  languageVersion: string,
   resourcesRoot?: string,
   storageDir?: string
 ): Promise<EnvironmentCheckResult & { pythonCommand?: string }> {
-  const candidates = ['python', 'python3'];
-  let pythonCommand: string | undefined;
-  let versionLine = '';
-  for (const candidate of candidates) {
-    const result = await run(candidate, ['--version']);
-    if (result.code === 0) {
-      pythonCommand = candidate;
-      versionLine = result.output.split('\n')[0]?.trim() || candidate;
-      break;
-    }
-  }
+  const pythonCommand = await resolvePythonInterpreterForVersion(languageVersion);
   if (!pythonCommand) {
     return {
       ok: false,
-      message: 'Python was not found on PATH — neither "python --version" nor "python3 --version" succeeded. Install Python 3 and ensure it is on PATH before executing generated Python code.'
+      message:
+        `Settings has Python ${languageVersion} selected, but no matching interpreter was found — neither the ` +
+        `Windows "py -${languageVersion}" launcher, a "python${languageVersion}" binary, nor the default ` +
+        `"python"/"python3" on PATH report version ${languageVersion}. Install Python ${languageVersion} and ` +
+        `ensure it's discoverable (via the "py" launcher on Windows, or on PATH), or select a version you do have ` +
+        `installed in Settings instead.`
     };
   }
+  const versionLine = (await run(pythonCommand, ['--version'])).output.split('\n')[0]?.trim() || pythonCommand;
 
   const canGoOffline = resourcesRoot && storageDir && (automationMode === 'api' || process.platform === 'win32');
   if (canGoOffline) {
-    return ensureOfflinePythonEnv(pythonCommand, resourcesRoot, storageDir, automationMode);
+    return ensureOfflinePythonEnv(pythonCommand, resourcesRoot, storageDir, automationMode, languageVersion);
   }
 
   const required = OFFLINE_PYTHON_PACKAGES[automationMode].map((p) => p.import);
@@ -305,7 +425,10 @@ export function checkEnvironment(
   language: Language,
   automationMode: AutomationMode = 'ui',
   resourcesRoot?: string,
-  storageDir?: string
+  storageDir?: string,
+  languageVersion?: string
 ): Promise<EnvironmentCheckResult & { pythonCommand?: string }> {
-  return language === 'java' ? checkJavaEnvironment() : checkPythonEnvironment(automationMode, resourcesRoot, storageDir);
+  return language === 'java'
+    ? checkJavaEnvironment(languageVersion ?? '17')
+    : checkPythonEnvironment(automationMode, resourcesRoot, storageDir, languageVersion);
 }

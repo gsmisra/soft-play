@@ -103,10 +103,20 @@ export async function executeGeneratedCode(
    * encrypted at least one credential into the code — can actually resolve
    * the real value at run time. Harmless to always pass: unused entirely by
    * code that contains no encrypted values. */
-  secretEnv?: Record<string, string>
+  secretEnv?: Record<string, string>,
+  /** The user's Settings selection (`LANGUAGE_VERSIONS.java`, e.g. "11" /
+   * "17" / "21") — Java only; ignored for Python, whose interpreter
+   * (`pythonCommand`) is already resolved to the correct version-specific
+   * executable BEFORE this is ever called (see environmentCheck.ts's
+   * `resolvePythonInterpreterForVersion()`), so there is no separate
+   * "target version" concept to apply at execution time the way Java's
+   * compiler needs one. Defaults to '17' only so an existing caller that
+   * never passes this (there should be none left after this fix) keeps
+   * its previous exact behavior rather than breaking outright. */
+  languageVersion = '17'
 ): Promise<ExecutionResult> {
   return language === 'java'
-    ? executeJava(code, scratchDir, automationMode, resourcesRoot, secretEnv)
+    ? executeJava(code, scratchDir, automationMode, resourcesRoot, secretEnv, languageVersion)
     : executePython(code, scratchDir, linkedFeatureFilePath, pythonCommand, automationMode, secretEnv);
 }
 
@@ -149,7 +159,7 @@ function bundledNodeExePath(resourcesRoot: string | undefined): string | undefin
   return fs.existsSync(nodeExe) ? nodeExe : undefined;
 }
 
-function javaPomXml(bdd: boolean, automationMode: AutomationMode, resourcesRoot: string | undefined): string {
+export function javaPomXml(bdd: boolean, automationMode: AutomationMode, resourcesRoot: string | undefined, languageVersion: string): string {
   const cucumberDeps = bdd
     ? `
     <dependency>
@@ -211,8 +221,7 @@ function javaPomXml(bdd: boolean, automationMode: AutomationMode, resourcesRoot:
   <artifactId>SoftPlay-runner</artifactId>
   <version>1.0.0</version>
   <properties>
-    <maven.compiler.source>17</maven.compiler.source>
-    <maven.compiler.target>17</maven.compiler.target>
+    <maven.compiler.release>${languageVersion}</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
   </properties>
   <dependencies>${primaryDep}
@@ -266,8 +275,9 @@ async function executeJava(
   code: string,
   scratchDir: string,
   automationMode: AutomationMode,
-  resourcesRoot?: string,
-  secretEnv?: Record<string, string>
+  resourcesRoot: string | undefined,
+  secretEnv: Record<string, string> | undefined,
+  languageVersion: string
 ): Promise<ExecutionResult> {
   const classMatch = code.match(/public\s+class\s+(\w+)/);
   if (!classMatch) {
@@ -293,7 +303,7 @@ async function executeJava(
     }
   }
   await fs.promises.writeFile(path.join(srcDir, `${className}.java`), code, 'utf8');
-  await fs.promises.writeFile(path.join(scratchDir, 'pom.xml'), javaPomXml(bdd, automationMode, resourcesRoot), 'utf8');
+  await fs.promises.writeFile(path.join(scratchDir, 'pom.xml'), javaPomXml(bdd, automationMode, resourcesRoot, languageVersion), 'utf8');
 
   // Compile is always checked first and on its own — the ONLY signal that
   // ever drives another fix-loop iteration in API mode (see this module's

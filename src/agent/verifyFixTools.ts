@@ -46,6 +46,15 @@ function describeError(err: unknown): string {
 
 export interface RunCodeToolDeps {
   language: Language;
+  /** The user's Settings selection (LANGUAGE_VERSIONS[language] — e.g.
+   * "11"/"17"/"21" for Java, "3.9"-"3.12" for Python) — threaded through to
+   * `executeGeneratedCode()` so the scratch project actually compiles/runs
+   * for the version the user picked, not a hardcoded one. See
+   * testExecutor.ts's `javaPomXml()` for why this matters for Java
+   * specifically (a wrong hardcoded target previously made "Verify & Fix
+   * Code" fail outright for anyone whose installed JDK didn't happen to
+   * support exactly that one hardcoded version). */
+  languageVersion: string;
   scratchDir: string;
   linkedFeatureFilePath: string | undefined;
   pythonCommand: string;
@@ -136,7 +145,8 @@ export function createRunCodeTool(deps: RunCodeToolDeps) {
         deps.pythonCommand,
         deps.automationMode,
         deps.resourcesRoot,
-        deps.secretEnv
+        deps.secretEnv,
+        deps.languageVersion
       );
       deps.onOutput(
         `Verify & Fix Code (agent) — attempt ${attempt}: ${result.success ? 'PASSED' : 'FAILED'}` +

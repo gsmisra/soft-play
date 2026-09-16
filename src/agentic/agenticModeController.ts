@@ -1234,7 +1234,7 @@ export class AgenticModeController implements vscode.Disposable {
     this.aiCodePanel.setVerifyButtonEnabled(false);
     try {
       this.aiCodePanel.setVerifyStatus('Checking the local environment…', 'info');
-      const env = await checkEnvironment(settings.language, settings.automationMode, this.context.extensionUri.fsPath, this.context.globalStorageUri.fsPath);
+      const env = await checkEnvironment(settings.language, settings.automationMode, this.context.extensionUri.fsPath, this.context.globalStorageUri.fsPath, settings.languageVersion);
       if (!isCurrent()) {
         return;
       }
@@ -1338,6 +1338,7 @@ export class AgenticModeController implements vscode.Disposable {
         cancellationToken: cts.token,
         runCodeDeps: {
           language: settings.language,
+          languageVersion: settings.languageVersion,
           scratchDir,
           linkedFeatureFilePath,
           pythonCommand,

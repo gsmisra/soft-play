@@ -1258,7 +1258,8 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
         settings.language,
         settings.automationMode,
         this.context.extensionUri.fsPath,
-        this.context.globalStorageUri.fsPath
+        this.context.globalStorageUri.fsPath,
+        settings.languageVersion
       );
       this.outputChannel.appendLine(
         `Verify & Fix Code — environment check (${settings.language}, ${isApiMode ? 'API' : 'UI'} mode): ${env.ok ? 'OK' : 'FAILED'} — ${env.message}`
@@ -1372,6 +1373,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
       cancellationToken: cts.token,
       runCodeDeps: {
         language: settings.language,
+        languageVersion: settings.languageVersion,
         scratchDir,
         linkedFeatureFilePath: this.linkedScenario?.featureFilePath,
         pythonCommand,
@@ -1577,7 +1579,8 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
         // credential Auto Password Encryption encrypted (see
         // security/secretVault.ts). Harmless to always pass: unused by
         // code with no encrypted values in it.
-        await secretVault.getSecretEnv(this.context)
+        await secretVault.getSecretEnv(this.context),
+        settings.languageVersion
       );
       this.outputChannel.appendLine(
         `Verify & Fix Code — attempt ${attempt}: ${result.success ? 'PASSED' : 'FAILED'}` +
