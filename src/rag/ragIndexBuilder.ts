@@ -49,6 +49,13 @@ export interface RagRecipeMetadata extends Record<string, unknown> {
    * code was traced back to (see ragRetriever.ts's RagMatch and
    * objectSpyPanel.ts's RAG traceability banner). */
   filePath: string;
+  /** The SAME workspace-relative path (see RagRecipe.relativePath's own
+   * doc comment) already folded into this recipe's embedding text — carried
+   * through into metadata too so ranking-time logic (ragRetriever.ts's
+   * path/filename keyword-match boost) can check it directly against the
+   * portable, machine-independent path rather than the absolute `filePath`
+   * above, which embeds a local machine's own checkout location. */
+  relativePath: string;
 }
 
 /** Short, stable, deterministic hash of a recipe's own absolute `filePath`
@@ -109,7 +116,8 @@ export async function buildRagIndex(recipes: RagRecipe[]): Promise<RagIndex> {
       language: recipe.frontmatter.language,
       imports: recipe.frontmatter.imports,
       recipeIndex: index,
-      filePath: recipe.filePath
+      filePath: recipe.filePath,
+      relativePath: recipe.relativePath
     };
     return new Document({ pageContent: recipe.body, metadata });
   });

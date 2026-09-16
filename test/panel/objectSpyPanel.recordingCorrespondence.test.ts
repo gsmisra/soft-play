@@ -92,6 +92,21 @@ function loadObjectSpyPanelWithFakeVsCode(): { ObjectSpyPanel: new (...args: nev
       if (id === '../security/passwordEncryptionSection') {
         return { appendPasswordEncryptionSection: () => undefined };
       }
+      // Stubbed with a small, deterministic stand-in (not the real regex —
+      // that's covered directly by test/llm/databaseTestingInstructions.test.ts)
+      // so this file's own tests can verify runLlmRefinement()'s WIRING
+      // (does a database-mentioning chat instruction actually reach the
+      // rendered prompt?) without depending on __dirname-relative file
+      // reads resolving correctly under this compiled test layout.
+      if (id === '../llm/databaseTestingInstructions') {
+        return {
+          withDatabaseTestingInstructions: (instructions: { path: string; content: string }[], ...texts: (string | undefined | null)[]) =>
+            texts.some((t) => !!t && /database|mongodb|postgres|verify.*table/i.test(t))
+              ? [...instructions, { path: 'database_testing_instructions.md', content: 'DB-TESTING-INSTRUCTIONS-MARKER' }]
+              : instructions,
+          mentionsDatabaseTesting: (t: string) => !!t && /database|mongodb|postgres|verify.*table/i.test(t)
+        };
+      }
       if (id === '../llm/copilotClient') {
         return {
           findModel: async () => ({ countTokens: async () => 100, maxInputTokens: 100_000 }),
@@ -338,5 +353,46 @@ test('S02: runLlmRefinement() never flags the normal "record first, link after" 
 
   assert.doesNotMatch(capturedPrompt, /UNVERIFIED/);
   assert.equal(c.output, '// ok', 'the request must actually complete and publish');
+  assert.equal(c.errored, undefined);
+});
+
+// ---------------------------------------------------------------------
+// Database testing instructions wiring — runLlmRefinement()'s `instructions`
+// array is the single injection point shared by the mandatory-measurement
+// pass and the real send (see llm/databaseTestingInstructions.ts). The
+// regex itself is covered directly by
+// test/llm/databaseTestingInstructions.test.ts; this file's Module._load
+// stub above (a small deterministic stand-in) verifies the WIRING: does a
+// database-mentioning "Instant instructions to LLM" chat box value actually
+// reach the rendered prompt?
+// ---------------------------------------------------------------------
+
+test('runLlmRefinement(): a database-mentioning chat instruction pulls the database-testing section into the sent prompt', async () => {
+  let capturedPrompt = '';
+  const c = makeController((p) => {
+    capturedPrompt = p;
+  });
+  c.nativeGeneratedCode = 'some recorded code';
+  c.linkedScenario = undefined;
+
+  await c.runLlmRefinement([], 'some recorded code', 'Connect to the database and verify the users table');
+
+  assert.match(capturedPrompt, /DB-TESTING-INSTRUCTIONS-MARKER/, 'expected the database-testing section to be included in the sent prompt');
+  assert.equal(c.output, '// ok', 'the request must actually complete and publish');
+  assert.equal(c.errored, undefined);
+});
+
+test('runLlmRefinement(): unrelated chat instructions never pull in the database-testing section', async () => {
+  let capturedPrompt = '';
+  const c = makeController((p) => {
+    capturedPrompt = p;
+  });
+  c.nativeGeneratedCode = 'some recorded code';
+  c.linkedScenario = undefined;
+
+  await c.runLlmRefinement([], 'some recorded code', 'Make the button click faster');
+
+  assert.doesNotMatch(capturedPrompt, /DB-TESTING-INSTRUCTIONS-MARKER/, 'unrelated instructions must not pull in the database-testing section');
+  assert.equal(c.output, '// ok');
   assert.equal(c.errored, undefined);
 });

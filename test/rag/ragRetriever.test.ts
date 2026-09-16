@@ -215,6 +215,83 @@ test('a recipe is matchable purely by its own FILENAME segment', async () => {
   assert.ok(matches.some((m) => m.id === 'oauth-token-refresh'), 'expected the filename words "oauth"/"token"/"refresh" alone to surface this recipe');
 });
 
+// ---------------------------------------------------------------------
+// Path/filename keyword-match boost (PATH_FILENAME_MATCH_BOOST) — the
+// existing folder/filename matching above (recipeToEmbeddingText()'s own
+// 2x-weighted relativePath) only ever matches whole VOCABULARY TERMS the
+// tokenizer actually produced from that path. It cannot find a query
+// keyword that is merely a SUBSTRING of a longer, unsplittable fused path
+// segment — e.g. "autosys" inside the single all-lowercase token
+// "autosysjobmonitor", which has no case-change/underscore boundary for
+// the identifier-splitter to find at all (see tfidfEmbeddings.ts's
+// `splitIdentifierWords()`). These tests target exactly that gap.
+// ---------------------------------------------------------------------
+
+test('a recipe is matchable when the query keyword is only a SUBSTRING of a fused (no-separator) filename segment', async () => {
+  const autosysRecipe = makeRecipe({
+    id: 'autosysjobmonitor-execute',
+    // Deliberately generic title/tags/body — none of them mention
+    // "autosys" anywhere, and the ONLY place it appears in the path is
+    // fused into "autosysjobmonitor" with no word-boundary at all (no
+    // isolated "autosys" folder segment either, unlike the cassandra
+    // fixture above) — exactly the case ordinary tokenized vocabulary
+    // matching cannot find.
+    title: 'Execute a scheduled job and check its logs',
+    body: '```java\nJobRunner.executeAndCheckLogs(jobName);\n```',
+    tags: ['job', 'scheduler'],
+    relativePath: 'src/main/java/com/framework/monitoring/autosysjobmonitor-execute.md'
+  });
+  const index = await buildRagIndex([autosysRecipe, SCREENSHOT_RECIPE]);
+  const matches = await retrieveRagMatches(index, 'run the autosys job and validate the job logs for no errors', 'java', 'api');
+  assert.ok(
+    matches.some((m) => m.id === 'autosysjobmonitor-execute'),
+    'expected the "autosys" keyword to match via the fused filename segment even though it never appears as its own isolated token'
+  );
+});
+
+test('a fused-filename path match still loses to a genuinely more content-relevant recipe (boost is a signal, not an override)', async () => {
+  const weaklyPathMatched = makeRecipe({
+    id: 'autosysjobmonitor-execute',
+    title: 'Execute a scheduled job and check its logs',
+    body: '```java\nJobRunner.executeAndCheckLogs(jobName);\n```',
+    tags: ['job', 'scheduler'],
+    relativePath: 'src/main/java/com/framework/monitoring/autosysjobmonitor-execute.md'
+  });
+  const stronglyContentMatched = makeRecipe({
+    id: 'autosys-job-monitor-real-match',
+    title: 'Run an Autosys job and validate its logs for errors',
+    body: '```java\nAutosysHelper.runJobAndValidateLogs(jobName);\n```',
+    tags: ['autosys', 'job', 'logs', 'validate'],
+    relativePath: 'autosys/run-and-validate.md'
+  });
+  const index = await buildRagIndex([weaklyPathMatched, stronglyContentMatched]);
+  const matches = await retrieveRagMatches(index, 'run the autosys job and validate the job logs for no errors', 'java', 'api');
+  assert.equal(matches[0].id, 'autosys-job-monitor-real-match', 'a recipe whose title/tags/body genuinely and explicitly match should still outrank a mere path-substring hit');
+});
+
+test('a short (<4 char) query word never triggers a spurious path/filename boost', async () => {
+  const recipeWithCoincidentalSubstring = makeRecipe({
+    id: 'unrelated-db-pool-helper',
+    // Deliberately shares NO real content words with the query below —
+    // isolates the path/filename boost specifically, rather than also
+    // picking up an ordinary TF-IDF content match for some other reason.
+    title: 'Database connection pooling utility',
+    body: '```java\nPool.getConnection();\n```',
+    tags: ['database', 'pool'],
+    // "run" (3 chars, below MIN_PATH_MATCH_KEYWORD_LENGTH) appears here
+    // purely coincidentally as a substring of "running" — must not be
+    // treated as a real path/filename keyword match.
+    relativePath: 'misc/running-totals-helper.md'
+  });
+  const index = await buildRagIndex([recipeWithCoincidentalSubstring, SCREENSHOT_RECIPE]);
+  const matches = await retrieveRagMatches(index, 'run the export batch job', 'java', 'api');
+  assert.equal(
+    matches.find((m) => m.id === 'unrelated-db-pool-helper'),
+    undefined,
+    'a short, coincidental substring ("run" inside "running") must not manufacture a match out of an otherwise unrelated recipe'
+  );
+});
+
 test('every match carries the recipe\'s own source file path, for traceability', async () => {
   const index = await buildRagIndex([POSTGRES_RECIPE, SCREENSHOT_RECIPE]);
   const matches = await retrieveRagMatches(

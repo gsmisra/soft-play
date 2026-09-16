@@ -78,6 +78,9 @@ function loadObjectSpyPanelWithFakeVsCode(): { ObjectSpyPanel: new (...args: nev
       if (id === '../security/passwordEncryptionSection') {
         return { appendPasswordEncryptionSection: () => undefined };
       }
+      if (id === '../llm/databaseTestingInstructions') {
+        return { withDatabaseTestingInstructions: (instructions: unknown[]) => instructions, mentionsDatabaseTesting: () => false };
+      }
       if (id === '../llm/copilotClient') {
         return {
           findModel: async () => ({ countTokens: async () => 100, maxInputTokens: 100_000 }),

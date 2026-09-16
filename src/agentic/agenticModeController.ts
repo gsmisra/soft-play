@@ -28,6 +28,7 @@ import { parsePdfBuffer, buildPdfPreview } from './pdfIngestion';
 import { InvalidTestCaseCsvError, normalizeTestCaseCsvResponse } from './csvTestCaseGenerator';
 import { parseCsvStrict, stringifyCsv, MalformedCsvError } from './csvUtils';
 import { buildAgenticActionShape, AgenticActionKind } from './agenticActionShape';
+import { withDatabaseTestingInstructions } from '../llm/databaseTestingInstructions';
 import {
   AGENTIC_LEGACY_UNSUPPORTED_EXTENSIONS,
   AGENTIC_MAX_SEGMENT_CHARS,
@@ -790,7 +791,7 @@ export class AgenticModeController implements vscode.Disposable {
     );
   }
 
-  private async buildSystemInstructions(settings: ObjectSpySettings, ragSection: string, includeCsvTemplate: boolean): Promise<string> {
+  private async buildSystemInstructions(settings: ObjectSpySettings, ragSection: string, includeCsvTemplate: boolean, userRequest: string): Promise<string> {
     const parts: string[] = [];
     if (includeCsvTemplate) {
       const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
@@ -813,6 +814,18 @@ export class AgenticModeController implements vscode.Disposable {
     const customInstructions = await this.readSelectedCustomInstructionFiles();
     if (customInstructions) {
       parts.push('## Team custom instructions / skills / prompt files\n' + customInstructions);
+    }
+    // Database testing intent: only ever driven by the "Instant
+    // instructions to LLM" chat box text (userRequest), per the explicit
+    // ask — a deterministic keyword/regex check
+    // (llm/databaseTestingInstructions.ts), never an extra LLM call.
+    // Reuses withDatabaseTestingInstructions()'s own file-read/caching
+    // against an empty array purely to get the bundled file's content when
+    // it applies, so the file path/caching logic lives in exactly one
+    // place shared with Standard mode.
+    const databaseTestingSection = withDatabaseTestingInstructions<{ path: string; content: string }>([], userRequest);
+    if (databaseTestingSection.length > 0) {
+      parts.push('## Database testing instructions\n' + databaseTestingSection[0].content);
     }
     if (ragSection) {
       parts.push(ragSection);
@@ -858,10 +871,10 @@ export class AgenticModeController implements vscode.Disposable {
     // two-message shape (F12) — see buildRagSection()'s own doc comment on
     // why packing needs this to know how much of the model's real context
     // window is actually left for RAG content.
-    const mandatorySystemInstructions = await this.buildSystemInstructions(settings, '', false);
+    const mandatorySystemInstructions = await this.buildSystemInstructions(settings, '', false, this.lastUserRequest);
     const mandatoryTokens = await this.measureAgenticRequestTokens(model, mandatorySystemInstructions, ingestedContext, this.lastUserRequest);
     const ragSection = await this.buildRagSection(settings, mandatoryTokens, model);
-    const systemInstructions = await this.buildSystemInstructions(settings, ragSection, false);
+    const systemInstructions = await this.buildSystemInstructions(settings, ragSection, false, this.lastUserRequest);
 
     const sentTokens = await this.measureAgenticRequestTokens(model, systemInstructions, ingestedContext, this.lastUserRequest);
     if (seq !== this.tokenEstimateSeq) {
@@ -1000,10 +1013,10 @@ export class AgenticModeController implements vscode.Disposable {
     const shape = buildAgenticActionShape(kind, this.lastUserRequest, settings.language, settings.languageVersion);
     // Measure the MANDATORY (non-RAG) cost first, reusing the model
     // already resolved above — see buildRagSection()'s own doc comment.
-    const mandatorySystemInstructions = (await this.buildSystemInstructions(settings, '', shape.includeCsvTemplate)) + shape.directiveSuffix;
+    const mandatorySystemInstructions = (await this.buildSystemInstructions(settings, '', shape.includeCsvTemplate, shape.effectiveUserRequest)) + shape.directiveSuffix;
     const mandatoryTokens = await this.measureAgenticRequestTokens(chatModel, mandatorySystemInstructions, ingestedContext, shape.effectiveUserRequest);
     const ragSection = await this.buildRagSection(settings, mandatoryTokens, chatModel, cts.token);
-    const systemInstructions = (await this.buildSystemInstructions(settings, ragSection, shape.includeCsvTemplate)) + shape.directiveSuffix;
+    const systemInstructions = (await this.buildSystemInstructions(settings, ragSection, shape.includeCsvTemplate, shape.effectiveUserRequest)) + shape.directiveSuffix;
     const chainLabel: Record<AgenticActionKind, string> = { feature: 'feature-file', code: 'automation-code', csv: 'manual-test-case-CSV' };
     this.outputChannel.appendLine(`Agentic Mode — invoking the LangChain ${chainLabel[kind]} chain (ChatPromptTemplate -> Copilot -> StringOutputParser)...`);
     const chain = chainFactory(new VSCodeCopilotToolCallingModel(chatModel, cts.token));

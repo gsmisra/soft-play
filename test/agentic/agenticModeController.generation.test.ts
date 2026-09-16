@@ -404,3 +404,51 @@ test('F02: generateAutomationCode() takes over aiCodePanel ownership from whatev
   assert.equal(controller.ownsAiCodePanel(staleOwnerCts), false, 'the stale (verify) holder must no longer be recognized as the owner');
   assert.equal(controller.ownsAiCodePanel(controller.codeCancellation), true, 'the new generation\'s own cts must now own the panel');
 });
+
+// ---------------------------------------------------------------------
+// Database testing instructions (llm/databaseTestingInstructions.ts) —
+// buildSystemInstructions() gains a `userRequest` param specifically so
+// this deterministic keyword check can fire without a stale/live re-read
+// of the mutable `this.lastUserRequest` field, matching the "snapshot
+// once" discipline (A14/F07) already used throughout runAgenticChain().
+// ---------------------------------------------------------------------
+
+test('buildSystemInstructions(): includes the bundled database-testing section when userRequest mentions database testing', async () => {
+  // Note: this harness's fake `vscode` (via Module._load, see above) does
+  // NOT also fake `../cache/fileCache`, so `readFileCachedSync()` resolves
+  // its bundled-file path relative to THIS compiled test tree rather than
+  // the real packaged extension's — it reliably returns '' here for every
+  // bundled prompts/*.md file, not just this one (the real, non-empty
+  // content path is covered directly by
+  // test/llm/databaseTestingInstructions.test.ts's own dedicated fake).
+  // This test asserts the WIRING — the section heading appears exactly
+  // when, and only when, the request mentions database testing.
+  const controller = makeController();
+
+  const withDb = await controller.buildSystemInstructions(FAKE_SETTINGS, '', false, 'Connect to MongoDB and verify the users collection');
+  assert.ok(withDb.includes('## Database testing instructions'), 'expected the database-testing section heading to be present');
+
+  const withoutDb = await controller.buildSystemInstructions(FAKE_SETTINGS, '', false, 'Click the login button and verify the banner');
+  assert.equal(withoutDb.includes('## Database testing instructions'), false, 'unrelated requests must not pull in the database-testing section');
+});
+
+test('runAgenticChain(): a database-testing chat request reaches BOTH the mandatory-measurement pass and the real systemInstructions sent to the chain', async () => {
+  const controller = makeController();
+  controller.lastUserRequest = 'Run a query against the orders table and verify the row count';
+  const cts = new fakeVsCode.CancellationTokenSource();
+
+  let receivedSystemInstructions = '';
+  const chainFactory = () => ({
+    invoke: async (input: { systemInstructions: string }) => {
+      receivedSystemInstructions = input.systemInstructions;
+      return 'generated';
+    }
+  });
+
+  await controller.runAgenticChain('code', cts, chainFactory);
+
+  assert.ok(
+    receivedSystemInstructions.includes('## Database testing instructions'),
+    'the real prompt sent to the chain must include the database-testing section for a database-related request'
+  );
+});

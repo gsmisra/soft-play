@@ -18,6 +18,7 @@ import { encryptCredentialsInFreeText } from '../security/chatInstructionRedacto
 import { runVerifyFixAgent } from '../agent/verifyFixOrchestrator';
 import { truncateForDialog, truncateForStatusLine } from '../agent/verifyFixTextTruncation';
 import { appendPasswordEncryptionSection } from '../security/passwordEncryptionSection';
+import { withDatabaseTestingInstructions } from '../llm/databaseTestingInstructions';
 import { getOrBuildFreshnessReport, FreshnessReport } from '../rag/ragFreshnessService';
 import { RAG_DRAFTS_FOLDER_SEGMENTS } from '../rag/ragCorpusGenerator';
 import { parseRagFile } from '../rag/ragFrontmatter';
@@ -763,7 +764,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     // recordingMayNotCoverScenario()'s own doc comment.
     const recordingMismatch = isApiMode ? false : this.recordingMayNotCoverScenario(linkedScenarioSnapshot);
 
-    const instructions = await this.readInstructionFiles(selectedFiles);
+    let instructions = await this.readInstructionFiles(selectedFiles);
     const builtIn = isApiMode ? readApiAutomationInstructions() : readSeniorQeInstructions();
     // Same Auto Password Encryption pass the real send would do (see
     // runLlmRefinement()) — measuring the UN-redacted/un-encrypted prompt
@@ -775,6 +776,10 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     // send (see chatInstructionRedactor.ts) — measuring the un-redacted
     // chat text would under/over-count relative to what's actually sent.
     const measuredCustomInstructions = (await encryptCredentialsInFreeText(this.context, customInstructions)).text;
+    // Same database-testing-intent check runLlmRefinement() applies — see
+    // llm/databaseTestingInstructions.ts — so the live token estimate stays
+    // consistent with what will actually be sent.
+    instructions = withDatabaseTestingInstructions(instructions, measuredCustomInstructions);
     // Same "measure the mandatory prompt first, then pack RAG against what's
     // actually left" flow as runLlmRefinement() — see buildRagSection()'s
     // own doc comment. Built once with an empty RAG section purely to get
@@ -1800,6 +1805,12 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
       const chatRedaction = await encryptCredentialsInFreeText(this.context, customInstructions);
       customInstructions = chatRedaction.text;
       encryptedCount += chatRedaction.count;
+      // Database testing intent: only ever driven by the "Instant
+      // instructions to LLM" chat box text, per the explicit ask — a
+      // deterministic keyword/regex check (llm/databaseTestingInstructions.ts),
+      // never an extra LLM call. A false positive just adds one harmless
+      // extra section to the prompt.
+      instructions = withDatabaseTestingInstructions(instructions, customInstructions);
       // Built once with an empty RAG section purely to measure the
       // MANDATORY (non-RAG) token cost — packing (buildRagSection below)
       // needs this to compute how much of the model's own real context

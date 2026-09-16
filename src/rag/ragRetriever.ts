@@ -2,6 +2,7 @@ import * as path from 'path';
 import type { RagIndex, RagRecipeMetadata } from './ragIndexBuilder';
 import type { RagAutomationMode, RagLanguage } from './ragTypes';
 import { applyRelevanceGate, DEFAULT_RELEVANCE_GATE, GateCandidate, RelevanceGateConfig } from './ragRelevanceGate';
+import { TfIdfEmbeddings } from './tfidfEmbeddings';
 
 /**
  * Turns a built `RagIndex` (ragIndexBuilder.ts) plus a query into the
@@ -44,6 +45,65 @@ export interface RagMatch {
  * per-file, no-context LLM guess mis-tagged as "api-only" is still findable
  * from a UI Automation scenario that clearly needs it. */
 export const AUTOMATION_MODE_MISMATCH_PENALTY = 0.4;
+
+/** Multiplicative score boost (see `AUTOMATION_MODE_MISMATCH_PENALTY` above
+ * for the same "ranking signal, never a hard filter/override" posture) for
+ * a candidate whose own folder/filename (`RagRecipeMetadata.relativePath`)
+ * literally contains a meaningful keyword from the query, as a plain
+ * substring — see `matchesPathOrFilename()`'s own doc comment for exactly
+ * why this needs to be a SEPARATE, deterministic check rather than relying
+ * only on `relativePath` already being folded into the TF-IDF embedding
+ * text (`ragTypes.ts`'s `recipeToEmbeddingText()`, weighted 2x there): that
+ * embedding only ever matches whole VOCABULARY TERMS the tokenizer actually
+ * produced, so a query keyword that's merely a substring of a longer,
+ * unsplittable fused path/filename token (e.g. "autosys" inside the single
+ * all-lowercase token "autosysjobmonitor", which has no case-change or
+ * underscore boundary for `tfidfEmbeddings.ts`'s own identifier-splitter to
+ * find) never becomes a shared vocabulary term at all, and so contributes
+ * nothing to the cosine score no matter how obviously relevant the file
+ * actually is. 1.5x is deliberately modest, not an automatic top rank — a
+ * path/filename hit still has to coexist with (and can still lose to) a
+ * genuinely more content-relevant recipe on real substance; it exists to
+ * reliably tip an otherwise-plausible, currently-under-scored path match
+ * over the relevance gate and into the returned top-`topK`, not to override
+ * ranking outright. */
+export const PATH_FILENAME_MATCH_BOOST = 1.5;
+
+/** Minimum keyword length counted for the path/filename substring check —
+ * same value and same rationale as `ragRelevanceGate.ts`'s own
+ * `MIN_SYMBOL_TOKEN_LENGTH`: short common words (e.g. "run", "the", "for")
+ * routinely appear as accidental substrings of unrelated path segments and
+ * carry too little signal on their own to justify a boost. */
+const MIN_PATH_MATCH_KEYWORD_LENGTH = 4;
+
+/** The meaningful keywords from a free-text query, for the path/filename
+ * substring check below — reuses `TfIdfEmbeddings.tokenize()` (the exact
+ * same lowercasing/word-boundary rules already used to build the query's
+ * own embedding) rather than a separate ad hoc splitter, so this check's
+ * notion of "a word in the query" never drifts from the tokenizer's. */
+function queryKeywordsForPathMatch(queryText: string): string[] {
+  return Array.from(new Set(TfIdfEmbeddings.tokenize(queryText).filter((token) => token.length >= MIN_PATH_MATCH_KEYWORD_LENGTH)));
+}
+
+/** True when ANY meaningful query keyword (see `queryKeywordsForPathMatch()`)
+ * appears as a literal, case-insensitive SUBSTRING anywhere in
+ * `relativePath` — every folder segment AND the filename itself, e.g. a
+ * query mentioning "autosys" matches
+ * "src/main/java/com/framework/autosys/autosysjobmonitor-execute.md" both
+ * via the standalone "autosys" folder segment (which the ordinary TF-IDF
+ * vocabulary match already finds on its own) AND via the concatenated
+ * filename stem "autosysjobmonitor" (which it cannot — see
+ * `PATH_FILENAME_MATCH_BOOST`'s own doc comment for why). Deliberately a
+ * plain substring test, not a re-tokenization of the path — the entire
+ * point is to catch exactly the fused-compound-word case a tokenizer-based
+ * comparison would still miss. */
+function matchesPathOrFilename(relativePath: string | undefined, queryKeywords: string[]): boolean {
+  if (!relativePath || queryKeywords.length === 0) {
+    return false;
+  }
+  const lowerPath = relativePath.toLowerCase();
+  return queryKeywords.some((keyword) => lowerPath.includes(keyword));
+}
 
 /** How many raw candidates to pull from the vector store (filtered by
  * `language` only) BEFORE applying the automationMode-aware re-ranking —
@@ -132,11 +192,15 @@ export async function retrieveRagMatches(
   }
   const queryVector = await index.embeddings.embedQuery(queryText);
   const candidates = await index.store.similaritySearchVectorWithScore(queryVector, candidatePoolSize(index), { language });
+  const pathMatchKeywords = queryKeywordsForPathMatch(queryText);
   const ranked: GateCandidate[] = candidates
     .map(([doc, rawScore]) => {
       const metadata = doc.metadata as RagRecipeMetadata;
       const modeMatches = (metadata.automationMode as string[]).includes(automationMode);
-      const score = modeMatches ? rawScore : rawScore * AUTOMATION_MODE_MISMATCH_PENALTY;
+      let score = modeMatches ? rawScore : rawScore * AUTOMATION_MODE_MISMATCH_PENALTY;
+      if (matchesPathOrFilename(metadata.relativePath, pathMatchKeywords)) {
+        score *= PATH_FILENAME_MATCH_BOOST;
+      }
       const match: RagMatch = { id: metadata.id, title: metadata.title, body: doc.pageContent, imports: metadata.imports, score, filePath: metadata.filePath };
       return { match, score, modeMatches };
     })
