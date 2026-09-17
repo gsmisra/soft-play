@@ -472,7 +472,7 @@
         <div class="tstep">
           <span class="dot"></span><span class="lane host">Extension Host</span>
           <h4>3. Prompt is assembled</h4>
-          <p><code>buildLlmPrompt()</code> (UI mode) or <code>buildApiLlmPrompt()</code> (API mode) concatenates: the bundled standard (<code>readSeniorQeInstructions()</code> / <code>readApiAutomationInstructions()</code>, file-cached), any checked custom <code>.md</code> files (<code>readInstructionFiles()</code>, workspace-file-cached), the linked Gherkin scenario, and the recorded code or API request — user's free-text instructions are appended last so they win any conflict.</p>
+          <p><code>buildLlmPrompt()</code> (UI mode) or <code>buildApiLlmPrompt()</code> (API mode) concatenates: the bundled standard (<code>readSeniorQeInstructions()</code> / <code>readApiAutomationInstructions()</code>, file-cached), any checked custom <code>.md</code> files (<code>readInstructionFiles()</code>, workspace-file-cached), a linked existing source file's retrofit section if one is linked (see "Link Existing Class file" below), the linked Gherkin scenario, and the recorded code or API request — user's free-text instructions are appended last so they win any conflict.</p>
         </div>
         <div class="tstep">
           <span class="dot"></span><span class="lane copilot">CopilotClient</span>
@@ -1061,6 +1061,62 @@
       </p>
     </div>
 
+    <div class="card" style="margin-bottom:30px;">
+      <span class="tag">Feature — Link Existing Class file</span>
+      <h3 style="font-size:19px;">Retrofit new automation into a file you already have, instead of generating a new one</h3>
+      <p>
+        Available in both UI Automation and API Automation, for both Java and Python. Click <b>Link Existing Class
+        file</b> (Generated Code section, right below "Start AI Code Generation") and pick a single <code>.java</code>
+        or <code>.py</code> file — from inside the workspace or anywhere else on disk. A compact status chip shows the
+        file name and detected language, with the full path in its tooltip, plus a small ✕ to unlink; clicking the
+        button again lets you replace the linked file at any time, and cancelling the picker leaves whatever is
+        currently linked untouched. If the file's language doesn't match the language currently selected in Settings,
+        SoftPlay asks you to either switch Settings to match or pick a different file — it never switches the
+        language silently.
+      </p>
+      <p>
+        The next click of <b>Start AI Code Generation</b> (or <b>Regenerate AI Code</b>) reads the file fresh, asks
+        the model to analyze it first, and produce the <em>complete, integrated</em> version of that same file —
+        reusing its existing methods, fields, imports, and setup/teardown wherever they genuinely fit, adding only
+        what the new request needs, and never appending an unrelated class underneath it. The result appears in the
+        usual AI Generated Code panel for review; nothing is ever written back to the linked file automatically — an
+        explicit <b>Save Code</b> click is still required, exactly as for any other generated result.
+      </p>
+      <div class="diagram" style="margin-top:22px;">
+        <div class="row">
+          <div class="node webview"><b>File picked</b><span>vscode.window.showOpenDialog, filtered to .java/.py — validated (readable, non-empty, under the size ceiling, language matches Settings) before it replaces any previous link</span></div>
+        </div>
+        <div class="arrow-down">▼</div>
+        <div class="row">
+          <div class="node cache"><b>Read fresh, once per request</b><span>readWorkspaceFileCached() — mtime-validated, so an on-disk edit is picked up on the next generation</span></div>
+        </div>
+        <div class="arrow-down">▼</div>
+        <div class="row">
+          <div class="node engine"><b>Credential-protected snapshot</b><span>the SAME Auto Password Encryption pipeline — never a second copy of that logic</span></div>
+        </div>
+        <div class="arrow-down">▼</div>
+        <div class="row">
+          <div class="node cache"><b>Reserved in the token budget</b><span>counted as mandatory context BEFORE optional Reusable Components (RAG) content is packed — an oversized linked file stops the request with an actionable message instead of being silently truncated</span></div>
+        </div>
+        <div class="arrow-down">▼</div>
+        <div class="row">
+          <div class="node cloud"><b>Retrofit prompt section</b><span>"analyze first, reuse what fits, add only what's missing" instructions, plus the exact retrofit comment placement rule</span></div>
+        </div>
+        <div class="arrow-down">▼</div>
+        <div class="row">
+          <div class="node host"><b>AI Generated Code panel</b><span>the complete integrated file, for review — Save Code is still a separate, explicit action</span></div>
+        </div>
+      </div>
+      <p class="muted" style="margin-top:14px;">
+        Reset behavior: both <b>Clear Data</b> and <b>Kill All Browsers</b> unlink the file, clear its cached content,
+        and cancel any generation already in flight — a pending read from before the reset can never resurface stale
+        content or complete a stale request afterward. Replacing or unlinking the file while a generation is
+        preparing cancels that generation the same way, rather than risking a prompt built from two different files.
+        Nothing about the linked file — its path or its content — is ever written to Settings, workspace state, or
+        the Output channel's logs.
+      </p>
+    </div>
+
     <table class="ref">
       <tr><th>Module</th><th>Responsibility</th></tr>
       <tr><td>extension.ts</td><td>Activation entry point — builds <code>SettingsStore</code> + <code>ObjectSpyPanel</code>, registers commands and the sidebar view.</td></tr>
@@ -1069,6 +1125,7 @@
       <tr><td>panel/aiCodePanel.ts</td><td>Full-size "AI Generated Code" editor panel — Regenerate, Copy, Save, Verify &amp; Fix.</td></tr>
       <tr><td>panel/generatedFeaturePanel.ts</td><td>Full-size "Generated Feature File" editor panel for AI-authored Gherkin output.</td></tr>
       <tr><td>panel/featureFilePanel.ts</td><td>Browse/parse an existing <code>.feature</code> file and pick a Scenario/Scenario Outline to link.</td></tr>
+      <tr><td>llm/linkedSourceFile.ts</td><td>"Link Existing Class file" — language detection from a filename, content validation (empty/oversized), and the save-name derivation shared by both automation modes and both languages.</td></tr>
       <tr><td>browser/codegenManager.ts</td><td>Spawns and supervises Playwright's own <code>codegen</code> CLI as a detached child process; injects the real-Chrome/Edge launch override into recorded code.</td></tr>
       <tr><td>execution/testExecutor.ts</td><td>Runs AI-generated code headless (pytest / Maven+JUnit) in a scratch project for "Verify &amp; Fix Code".</td></tr>
       <tr><td>execution/environmentCheck.ts</td><td>Confirms Java/Maven or Python (+ required packages) are available; self-provisions an offline Python venv from bundled wheels. Cached (see Caching section).</td></tr>
@@ -1420,6 +1477,7 @@
       <div class="gl-item"><span class="emoji">➤</span><div><b>Chat send arrow</b><span>Adds your typed note to the request — it's sent next time you click a "Start AI…" button.</span></div></div>
       <div class="gl-item"><span class="emoji">🤖</span><div><b>Start AI Code Generation</b><span>Sends everything to the AI to produce clean, final test code.</span></div></div>
       <div class="gl-item"><span class="emoji">📄</span><div><b>Start AI Feature File Generation</b><span>Turns your recording into a plain-English Cucumber feature file.</span></div></div>
+      <div class="gl-item"><span class="emoji">🔗</span><div><b>Link Existing Class file</b><span>Points the AI at an existing .java/.py file so it extends that file instead of writing a new one from scratch.</span></div></div>
       <div class="gl-item"><span class="emoji">📊</span><div><b>Token Monitoring bar</b><span>Shows how much of the AI's "reading limit" your request is using.</span></div></div>
     </div>
 

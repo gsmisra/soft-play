@@ -57,6 +57,11 @@ class FakeCancellationTokenSource {
   }
 }
 
+// R02: spy counters for clearSharedLlmContext()'s own cache-purging calls
+// — reset to 0 at the top of whichever test actually checks them.
+let clearFileCachesCallCount = 0;
+let clearRagIndexCacheCallCount = 0;
+
 const fakeVsCode = {
   CancellationTokenSource: FakeCancellationTokenSource,
   Uri: { file: fakeUri, joinPath: (base: FakeUri, ...parts: string[]) => fakeUri(path.posix.join(base.path, ...parts)) },
@@ -78,7 +83,20 @@ function loadObjectSpyPanelWithFakeVsCode(): { ObjectSpyPanel: new (...args: nev
         return originalLoad.apply(this, arguments);
       }
       if (id === '../cache/fileCache') {
-        return { readFileCachedSync: () => '', readWorkspaceFileCached: async () => undefined };
+        return {
+          readFileCachedSync: () => '',
+          readWorkspaceFileCached: async () => undefined,
+          clearFileCaches: () => {
+            clearFileCachesCallCount++;
+          }
+        };
+      }
+      if (id === '../rag/ragIndexer') {
+        return {
+          clearRagIndexCache: () => {
+            clearRagIndexCacheCallCount++;
+          }
+        };
       }
       if (id === '../security/secretVault') {
         return { TOKEN_MARKER: 'ENC[v1:', getSecretEnv: async () => ({}) };
@@ -212,8 +230,32 @@ interface FakeController {
   lastCustomInstructions: string;
   lastApiRequestDetails: undefined;
   selectedInstructionFiles: string[];
+  selectedRagFiles: string[];
   handleMessage: (message: unknown) => Promise<void>;
   regenerateAiCode: () => Promise<void>;
+  sendToLlm: (selectedFiles: string[], selectedRagFiles: string[], code: string, customInstructions: string, apiDetails?: unknown) => Promise<void>;
+  sessionEpoch: number;
+  llmCancellation?: { cancel: () => void; token: { isCancellationRequested: boolean } };
+  featureGenCancellation?: { cancel: () => void; token: { isCancellationRequested: boolean } };
+  readInstructionFiles: (relPaths: string[], epoch: number) => Promise<{ path: string; content: string }[]>;
+  requestCurrentPlaywrightCode: () => Promise<string>;
+  generatedFeaturePanel: {
+    show: () => void;
+    startGenerating: () => void;
+    appendChunk: (chunk: string) => void;
+    finish: (code: string) => void;
+    showError: (message: string) => void;
+  };
+  featureOutput?: string;
+  featureErrored?: string;
+  generateFeatureFile: (
+    playwrightCode: string,
+    customInstructions: string,
+    apiDetails?: unknown,
+    selectedFiles?: string[],
+    selectedRagFiles?: string[]
+  ) => Promise<void>;
+  regenerateFeatureFile: () => Promise<void>;
 }
 
 function makeController(capturePrompt: (prompt: string) => void): FakeController {
@@ -236,6 +278,7 @@ function makeController(capturePrompt: (prompt: string) => void): FakeController
   c.lastCustomInstructions = '';
   c.lastApiRequestDetails = undefined;
   c.selectedInstructionFiles = [];
+  c.selectedRagFiles = [];
   c.buildRagSection = async () => ({ section: '', matches: [] });
   c.recordReceivedTokens = async () => undefined;
   c.postLlmStart = () => undefined;
@@ -255,6 +298,18 @@ function makeController(capturePrompt: (prompt: string) => void): FakeController
   c.streamCopilotResponse = async (prompt: string) => {
     capturePrompt(prompt);
     return '```java\n// ok\n```';
+  };
+  c.sessionEpoch = 0;
+  c.generatedFeaturePanel = {
+    show: () => undefined,
+    startGenerating: () => undefined,
+    appendChunk: () => undefined,
+    finish: (code) => {
+      c.featureOutput = code;
+    },
+    showError: (message) => {
+      c.featureErrored = message;
+    }
   };
   return c;
 }
@@ -508,4 +563,418 @@ test('a message staged AFTER the last "Start AI Code Generation" send is still p
   assert.match(capturedPrompt, /second message/, 'the message staged after the last real send must still reach the regenerated prompt');
   assert.equal(c.output, '// ok');
   assert.equal(c.errored, undefined);
+});
+
+// ---------------------------------------------------------------------
+// RAG Data manual file selection wiring — part of the same "important
+// upgrade" as ragPackingPipeline.test.ts's own new tests: a "RAG Data"
+// search+checkbox list (mirroring "Custom Instructions") lets a user
+// select specific .github/rag/*.md file(s) to send, bypassing automatic
+// retrieval. This verifies the extension-host side of that wiring: the
+// checkbox state actually lands on `this.selectedRagFiles`, exactly
+// mirroring the pre-existing 'selectedInstructionFiles' handler.
+// ---------------------------------------------------------------------
+
+test('handleMessage(selectedRagFiles) updates selectedRagFiles', async () => {
+  const c = makeController(() => undefined);
+  await c.handleMessage({ type: 'selectedRagFiles', payload: ['database/cassandra-helper.md'] });
+  assert.deepEqual(c.selectedRagFiles, ['database/cassandra-helper.md']);
+});
+
+// ---------------------------------------------------------------------
+// R03 (external review, 2026-09-17): sendToLlm()'s own `selectedRagFiles`
+// parameter — the actual click-time payload, not the separately-tracked
+// `this.selectedRagFiles` field — must be what reaches buildRagSection(),
+// so a checkbox change AFTER this click (but before this request's own
+// async prep finishes) can never change what an ALREADY-STARTED request
+// sends. Verified by making `this.selectedRagFiles` (the mutable field)
+// deliberately WRONG relative to the parameter actually passed in — if the
+// fix regressed back to reading the live field, this test would see the
+// wrong (mutable-field) value instead of the one actually passed to
+// sendToLlm().
+// ---------------------------------------------------------------------
+
+test('sendToLlm() threads its OWN selectedRagFiles parameter into buildRagSection(), never the separately-tracked mutable field', async () => {
+  const c = makeController(() => undefined);
+  c.nativeGeneratedCode = 'some recorded code';
+  c.linkedScenario = undefined;
+  // Deliberately WRONG relative to what's about to be passed to sendToLlm()
+  // below — proves the parameter wins, not this field.
+  c.selectedRagFiles = ['stale-selection-from-before-this-click.md'];
+
+  let capturedSelectedRagFiles: unknown;
+  c.buildRagSection = async (...args: unknown[]) => {
+    capturedSelectedRagFiles = args[7]; // (settings, isApiMode, code, apiDetails, customInstructions, linkedScenario, mandatoryTokens, selectedRagFiles, ...)
+    return { section: '', matches: [] };
+  };
+
+  await c.sendToLlm(['instructions.md'], ['this-click-own-selection.md'], 'some recorded code', '');
+
+  assert.deepEqual(capturedSelectedRagFiles, ['this-click-own-selection.md']);
+  assert.equal(c.output, '// ok');
+  assert.equal(c.errored, undefined);
+});
+
+// ---------------------------------------------------------------------
+// R02 (external review, 2026-09-17): "Clear Data"/"Kill All Browsers"
+// (clearSharedLlmContext(), shared by both) must purge the CONTENT caches
+// too — a user-owned Custom Instructions file's cached text
+// (cache/fileCache.ts) and the parsed RAG recipe index
+// (rag/ragIndexer.ts) — not just the selection arrays/fields. Verified via
+// spies on the real, already-existing `clearFileCaches()`/
+// `clearRagIndexCache()` exports (previously never wired to anything, per
+// their own "not currently wired to a command" doc comments).
+// ---------------------------------------------------------------------
+
+test('clearSharedLlmContext() purges both the file-content cache and the RAG index cache, not just selection state', async () => {
+  clearFileCachesCallCount = 0;
+  clearRagIndexCacheCallCount = 0;
+
+  const c = Object.create((ObjectSpyPanel as { prototype: object }).prototype) as Record<string, unknown>;
+  c.llmCancellation = undefined;
+  c.llmCancellationOwner = undefined;
+  c.featureGenCancellation = undefined;
+  c.linkedScenario = { scenarioName: 'x' };
+  c.postLinkedScenario = () => undefined;
+  c.featureFilePanel = { forgetFile: () => undefined };
+  c.postFeatureFileAvailable = () => undefined;
+  c.lastApiRequestDetails = { url: 'x' };
+  c.lastCustomInstructions = 'something';
+  c.selectedInstructionFiles = ['a.md'];
+  c.selectedRagFiles = ['b.md'];
+  c.aiCodePanel = { clear: () => undefined };
+  c.generatedFeaturePanel = { clear: () => undefined };
+  c.postCodeCorrectness = () => undefined;
+  c.postAiCodeAvailable = () => undefined;
+  c.lastReceivedTokens = 5;
+  c.tokenEstimateSeq = 0;
+
+  (c as { clearSharedLlmContext: () => void }).clearSharedLlmContext();
+
+  assert.equal(clearFileCachesCallCount, 1, 'Custom Instructions file content must not survive a "start completely fresh" reset');
+  assert.equal(clearRagIndexCacheCallCount, 1, 'the parsed RAG recipe index must not survive a "start completely fresh" reset');
+  assert.deepEqual(c.selectedInstructionFiles, []);
+  assert.deepEqual(c.selectedRagFiles, []);
+});
+
+test('clearSharedLlmContext() bumps sessionEpoch', () => {
+  const c = Object.create((ObjectSpyPanel as { prototype: object }).prototype) as Record<string, unknown>;
+  c.sessionEpoch = 0;
+  c.llmCancellation = undefined;
+  c.llmCancellationOwner = undefined;
+  c.featureGenCancellation = undefined;
+  c.linkedScenario = { scenarioName: 'x' };
+  c.postLinkedScenario = () => undefined;
+  c.featureFilePanel = { forgetFile: () => undefined };
+  c.postFeatureFileAvailable = () => undefined;
+  c.lastApiRequestDetails = { url: 'x' };
+  c.lastCustomInstructions = 'something';
+  c.selectedInstructionFiles = ['a.md'];
+  c.selectedRagFiles = ['b.md'];
+  c.aiCodePanel = { clear: () => undefined };
+  c.generatedFeaturePanel = { clear: () => undefined };
+  c.postCodeCorrectness = () => undefined;
+  c.postAiCodeAvailable = () => undefined;
+  c.lastReceivedTokens = 5;
+  c.tokenEstimateSeq = 0;
+
+  (c as { clearSharedLlmContext: () => void }).clearSharedLlmContext();
+
+  assert.equal(c.sessionEpoch, 1, 'a request whose own preflight (instruction/RAG reads) is still in flight when this fires must see a mismatch the instant its await resolves');
+});
+
+// ---------------------------------------------------------------------
+// R02 (external review round 2, 2026-09-17 — deeper): request/session
+// ownership must be captured BEFORE the first async instruction/RAG read
+// and rechecked afterward, in sendToLlm()/regenerateAiCode() AND
+// generateFeatureFile() alike (R07 brings feature-file generation onto the
+// exact same discipline) — closing the gap where a "Clear Data"/"Kill All
+// Browsers" reset firing DURING that read left nothing to cancel (no `cts`
+// exists yet at that point) and the stale call went on to reach the model
+// anyway. Each test below simulates "a reset fired while this await was
+// pending" by having the very read being awaited bump `sessionEpoch` (or
+// cancel `llmCancellation`) as a side effect — a deterministic stand-in for
+// timing-dependent real concurrency, exactly like ragIndexer.summary.test.ts's
+// own gated-promise epoch-race test achieves for the RAG index cache.
+// ---------------------------------------------------------------------
+
+test('sendToLlm(): a reset during the instruction-file read prevents runLlmRefinement() from ever running', async () => {
+  const c = makeController(() => undefined);
+  c.sessionEpoch = 0;
+  let refinementCalled = false;
+  c.runLlmRefinement = async () => {
+    refinementCalled = true;
+  };
+  c.readInstructionFiles = async () => {
+    c.sessionEpoch = 1; // simulates clearSharedLlmContext() firing mid-flight
+    return [];
+  };
+
+  await c.sendToLlm(['a.md'], [], 'some code', '');
+
+  assert.equal(refinementCalled, false, 'a request whose preflight outlived a reset must never reach the model');
+});
+
+test('regenerateAiCode(): a reset during the instruction-file read prevents runLlmRefinement() from ever running', async () => {
+  const c = makeController(() => undefined);
+  c.sessionEpoch = 0;
+  let refinementCalled = false;
+  c.runLlmRefinement = async () => {
+    refinementCalled = true;
+  };
+  c.requestCurrentPlaywrightCode = async () => 'some code';
+  c.readInstructionFiles = async () => {
+    c.sessionEpoch = 1;
+    return [];
+  };
+
+  await c.regenerateAiCode();
+
+  assert.equal(refinementCalled, false, 'a request whose preflight outlived a reset must never reach the model');
+});
+
+test('runLlmRefinement(): a cancellation fired during its own RAG-packing preflight prevents streamCopilotResponse() from ever being called', async () => {
+  const c = makeController(() => undefined);
+  c.nativeGeneratedCode = 'some code';
+  c.linkedScenario = undefined;
+  let streamCalled = false;
+  c.streamCopilotResponse = async () => {
+    streamCalled = true;
+    return '```java\n// ok\n```';
+  };
+  c.buildRagSection = async () => {
+    // Simulates "Clear Data"/"Kill All Browsers" firing while this
+    // request's own RAG packing was still in flight — by this point
+    // `this.llmCancellation` already exists (assigned at the very top of
+    // runLlmRefinement()), so cancelling it here is exactly what that reset
+    // itself would do.
+    c.llmCancellation?.cancel();
+    return { section: '', matches: [] };
+  };
+
+  await c.runLlmRefinement([], 'some code', '');
+
+  assert.equal(streamCalled, false, 'a request cancelled during its own preflight must never reach the real, billed model call');
+  assert.equal(c.output, undefined, 'no stale result should ever reach the panel either');
+});
+
+// ---------------------------------------------------------------------
+// R07 (external review round 2, 2026-09-17): feature-file generation
+// (generateFeatureFile()/regenerateFeatureFile()) now applies Custom
+// Instructions/"RAG Data" selection exactly like automation-code generation
+// already does — previously documented as an explicit, deliberate scope
+// boundary; the review was explicit that documenting an exclusion is not
+// the same as implementing the requested selection behavior.
+// ---------------------------------------------------------------------
+
+test('generateFeatureFile(): an empty instruction selection includes every eligible Custom Instructions file (same "empty = all" policy as code generation)', async () => {
+  const c = makeController(() => undefined);
+  let capturedSelected: unknown;
+  c.readInstructionFiles = async (selected) => {
+    capturedSelected = selected;
+    return [{ path: 'a.md', content: 'A content' }];
+  };
+  let capturedPrompt = '';
+  c.streamCopilotResponse = async (prompt: string) => {
+    capturedPrompt = prompt;
+    return '```gherkin\nFeature: x\n```';
+  };
+
+  await c.generateFeatureFile('some recorded code', '', undefined, [], []);
+
+  assert.deepEqual(capturedSelected, [], 'the empty selection itself must reach readInstructionFiles() unmodified — it decides "all eligible" internally');
+  assert.match(capturedPrompt, /A content/, 'the resolved instruction file content must actually reach the sent prompt');
+  assert.equal(c.featureOutput, 'Feature: x');
+  assert.equal(c.featureErrored, undefined);
+});
+
+test('generateFeatureFile(): a non-empty instruction selection sends ONLY those files', async () => {
+  const c = makeController(() => undefined);
+  c.readInstructionFiles = async (selected) => selected.map((p) => ({ path: p, content: `content of ${p}` }));
+  let capturedPrompt = '';
+  c.streamCopilotResponse = async (prompt: string) => {
+    capturedPrompt = prompt;
+    return '```gherkin\nFeature: x\n```';
+  };
+
+  await c.generateFeatureFile('some recorded code', '', undefined, ['picked.md'], []);
+
+  assert.match(capturedPrompt, /content of picked\.md/);
+  assert.equal(c.featureOutput, 'Feature: x');
+});
+
+test('generateFeatureFile(): a non-empty RAG selection reaches the sent prompt, bypassing automatic matching', async () => {
+  const c = makeController(() => undefined);
+  let capturedSelectedRagFiles: unknown;
+  c.buildRagSection = async (...args: unknown[]) => {
+    capturedSelectedRagFiles = args[7];
+    return { section: '\n## Reusable components available\n### Cassandra Helper', matches: [{ id: 'cassandra-helper' }] };
+  };
+  let capturedPrompt = '';
+  c.streamCopilotResponse = async (prompt: string) => {
+    capturedPrompt = prompt;
+    return '```gherkin\nFeature: x\n```';
+  };
+
+  await c.generateFeatureFile('some recorded code', '', undefined, [], ['database/cassandra-helper.md']);
+
+  assert.deepEqual(capturedSelectedRagFiles, ['database/cassandra-helper.md']);
+  assert.match(capturedPrompt, /Cassandra Helper/, 'the selected RAG recipe content must actually reach the sent prompt');
+  assert.equal(c.featureOutput, 'Feature: x');
+});
+
+test('generateFeatureFile(): an empty RAG selection still calls buildRagSection() (preserving the existing automatic-matching policy)', async () => {
+  const c = makeController(() => undefined);
+  let called = false;
+  c.buildRagSection = async () => {
+    called = true;
+    return { section: '', matches: [] };
+  };
+  c.streamCopilotResponse = async () => '```gherkin\nFeature: x\n```';
+
+  await c.generateFeatureFile('some recorded code', '', undefined, [], []);
+
+  assert.equal(called, true, 'an empty RAG selection must still go through the normal automatic-matching path, not skip RAG entirely');
+  assert.equal(c.featureOutput, 'Feature: x');
+});
+
+test('generateFeatureFile(): a reset during the instruction-file read prevents any Copilot call', async () => {
+  const c = makeController(() => undefined);
+  c.sessionEpoch = 0;
+  let streamCalled = false;
+  c.streamCopilotResponse = async () => {
+    streamCalled = true;
+    return '```gherkin\nFeature: x\n```';
+  };
+  c.readInstructionFiles = async () => {
+    c.sessionEpoch = 1;
+    return [];
+  };
+
+  await c.generateFeatureFile('some recorded code', '', undefined, [], []);
+
+  assert.equal(streamCalled, false, 'a feature-file request whose preflight outlived a reset must never reach the model');
+  assert.equal(c.featureOutput, undefined);
+});
+
+test('generateFeatureFile(): a reset during RAG packing prevents any Copilot call', async () => {
+  const c = makeController(() => undefined);
+  c.sessionEpoch = 0;
+  let streamCalled = false;
+  c.streamCopilotResponse = async () => {
+    streamCalled = true;
+    return '```gherkin\nFeature: x\n```';
+  };
+  c.buildRagSection = async () => {
+    c.sessionEpoch = 1;
+    return { section: '', matches: [] };
+  };
+
+  await c.generateFeatureFile('some recorded code', '', undefined, [], []);
+
+  assert.equal(streamCalled, false, 'a feature-file request whose RAG-packing preflight outlived a reset must never reach the model');
+  assert.equal(c.featureOutput, undefined);
+});
+
+test('regenerateFeatureFile(): reads the shared selectedInstructionFiles/selectedRagFiles fields, snapshotted once, same as regenerateAiCode()', async () => {
+  const c = makeController(() => undefined);
+  c.selectedInstructionFiles = ['shared-instr.md'];
+  c.selectedRagFiles = ['shared-rag.md'];
+  c.requestCurrentPlaywrightCode = async () => 'some recorded code';
+  let capturedSelected: string[] | undefined;
+  let capturedSelectedRagFiles: string[] | undefined;
+  c.generateFeatureFile = async (_code, _instr, _api, selectedFiles, selectedRagFiles) => {
+    capturedSelected = selectedFiles;
+    capturedSelectedRagFiles = selectedRagFiles;
+  };
+
+  await c.regenerateFeatureFile();
+
+  assert.deepEqual(capturedSelected, ['shared-instr.md']);
+  assert.deepEqual(capturedSelectedRagFiles, ['shared-rag.md']);
+});
+
+// ---------------------------------------------------------------------
+// R02/R07 (external review round 3, 2026-09-17): three deeper gaps found in
+// the round-2 fixes above — regenerateFeatureFile() itself had no epoch
+// guard around its own await (so a reset during it went unnoticed, and
+// generateFeatureFile() treated the resulting call as a brand-new, current
+// request), generateFeatureFile()'s preparation steps ran outside any
+// try/catch (a thrown error left the panel stuck "generating" forever,
+// never reaching showError()), and the resolved model used for mandatory-
+// token measurement/RAG packing was never actually passed to the real send.
+// ---------------------------------------------------------------------
+
+test('regenerateFeatureFile(): a reset during requestCurrentPlaywrightCode() prevents a stale generateFeatureFile() call', async () => {
+  const c = makeController(() => undefined);
+  c.sessionEpoch = 0;
+  const epochAtStart = c.sessionEpoch;
+  c.requestCurrentPlaywrightCode = async () => {
+    c.sessionEpoch = epochAtStart + 1; // simulates "Clear Data"/"Kill All Browsers" firing mid-await
+    return 'some recorded code';
+  };
+  let generateCalled = false;
+  c.generateFeatureFile = async () => {
+    generateCalled = true;
+  };
+
+  await c.regenerateFeatureFile();
+
+  assert.equal(generateCalled, false, 'generateFeatureFile() captures its OWN fresh epoch at entry, so it must never even be CALLED for a request whose preflight already outlived a reset');
+});
+
+test('generateFeatureFile(): a preparation failure (readInstructionFiles rejects) surfaces an error instead of leaving the panel stuck "generating"', async () => {
+  const c = makeController(() => undefined);
+  c.readInstructionFiles = async () => {
+    throw new Error('workspace file system unavailable');
+  };
+  let streamCalled = false;
+  c.streamCopilotResponse = async () => {
+    streamCalled = true;
+    return '```gherkin\nFeature: x\n```';
+  };
+
+  await c.generateFeatureFile('some recorded code', '', undefined, [], []);
+
+  assert.equal(streamCalled, false, 'a preparation failure must never reach the model at all');
+  assert.equal(c.featureOutput, undefined);
+  assert.match(c.featureErrored ?? '', /workspace file system unavailable/, 'the panel must be told generation failed, not left stuck showing "generating…" forever');
+});
+
+test('generateFeatureFile(): a preparation failure (buildRagSection rejects) also surfaces an error, not a stuck panel', async () => {
+  const c = makeController(() => undefined);
+  c.buildRagSection = async () => {
+    throw new Error('RAG packing exploded');
+  };
+  let streamCalled = false;
+  c.streamCopilotResponse = async () => {
+    streamCalled = true;
+    return '```gherkin\nFeature: x\n```';
+  };
+
+  await c.generateFeatureFile('some recorded code', '', undefined, [], []);
+
+  assert.equal(streamCalled, false);
+  assert.equal(c.featureOutput, undefined);
+  assert.match(c.featureErrored ?? '', /RAG packing exploded/);
+});
+
+test('generateFeatureFile(): reuses the SAME resolved model handle for the real send as was used for mandatory-token measurement and RAG packing', async () => {
+  const c = makeController(() => undefined);
+  let modelSeenByRagSection: unknown;
+  c.buildRagSection = async (...args: unknown[]) => {
+    modelSeenByRagSection = args[8]; // (settings, isApiMode, code, apiDetails, customInstructions, linkedScenario, mandatoryTokens, selectedRagFiles, model, cancellationToken)
+    return { section: '', matches: [] };
+  };
+  let modelSeenByStream: unknown;
+  c.streamCopilotResponse = async (...args: unknown[]) => {
+    modelSeenByStream = args[4];
+    return '```gherkin\nFeature: x\n```';
+  };
+
+  await c.generateFeatureFile('some recorded code', '', undefined, [], []);
+
+  assert.ok(modelSeenByRagSection, 'the resolved model must actually reach buildRagSection()');
+  assert.strictEqual(modelSeenByStream, modelSeenByRagSection, 'the real send must reuse the EXACT SAME resolved model handle, never independently re-resolve by model id string');
+  assert.equal(c.featureOutput, 'Feature: x');
 });

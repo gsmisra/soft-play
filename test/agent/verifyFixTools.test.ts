@@ -13,7 +13,7 @@ import type { ExecutionResult } from '../../src/execution/testExecutor';
  */
 
 function makeExecutionResult(overrides: Partial<ExecutionResult> = {}): ExecutionResult {
-  return { success: false, compileOnly: false, apiCallOutcome: 'not-run', output: '', ...overrides };
+  return { success: false, compileOnly: false, apiCallOutcome: 'not-run', httpStatusCodes: [], output: '', ...overrides };
 }
 
 function baseDeps(overrides: Partial<RunCodeToolDeps> = {}): RunCodeToolDeps {

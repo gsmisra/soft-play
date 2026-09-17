@@ -11,6 +11,10 @@
   const linkedScenarioBadge = document.getElementById('linkedScenarioBadge');
   const linkedScenarioText = document.getElementById('linkedScenarioText');
   const unlinkScenarioBtn = document.getElementById('unlinkScenarioBtn');
+  const linkSourceFileBtn = document.getElementById('linkSourceFileBtn');
+  const linkedSourceBadge = document.getElementById('linkedSourceBadge');
+  const linkedSourceText = document.getElementById('linkedSourceText');
+  const unlinkSourceBtn = document.getElementById('unlinkSourceBtn');
   const saveCodeBtn = document.getElementById('saveCodeBtn');
   const copyCodeBtn = document.getElementById('copyCodeBtn');
   const codeLanguageLabel = document.getElementById('codeLanguageLabel');
@@ -28,7 +32,9 @@
   // this replaces.
   const customInstructionsRagSection = document.getElementById('customInstructionsRagSection');
   const promptFilesList = document.getElementById('promptFilesList');
+  const promptFilesSearch = document.getElementById('promptFilesSearch');
   const ragFilesList = document.getElementById('ragFilesList');
+  const ragFilesSearch = document.getElementById('ragFilesSearch');
   const chatComposer = document.getElementById('chatComposer');
   const chatMessages = document.getElementById('chatMessages');
   const chatInput = document.getElementById('chatInput');
@@ -937,14 +943,15 @@
   });
 
   /** Shared by "Clear Data" (API Automation) and "Kill All Browsers" (UI
-   * Automation): unchecks every "Custom md files" checkbox and discards
-   * the chat composer's staged bubbles and any unsent text -- the client
-   * side of "any custom prompt loaded in memory" being freed. */
+   * Automation): unchecks every "Custom Instructions"/"RAG Data" checkbox
+   * (and clears both search boxes) and discards the chat composer's staged
+   * bubbles and any unsent text -- the client side of "any custom prompt/
+   * RAG selection loaded in memory" being freed, so a fresh session starts
+   * with automatic behavior for both (every Custom Instructions file;
+   * automatic RAG matching) rather than a stale selection surviving. */
   function resetAiAssistUi() {
-    promptFilesList.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
-      cb.checked = false;
-    });
-    postSelectedInstructionFiles();
+    promptFiles.clear();
+    ragFiles.clear();
 
     stagedInstructions = [];
     chatMessages.innerHTML = '';
@@ -982,7 +989,8 @@
       payload: {
         code: playwrightEditor.getValue(),
         customInstructions: currentCustomInstructionsPreview(),
-        selectedFiles: selectedPromptFiles(),
+        selectedFiles: promptFiles.getSelected(),
+        selectedRagFiles: ragFiles.getSelected(),
         apiDetails: collectApiRequestDetails()
       }
     });
@@ -1131,16 +1139,135 @@
     vscode.postMessage({ type: 'refreshPromptFiles' });
   });
 
-  function selectedPromptFiles() {
-    return Array.from(promptFilesList.querySelectorAll('input[type="checkbox"]:checked')).map((cb) => cb.value);
+  /** Shared by "Custom Instructions" and "RAG Data" — a search-filterable
+   * checkbox list where an EMPTY selection has its own caller-defined
+   * meaning (Custom Instructions: "send every file"; RAG Data: "let
+   * automatic matching decide") rather than "send none". Filtering which
+   * items are VISIBLE (via `searchEl`) never touches which are CHECKED —
+   * search text and selection are two fully independent pieces of state,
+   * so typing a filter can never silently lose a check the user already
+   * made on a now-hidden item. Posts `messageType` with the current
+   * selection to the extension host on every change (a fresh file list
+   * from `setFiles()`, a checkbox toggle, or a filter that hides/shows
+   * items) — same "purely staged, checking a box does nothing on its own"
+   * posture both of these already had individually.
+   *
+   * `files` given to `setFiles()` accepts either plain path strings
+   * (Custom Instructions) or `{relPath, title, tags}` objects (RAG Data —
+   * R04: lets the search box match a recipe by what it's ABOUT, e.g.
+   * finding a `database/helpers.md` recipe titled "Connect to Cassandra"
+   * when searching "cassandra" even though its path alone doesn't say so),
+   * normalized into one internal shape so the rest of this function never
+   * needs to know which kind of list it's holding. */
+  function makeFileCheckboxList(listEl, searchEl, emptyMessage, messageType, label) {
+    let allItems = []; // [{ path, searchText }]
+    let selected = new Set();
+
+    function post() {
+      vscode.postMessage({ type: messageType, payload: Array.from(selected) });
+    }
+
+    function toItems(files) {
+      return files.map((f) =>
+        typeof f === 'string'
+          ? { path: f, searchText: f.toLowerCase() }
+          : {
+              path: f.relPath,
+              // R04 (final round): the recipe's OWN body text is included
+              // here (already read server-side once per refresh — see
+              // objectSpyPanel.ts's partitionRagFilesByValidity()) so a
+              // recipe is findable by anything mentioned in its example
+              // code — a declared, constructed, referenced, or imported
+              // class name, or just prose — never only its path/title/tags.
+              searchText: `${f.relPath} ${f.title || ''} ${(f.tags || []).join(' ')} ${f.body || ''}`.toLowerCase()
+            }
+      );
+    }
+
+    function render() {
+      if (!allItems.length) {
+        listEl.innerHTML = `<div class="prompt-files-empty">${emptyMessage}</div>`;
+        post();
+        return;
+      }
+      const query = searchEl.value.trim().toLowerCase();
+      const visible = query ? allItems.filter((item) => item.searchText.includes(query)) : allItems;
+      if (!visible.length) {
+        listEl.innerHTML = '<div class="prompt-files-empty">No files match your search.</div>';
+        post();
+        return;
+      }
+      listEl.innerHTML = '';
+      for (const item of visible) {
+        const fileLabel = document.createElement('label');
+        fileLabel.className = 'prompt-file-item';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.value = item.path;
+        checkbox.checked = selected.has(item.path);
+        checkbox.addEventListener('change', () => {
+          if (checkbox.checked) {
+            selected.add(item.path);
+          } else {
+            selected.delete(item.path);
+          }
+          post();
+        });
+        fileLabel.appendChild(checkbox);
+        const text = document.createElement('span');
+        text.textContent = item.path;
+        fileLabel.appendChild(text);
+        listEl.appendChild(fileLabel);
+      }
+      post();
+    }
+
+    searchEl.addEventListener('input', render);
+
+    return {
+      // R06: an ordinary refresh RECONCILES the existing selection against
+      // the new list (keeps whatever's still present, drops what's gone)
+      // and PRESERVES the search text -- it must never silently widen an
+      // intentionally narrow request into "send everything"/"go back to
+      // automatic matching" just because the user clicked Refresh. If the
+      // selection becomes completely empty as a RESULT of reconciling (every
+      // previously-selected file disappeared from the new list), that IS a
+      // real, silent mode change worth flagging -- surfaced as an actionable
+      // notice rather than a quiet behavior change the user might not
+      // notice from the checkbox list alone. Explicit resets (Clear Data/
+      // Kill All Browsers) use clear() below instead, which intentionally
+      // DOES wipe everything, search text included.
+      setFiles(files) {
+        const items = toItems(files);
+        const availablePaths = new Set(items.map((item) => item.path));
+        const hadSelection = selected.size > 0;
+        selected = new Set([...selected].filter((path) => availablePaths.has(path)));
+        allItems = items;
+        if (hadSelection && selected.size === 0) {
+          vscode.postMessage({ type: 'fileSelectionClearedByRefresh', payload: { label } });
+        }
+        render();
+      },
+      getSelected() {
+        return Array.from(selected);
+      },
+      clear() {
+        selected = new Set();
+        searchEl.value = '';
+        render();
+      }
+    };
   }
+
+  const promptFiles = makeFileCheckboxList(promptFilesList, promptFilesSearch, 'No .md files found yet — click Refresh.', 'selectedInstructionFiles', 'Custom Instructions');
+  const ragFiles = makeFileCheckboxList(ragFilesList, ragFilesSearch, 'No recipes found yet — click Refresh.', 'selectedRagFiles', 'RAG Data');
 
   // AI processing never starts on its own — checking a .md file below,
   // typing in the chat composer, or a fresh Playwright recording all only
   // ever stage context. Nothing reaches the LLM until "Start AI Code Generation"
   // is explicitly clicked (see below), which bundles: the current
-  // Playwright Code, whichever .md files are checked (selectedPromptFiles()
-  // below, read fresh at click time), the linked scenario/selected steps
+  // Playwright Code, whichever .md/RAG files are checked (promptFiles/
+  // ragFiles.getSelected(), read fresh at click time), the linked scenario/selected steps
   // and current Settings (both read on the extension-host side), and
   // everything staged in the chat composer.
   let stagedInstructions = [];
@@ -1232,7 +1359,8 @@
     vscode.postMessage({
       type: 'sendToLlm',
       payload: {
-        selectedFiles: selectedPromptFiles(),
+        selectedFiles: promptFiles.getSelected(),
+        selectedRagFiles: ragFiles.getSelected(),
         code: playwrightEditor.getValue(),
         customInstructions,
         apiDetails: collectApiRequestDetails()
@@ -1254,7 +1382,13 @@
     const customInstructions = collectInstructionsForGeneration();
     vscode.postMessage({
       type: 'generateFeatureFile',
-      payload: { code: playwrightEditor.getValue(), customInstructions, apiDetails: collectApiRequestDetails() }
+      payload: {
+        code: playwrightEditor.getValue(),
+        customInstructions,
+        apiDetails: collectApiRequestDetails(),
+        selectedFiles: promptFiles.getSelected(),
+        selectedRagFiles: ragFiles.getSelected()
+      }
     });
     scheduleTokenEstimate();
   });
@@ -1352,6 +1486,37 @@
       : 'Browse and select a Cucumber .feature file and pick a Scenario/Scenario Outline to link to the generated code';
   }
 
+  // "Link Existing Class file" — button always stays "Link Existing Class
+  // file" (clicking it again browses to REPLACE whatever is currently
+  // linked); the compact badge below it is the only state-dependent UI —
+  // same "button always available to replace the link" requirement as
+  // linkFeatureBtn above, just without a separate reopen/view surface.
+  linkSourceFileBtn.addEventListener('click', () => {
+    vscode.postMessage({ type: 'linkSourceFile' });
+  });
+
+  unlinkSourceBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    vscode.postMessage({ type: 'unlinkSourceFile' });
+  });
+
+  function applyLinkedSourceFile(file) {
+    if (!file) {
+      linkedSourceBadge.hidden = true;
+      linkedSourceText.textContent = '';
+      linkedSourceBadge.title = '';
+      return;
+    }
+    linkedSourceBadge.hidden = false;
+    var languageLabel = file.language === 'java' ? 'Java' : 'Python';
+    linkedSourceText.textContent = file.fileName + ' (' + languageLabel + ')';
+    // Full path in the tooltip only — an unobtrusive place for something
+    // that's rarely needed but should never be hidden entirely. The host
+    // sends the linked file's own URI string (scheme and all — e.g. a
+    // remote/virtual workspace's real identity), never a bare local path.
+    linkedSourceBadge.title = file.uriString;
+  }
+
   // See media/codeEditor.js for the shared editor factory (line-number
   // gutter, Tab-indent, syntax highlighting) used here and by the
   // standalone AI Generated Code panel.
@@ -1401,14 +1566,17 @@
       case 'featureFileAvailable':
         applyFeatureFileAvailable(message.payload);
         break;
+      case 'linkedSourceFile':
+        applyLinkedSourceFile(message.payload);
+        break;
       case 'aiCodeAvailable':
         applyAiCodeAvailable(message.payload);
         break;
       case 'promptFiles':
-        renderPromptFiles(message.payload);
+        promptFiles.setFiles(message.payload);
         break;
       case 'ragFiles':
-        renderRagFiles(message.payload);
+        ragFiles.setFiles(message.payload);
         break;
       case 'aiStatus':
         applyAiStatus(message.payload);
@@ -1474,59 +1642,6 @@
       aiStatusLabel.textContent = '';
       aiStatusLabel.className = 'llm-status';
       aiStatusLabel.title = '';
-    }
-  }
-
-  // Tells the extension host which .md files are currently checked, so the
-  // automatic AI refinement pipeline (fires on every new codegen output
-  // update, no button needed) always uses the up-to-date selection. Also
-  // fired once right after a re-render, since rebuilding the checkbox DOM
-  // always starts unchecked -- keeps the host's tracked selection from
-  // silently going stale relative to what's actually visible.
-  function postSelectedInstructionFiles() {
-    vscode.postMessage({ type: 'selectedInstructionFiles', payload: selectedPromptFiles() });
-  }
-
-  function renderPromptFiles(files) {
-    if (!files.length) {
-      promptFilesList.innerHTML = '<div class="prompt-files-empty">No .md files found under .github/.</div>';
-      postSelectedInstructionFiles();
-      return;
-    }
-    promptFilesList.innerHTML = '';
-    for (const file of files) {
-      const label = document.createElement('label');
-      label.className = 'prompt-file-item';
-      const checkbox = document.createElement('input');
-      checkbox.type = 'checkbox';
-      checkbox.value = file;
-      checkbox.addEventListener('change', postSelectedInstructionFiles);
-      label.appendChild(checkbox);
-      const text = document.createElement('span');
-      text.textContent = file;
-      label.appendChild(text);
-      promptFilesList.appendChild(label);
-    }
-    postSelectedInstructionFiles();
-  }
-
-  /** "RAG Data" — read-only, unlike Custom Instructions above: which
-   * recipe(s) actually apply to a given request is decided automatically
-   * by retrieval scoring (see rag/ragRetriever.ts), not by a checkbox here,
-   * so this just shows what's currently indexed under .github/rag/. */
-  function renderRagFiles(files) {
-    if (!files.length) {
-      ragFilesList.innerHTML = '<div class="prompt-files-empty">No recipes found under .github/rag/.</div>';
-      return;
-    }
-    ragFilesList.innerHTML = '';
-    for (const file of files) {
-      const item = document.createElement('div');
-      item.className = 'prompt-file-item';
-      const text = document.createElement('span');
-      text.textContent = file;
-      item.appendChild(text);
-      ragFilesList.appendChild(item);
     }
   }
 

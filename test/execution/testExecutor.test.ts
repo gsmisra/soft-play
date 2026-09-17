@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import * as assert from 'node:assert/strict';
-import { javaPomXml } from '../../src/execution/testExecutor';
+import { javaPomXml, extractHttpStatusCodes, injectJavaHttpStatusCapture } from '../../src/execution/testExecutor';
 
 /**
  * The actual bug a user reported: "Verify & Fix Code" only ever worked for
@@ -69,4 +69,87 @@ test('javaPomXml still includes Cucumber dependencies only for BDD-mode code, re
   const nonBddPom = javaPomXml(false, 'ui', undefined, '17');
   assert.match(bddPom, /cucumber-java/);
   assert.doesNotMatch(nonBddPom, /cucumber-java/);
+});
+
+/**
+ * "Verify & Fix Code" in API Automation mode: per the explicit product
+ * decision, ANY real HTTP status code is reported to the user as-is — the
+ * generated code's own `.statusCode(...)`/`assert response.status_code ==
+ * ...` assertion is never second-guessed. `extractHttpStatusCodes()` reads
+ * back exactly what `injectJavaHttpStatusCapture()` (Java) and the Python
+ * conftest.py hook LOG TO A FILE (never stdout — see `readHttpStatusLog()`'s
+ * own doc comment: a real, live end-to-end run against pytest proved that
+ * pytest's default output capturing silently drops a PASSING test's
+ * captured stdout, which is exactly the common case a print-based marker
+ * would go missing for), independently of the test's own pass/fail.
+ */
+test('extractHttpStatusCodes finds every marker occurrence, in the order logged, ignoring unrelated build/test noise', () => {
+  const output = [
+    '[INFO] Scanning for projects...',
+    'SOFTPLAY_HTTP_STATUS:200',
+    'Tests run: 1, Failures: 1',
+    'SOFTPLAY_HTTP_STATUS:404',
+    'BUILD SUCCESS'
+  ].join('\n');
+  assert.deepEqual(extractHttpStatusCodes(output), [200, 404]);
+});
+
+test('extractHttpStatusCodes returns an empty array when no live call ever happened', () => {
+  assert.deepEqual(extractHttpStatusCodes('[ERROR] Connection refused\nBUILD FAILURE'), []);
+});
+
+test('extractHttpStatusCodes never reads a real 3-digit code off the front of a longer, unrelated number', () => {
+  assert.deepEqual(extractHttpStatusCodes('SOFTPLAY_HTTP_STATUS:20012345'), []);
+});
+
+test('injectJavaHttpStatusCapture inserts a REST Assured global filter immediately after the class\'s own opening brace, leaving the rest of the class untouched', () => {
+  const original = [
+    'import static io.restassured.RestAssured.*;',
+    '',
+    'public class GetUsersTest {',
+    '  @Test',
+    '  void getUsers() {',
+    '    given().when().get("/users").then().statusCode(200);',
+    '  }',
+    '}'
+  ].join('\n');
+  const injected = injectJavaHttpStatusCapture(original, 'C:\\scratch\\softplay_http_status.log');
+
+  // The exact original body (everything after the opening brace) must still
+  // be present, unmodified and in order — this is an INSERTION, never a
+  // rewrite of the generated code's own logic.
+  const braceIndex = original.indexOf('{');
+  const originalBody = original.slice(braceIndex + 1);
+  assert.ok(injected.endsWith(originalBody), 'the original class body must be preserved verbatim after the injected block');
+
+  // The injected static block itself must come BEFORE that original body,
+  // register a global RestAssured filter, and append the exact marker
+  // extractHttpStatusCodes() looks for to the given log file path (with the
+  // Windows path's backslashes correctly doubled for a Java string literal).
+  const injectedPrefix = injected.slice(0, injected.length - originalBody.length);
+  assert.match(injectedPrefix, /public class GetUsersTest \{/);
+  assert.match(injectedPrefix, /static \{/);
+  assert.match(injectedPrefix, /io\.restassured\.RestAssured\.filters\(/);
+  assert.match(injectedPrefix, /java\.nio\.file\.Paths\.get\("C:\\\\scratch\\\\softplay_http_status\.log"\)/);
+  assert.match(injectedPrefix, /"SOFTPLAY_HTTP_STATUS:" \+ softPlayResponse\.getStatusCode\(\)/);
+  assert.match(injectedPrefix, /StandardOpenOption\.CREATE, java\.nio\.file\.StandardOpenOption\.APPEND/);
+});
+
+test('injectJavaHttpStatusCapture escapes a Windows log path\'s backslashes correctly for a Java string literal', () => {
+  const injected = injectJavaHttpStatusCapture('public class T {}', 'C:\\Users\\Test User\\scratch\\softplay_http_status.log');
+  // Exactly one literal Java string containing the doubled-backslash form —
+  // asserted precisely (not just "contains backslash") so a future change
+  // to the escaping logic can't silently under- or over-escape.
+  assert.match(injected, /Paths\.get\("C:\\\\Users\\\\Test User\\\\scratch\\\\softplay_http_status\.log"\)/);
+});
+
+test('injectJavaHttpStatusCapture handles a class declaration with an extends/implements clause', () => {
+  const original = 'public class GetUsersTest extends BaseApiTest implements Runnable {\n  void run() {}\n}';
+  const injected = injectJavaHttpStatusCapture(original, 'C:\\scratch\\softplay_http_status.log');
+  assert.match(injected, /public class GetUsersTest extends BaseApiTest implements Runnable \{[\s\S]*static \{[\s\S]*void run\(\) \{\}/);
+});
+
+test('injectJavaHttpStatusCapture is a no-op (returns the input unchanged) when no "public class" declaration is found', () => {
+  const original = 'class NotPublic {}';
+  assert.equal(injectJavaHttpStatusCapture(original, 'C:\\scratch\\softplay_http_status.log'), original);
 });

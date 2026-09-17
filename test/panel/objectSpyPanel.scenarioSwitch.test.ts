@@ -91,7 +91,10 @@ function loadObjectSpyPanelWithFakeVsCode(): { ObjectSpyPanel: new (...args: nev
         return originalLoad.apply(this, arguments);
       }
       if (id === '../cache/fileCache') {
-        return { readFileCachedSync: () => '', readWorkspaceFileCached: async () => undefined };
+        return { readFileCachedSync: () => '', readWorkspaceFileCached: async () => undefined, clearFileCaches: () => undefined };
+      }
+      if (id === '../rag/ragIndexer') {
+        return { clearRagIndexCache: () => undefined };
       }
       if (id === '../security/secretVault') {
         return { TOKEN_MARKER: 'ENC[v1:', getSecretEnv: async () => ({}) };

@@ -38,6 +38,16 @@ function fakeUri(p: string): FakeUri {
  * `files.clear()`. */
 const files = new Map<string, string>();
 
+/** R02 (external review, 2026-09-17): a controllable "pause" a test can
+ * insert into every `readFile()` call, plus a call counter — used ONLY by
+ * the epoch/race test below to deterministically hold a build mid-flight
+ * while `clearRagIndexCache()` fires, then verify the cache wasn't
+ * repopulated once it finishes. Defaults to an already-resolved (no-op)
+ * gate and a 0 counter, reset per test, so every OTHER test here is
+ * completely unaffected. */
+let readFileGate: Promise<void> = Promise.resolve();
+let readFileCallCount = 0;
+
 const fakeVsCode = {
   Uri: {
     joinPath: (base: FakeUri, ...parts: string[]) => fakeUri(path.posix.join(base.path, ...parts))
@@ -57,6 +67,8 @@ const fakeVsCode = {
     findFiles: async () => Array.from(files.keys()).map(fakeUri),
     fs: {
       readFile: async (u: FakeUri) => {
+        await readFileGate;
+        readFileCallCount++;
         if (!files.has(u.path)) {
           throw new Error(`ENOENT (fake): ${u.path}`);
         }
@@ -184,4 +196,38 @@ test('F16: a cache HIT (nothing changed since the last real build) calls onWarn 
   const secondWarnings: string[] = [];
   await getOrBuildRagIndex(fakeUri('/fake-workspace'), (message) => secondWarnings.push(message));
   assert.equal(secondWarnings.length, 0, 'a cache hit re-derives nothing, so it must never re-emit warnings (including the new summary line)');
+});
+
+test('R02 (external review, 2026-09-17): an index build already in flight when clearRagIndexCache() fires cannot repopulate the cache afterward', async () => {
+  files.clear();
+  clearRagIndexCache();
+  readFileCallCount = 0;
+  files.set('/fake-workspace/.github/rag/postgres-query.md', VALID_RECIPE);
+
+  let releaseGate: () => void = () => undefined;
+  readFileGate = new Promise((resolve) => {
+    releaseGate = resolve;
+  });
+
+  // Starts a real build — it's now paused mid-flight, blocked on
+  // readFileGate, exactly like "Clear Data"/"Kill All Browsers" firing
+  // while a RAG index build for an in-flight generation is still reading
+  // recipe files off disk.
+  const inFlightBuild = getOrBuildRagIndex(fakeUri('/fake-workspace'));
+  // Simulates the reset firing WHILE that build is still paused.
+  clearRagIndexCache();
+  // Let the paused build actually finish now.
+  releaseGate();
+  const inFlightResult = await inFlightBuild;
+
+  assert.ok(inFlightResult, "the in-flight build's OWN caller still gets a real, freshly-built index — only the SHARED cache is protected, not this caller's own result");
+
+  // A brand-new call right after must do its OWN fresh read — if the
+  // now-stale in-flight build were allowed to repopulate the cache after
+  // the reset, this would silently hit that stale cache entry instead
+  // (nothing on disk changed, so the fingerprint would still match).
+  readFileGate = Promise.resolve();
+  await getOrBuildRagIndex(fakeUri('/fake-workspace'));
+
+  assert.equal(readFileCallCount, 2, 'both the in-flight build AND the call after the reset must each have done their own real file read — a count of 1 would mean the second call wrongly served a cache the reset should have prevented from ever being (re)written');
 });

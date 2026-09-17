@@ -151,7 +151,8 @@ export function createRunCodeTool(deps: RunCodeToolDeps) {
       deps.onOutput(
         `Verify & Fix Code (agent) — attempt ${attempt}: ${result.success ? 'PASSED' : 'FAILED'}` +
           `${result.compileOnly ? ' (compile/collect-only check)' : ''}` +
-          `${result.apiCallOutcome !== 'not-run' ? ` — live API call ${result.apiCallOutcome}` : ''}\n${result.output}`
+          `${result.apiCallOutcome !== 'not-run' ? ` — live API call ${result.apiCallOutcome}` : ''}` +
+          `${result.httpStatusCodes.length ? ` — HTTP status code(s): ${result.httpStatusCodes.join(', ')}` : ''}\n${result.output}`
       );
 
       if (result.success) {
@@ -161,6 +162,7 @@ export function createRunCodeTool(deps: RunCodeToolDeps) {
           code,
           compileOnly: result.compileOnly,
           apiCallOutcome: result.apiCallOutcome,
+          httpStatusCodes: result.httpStatusCodes,
           summary: result.compileOnly ? 'Compiled successfully (compile/collect-only check).' : 'Ran headless without errors.'
         });
       }

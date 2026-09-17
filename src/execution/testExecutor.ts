@@ -23,11 +23,84 @@ export interface ExecutionResult {
    * 'not-run' when compilation/syntax already failed (nothing to call) or
    * this was a BDD/UI-mode result where this concept doesn't apply. */
   apiCallOutcome: 'passed' | 'failed' | 'not-run';
+  /** API mode only — the actual, observed HTTP status code(s) of every live
+   * call the generated code made this run, in the order they happened.
+   * Captured independently of whatever `.statusCode(...)`/
+   * `assert response.status_code == ...` the generated code itself
+   * contains (see `injectJavaHttpStatusCapture()`/the Python conftest.py
+   * helper below) — per the explicit ask, ANY real status code is reported
+   * to the user as-is, never characterized as a pass or a fail. Always
+   * empty for UI mode, and for any API-mode result whose live call never
+   * ran (a compile/syntax failure, or a BDD-mode Java result — see
+   * `apiCallOutcome`'s own doc comment for when that applies). */
+  httpStatusCodes: number[];
   /** Combined stdout+stderr, tail-trimmed to a size sane to hand to an LLM. */
   output: string;
 }
 
 const MAX_OUTPUT_CHARS = 6000;
+
+/** A unique, greppable marker printed by the status-capture hooks below
+ * (`injectJavaHttpStatusCapture()`, `pythonHttpStatusCaptureConftest()`) —
+ * chosen specifically so it can never collide with ordinary compiler/test-
+ * runner output, and read back by `extractHttpStatusCodes()` the same way
+ * for both languages. */
+const HTTP_STATUS_MARKER = 'SOFTPLAY_HTTP_STATUS:';
+/** The status-capture hooks (`injectJavaHttpStatusCapture()`, the Python
+ * conftest.py helper) write to a dedicated file rather than stdout — see
+ * `readHttpStatusLog()`'s doc comment for exactly why stdout can't be
+ * trusted for this. Written into the scratch project root, one directory
+ * up from Java's `src/test/java` sources, alongside Python's own scratch
+ * test file. */
+const HTTP_STATUS_LOG_FILENAME = 'softplay_http_status.log';
+// `(?!\d)` stops a genuine 3-digit status code from ever being read off the
+// front of some unrelated longer number that happens to follow the marker.
+const HTTP_STATUS_PATTERN = new RegExp(`${HTTP_STATUS_MARKER}(\\d{3})(?!\\d)`, 'g');
+
+/** Scans arbitrary text for every status code a capture hook logged, in the
+ * order they occurred — see `ExecutionResult.httpStatusCodes`. Exported and
+ * kept as a pure function purely so it stays directly unit-testable; real
+ * callers only ever feed it `readHttpStatusLog()`'s file content. */
+export function extractHttpStatusCodes(output: string): number[] {
+  const codes: number[] = [];
+  for (const match of output.matchAll(HTTP_STATUS_PATTERN)) {
+    codes.push(Number(match[1]));
+  }
+  return codes;
+}
+
+/**
+ * Reads back whatever `injectJavaHttpStatusCapture()`/the Python
+ * conftest.py helper actually logged for this run — deliberately a
+ * dedicated file, never the test runner's own stdout. Confirmed by real,
+ * live end-to-end execution (not just a unit test) that this matters: by
+ * default, **pytest silently drops a PASSING test's captured stdout from
+ * its own report** (`Captured stdout call` is only ever shown for a
+ * FAILING test) — exactly the common, expected case (the generated code's
+ * own assertion matches reality) is precisely the case a stdout-based
+ * marker would have gone missing for. Writing to this file from inside the
+ * capture hook itself, independent of either runner's console/capture
+ * behavior, is the only way to reliably observe every live call regardless
+ * of whether the generated code's own assertion passed or failed. A
+ * missing file (no live call was ever made — a compile/syntax failure, or
+ * code that never actually calls out) is not an error — resolves to `[]`.
+ */
+async function readHttpStatusLog(logFilePath: string): Promise<number[]> {
+  try {
+    const content = await fs.promises.readFile(logFilePath, 'utf8');
+    return extractHttpStatusCodes(content);
+  } catch {
+    return [];
+  }
+}
+
+/** Backslashes and double-quotes are the only characters that matter inside
+ * a Java double-quoted string literal for a Windows absolute path (e.g.
+ * `C:\Users\...`) — this is deliberately narrow (a real file-system path
+ * from `path.join()`, never arbitrary/attacker-controlled text). */
+function escapeForJavaStringLiteral(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
 
 // `shell` defaults to false and is passed `true` only for `mvn` calls — see
 // environmentCheck.ts's `run()` for the full rationale (mvn resolves to a
@@ -73,6 +146,9 @@ function tailOutput(output: string): string {
  * separately (`apiCallOutcome`) and never fails `success`, per the explicit
  * ask: a genuine API-side error (wrong credentials, endpoint down, etc.) is
  * not a code bug, so it must never drive another LLM fix-loop iteration.
+ * The actual status code(s) observed are reported too (`httpStatusCodes`),
+ * captured independently of the generated code's own assertions — see
+ * `injectJavaHttpStatusCapture()` and the Python `conftest.py` helper below.
  *
  * **BDD-mode caveat** (a linked scenario was used — see "Execute & Verify
  * Code"'s design notes in objectSpyPanel.ts): the generated code is ONLY
@@ -291,6 +367,54 @@ function bundledMavenRepoArgs(resourcesRoot: string | undefined): string[] {
   return fs.existsSync(bundledRepo) ? [`-Dmaven.repo.local=${bundledRepo}`] : [];
 }
 
+/**
+ * API mode only: registers a REST Assured filter — via `RestAssured.filters(...)`,
+ * a global, one-time hook on the static DSL entry point every `given()` call
+ * goes through — that logs the actual HTTP status code of every live call
+ * the generated code makes, completely independently of whatever
+ * `.statusCode(...)` assertion (or lack of one) the generated code itself
+ * contains. That independence is the whole point: per the explicit ask, the
+ * user is told the real status code regardless of whether the generated
+ * code's own assertion happens to match it. Inserted right after the
+ * class's own opening brace (found via the same `public class` shape
+ * `executeJava()` already parses for the class name) so the static
+ * initializer runs before any test method — using fully-qualified REST
+ * Assured/`java.nio.file` type names throughout so this never collides
+ * with, or depends on, whatever the generated code itself imports.
+ *
+ * Appends to `httpStatusLogPath` directly (see `readHttpStatusLog()`'s doc
+ * comment for why a file, not `System.out.println`) — `httpStatusLogPath`
+ * is this session's own scratch directory, an absolute path this code
+ * generated, never attacker/LLM-controlled text.
+ */
+export function injectJavaHttpStatusCapture(code: string, httpStatusLogPath: string): string {
+  const classDeclMatch = code.match(/public\s+class\s+\w+[^{]*\{/);
+  if (!classDeclMatch || classDeclMatch.index === undefined) {
+    return code;
+  }
+  const insertAt = classDeclMatch.index + classDeclMatch[0].length;
+  const escapedLogPath = escapeForJavaStringLiteral(httpStatusLogPath);
+  const filterBlock = `
+  static {
+    io.restassured.RestAssured.filters((io.restassured.specification.FilterableRequestSpecification softPlayReq,
+        io.restassured.specification.FilterableResponseSpecification softPlayResSpec,
+        io.restassured.filter.FilterContext softPlayCtx) -> {
+      io.restassured.response.Response softPlayResponse = softPlayCtx.next(softPlayReq, softPlayResSpec);
+      try {
+        java.nio.file.Files.write(
+            java.nio.file.Paths.get("${escapedLogPath}"),
+            ("${HTTP_STATUS_MARKER}" + softPlayResponse.getStatusCode() + System.lineSeparator()).getBytes(java.nio.charset.StandardCharsets.UTF_8),
+            java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+      } catch (java.io.IOException softPlayIoException) {
+        // Best-effort logging only — never let it break the actual test.
+      }
+      return softPlayResponse;
+    });
+  }
+`;
+  return code.slice(0, insertAt) + filterBlock + code.slice(insertAt);
+}
+
 async function executeJava(
   code: string,
   scratchDir: string,
@@ -305,11 +429,22 @@ async function executeJava(
       success: false,
       compileOnly: false,
       apiCallOutcome: 'not-run',
+      httpStatusCodes: [],
       output: 'Could not find a "public class <Name>" declaration in the generated Java code.'
     };
   }
   const className = classMatch[1];
   const bdd = isBddCode(code);
+  const httpStatusLogPath = path.join(scratchDir, HTTP_STATUS_LOG_FILENAME);
+  // Harmless to apply even for a BDD-mode result (compile-only, never
+  // actually run below — see the `bdd` branch) or one that ultimately
+  // fails to compile: it only ever adds one static initializer that
+  // references classes already on the classpath for any API-mode build.
+  const codeToWrite = automationMode === 'api' ? injectJavaHttpStatusCapture(code, httpStatusLogPath) : code;
+  // Cleared up front so a stale log from an earlier "Verify & Fix Code"
+  // attempt reusing this same scratch directory can never leak into THIS
+  // attempt's result — mirrors the ".java file cleanup right below.
+  await fs.promises.rm(httpStatusLogPath, { force: true });
 
   const srcDir = path.join(scratchDir, 'src', 'test', 'java');
   await fs.promises.mkdir(srcDir, { recursive: true });
@@ -322,7 +457,7 @@ async function executeJava(
       await fs.promises.rm(path.join(srcDir, entry), { force: true });
     }
   }
-  await fs.promises.writeFile(path.join(srcDir, `${className}.java`), code, 'utf8');
+  await fs.promises.writeFile(path.join(srcDir, `${className}.java`), codeToWrite, 'utf8');
   await fs.promises.writeFile(path.join(scratchDir, 'pom.xml'), javaPomXml(bdd, automationMode, resourcesRoot, languageVersion), 'utf8');
 
   // Compile is always checked first and on its own — the ONLY signal that
@@ -332,12 +467,12 @@ async function executeJava(
   const repoArgs = bundledMavenRepoArgs(resourcesRoot);
   const compileResult = await run('mvn', ['-q', '-B', '-Dstyle.color=never', ...repoArgs, 'test-compile'], scratchDir, true, secretEnv);
   if (compileResult.code !== 0) {
-    return { success: false, compileOnly: false, apiCallOutcome: 'not-run', output: tailOutput(compileResult.output) };
+    return { success: false, compileOnly: false, apiCallOutcome: 'not-run', httpStatusCodes: [], output: tailOutput(compileResult.output) };
   }
   if (bdd) {
     // No generated Suite runner to actually execute against, in either
     // mode — compiling is the whole check (see doc comment above).
-    return { success: true, compileOnly: true, apiCallOutcome: 'not-run', output: tailOutput(compileResult.output) };
+    return { success: true, compileOnly: true, apiCallOutcome: 'not-run', httpStatusCodes: [], output: tailOutput(compileResult.output) };
   }
 
   const testResult = await run('mvn', ['-q', '-B', '-Dstyle.color=never', ...repoArgs, `-Dtest=${className}`, 'test'], scratchDir, true, secretEnv);
@@ -346,9 +481,15 @@ async function executeJava(
     // Compiling cleanly already satisfies "success" here — the live API
     // call's own pass/fail is informational only (apiCallOutcome), per the
     // explicit ask that a real API-side error never drive another fix.
-    return { success: true, compileOnly: false, apiCallOutcome: testResult.code === 0 ? 'passed' : 'failed', output: combinedOutput };
+    return {
+      success: true,
+      compileOnly: false,
+      apiCallOutcome: testResult.code === 0 ? 'passed' : 'failed',
+      httpStatusCodes: await readHttpStatusLog(httpStatusLogPath),
+      output: combinedOutput
+    };
   }
-  return { success: testResult.code === 0, compileOnly: false, apiCallOutcome: 'not-run', output: combinedOutput };
+  return { success: testResult.code === 0, compileOnly: false, apiCallOutcome: 'not-run', httpStatusCodes: [], output: combinedOutput };
 }
 
 // ---------------------------------------------------------------------------
@@ -356,6 +497,50 @@ async function executeJava(
 // ---------------------------------------------------------------------------
 
 const SCRATCH_PY_FILENAME = 'test_ai_generated.py';
+const CONFTEST_FILENAME = 'conftest.py';
+
+/**
+ * API mode only: pytest automatically imports every `conftest.py` in a
+ * test's directory before collecting/running anything there, with no
+ * import needed in the test file itself — the Python analogue of
+ * `injectJavaHttpStatusCapture()`'s static initializer, but without any of
+ * that approach's "where in the file is it safe to insert code" concerns
+ * (a Python module's own leading shebang/encoding declaration/docstring/
+ * `from __future__ import` statements are never touched, since this file
+ * is entirely separate). Monkey-patches `requests.Session.send` — the one
+ * method EVERY `requests` call funnels through underneath, whether the
+ * generated code used `requests.get(...)` directly or built its own
+ * `requests.Session()` — so the actual HTTP status code of every live call
+ * is observed regardless of what assertion (or lack of one) the generated
+ * code itself makes against it.
+ *
+ * Appends to `httpStatusLogPath` directly rather than printing — see
+ * `readHttpStatusLog()`'s doc comment: confirmed by real end-to-end
+ * execution that pytest's default output capturing silently DISCARDS a
+ * PASSING test's captured stdout from its own report, which is exactly the
+ * common case (a matching assertion) a print-based marker would have gone
+ * missing for.
+ */
+function pythonHttpStatusCaptureConftest(httpStatusLogPath: string): string {
+  const escapedLogPath = httpStatusLogPath.replace(/\\/g, '\\\\');
+  return `import requests as _softplay_requests
+
+_softplay_original_send = _softplay_requests.Session.send
+
+
+def _softplay_patched_send(self, request, **kwargs):
+    response = _softplay_original_send(self, request, **kwargs)
+    try:
+        with open("${escapedLogPath}", "a", encoding="utf-8") as _softplay_log:
+            _softplay_log.write(f"${HTTP_STATUS_MARKER}{response.status_code}\\n")
+    except OSError:
+        pass
+    return response
+
+
+_softplay_requests.Session.send = _softplay_patched_send
+`;
+}
 
 async function executePython(
   code: string,
@@ -368,6 +553,20 @@ async function executePython(
   await fs.promises.mkdir(scratchDir, { recursive: true });
   const scratchFile = path.join(scratchDir, SCRATCH_PY_FILENAME);
   await fs.promises.writeFile(scratchFile, code, 'utf8');
+  const httpStatusLogPath = path.join(scratchDir, HTTP_STATUS_LOG_FILENAME);
+  // Kept in sync with the CURRENT automationMode every run — a stale
+  // conftest.py from an earlier API-mode attempt in the same scratch dir
+  // must not silently keep patching requests.Session once the mode changes.
+  // The log itself is also cleared up front so a PREVIOUS attempt's status
+  // codes (reusing this same scratch dir) never leak into this attempt's
+  // result.
+  const conftestPath = path.join(scratchDir, CONFTEST_FILENAME);
+  await fs.promises.rm(httpStatusLogPath, { force: true });
+  if (automationMode === 'api') {
+    await fs.promises.writeFile(conftestPath, pythonHttpStatusCaptureConftest(httpStatusLogPath), 'utf8');
+  } else {
+    await fs.promises.rm(conftestPath, { force: true });
+  }
 
   if (linkedFeatureFilePath) {
     try {
@@ -394,7 +593,7 @@ async function executePython(
   // about whether the headless browser flow actually passed.
   const compileResult = await run(pythonCommand, ['-m', 'py_compile', scratchFile], scratchDir);
   if (compileResult.code !== 0) {
-    return { success: false, compileOnly: false, apiCallOutcome: 'not-run', output: tailOutput(compileResult.output) };
+    return { success: false, compileOnly: false, apiCallOutcome: 'not-run', httpStatusCodes: [], output: tailOutput(compileResult.output) };
   }
 
   // Headless by default (pytest-playwright only switches to headed with an
@@ -405,7 +604,13 @@ async function executePython(
   const testResult = await run(pythonCommand, ['-m', 'pytest', SCRATCH_PY_FILENAME, '-q'], scratchDir, false, secretEnv);
   const combinedOutput = tailOutput(testResult.output);
   if (automationMode === 'api') {
-    return { success: true, compileOnly: false, apiCallOutcome: testResult.code === 0 ? 'passed' : 'failed', output: combinedOutput };
+    return {
+      success: true,
+      compileOnly: false,
+      apiCallOutcome: testResult.code === 0 ? 'passed' : 'failed',
+      httpStatusCodes: await readHttpStatusLog(httpStatusLogPath),
+      output: combinedOutput
+    };
   }
-  return { success: testResult.code === 0, compileOnly: false, apiCallOutcome: 'not-run', output: combinedOutput };
+  return { success: testResult.code === 0, compileOnly: false, apiCallOutcome: 'not-run', httpStatusCodes: [], output: combinedOutput };
 }

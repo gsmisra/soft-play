@@ -7,7 +7,7 @@ import { CopilotUnavailableError, countModelTokens, extractCodeBlock, findModel 
 import { VSCodeCopilotToolCallingModel } from '../agent/vscodeCopilotToolCallingModel';
 import { checkEnvironment } from '../execution/environmentCheck';
 import { runVerifyFixAgent } from '../agent/verifyFixOrchestrator';
-import { truncateForDialog, truncateForStatusLine } from '../agent/verifyFixTextTruncation';
+import { truncateForDialog, truncateForStatusLine, buildApiVerifySuccessMessage } from '../agent/verifyFixTextTruncation';
 import * as secretVault from '../security/secretVault';
 import { validateFeatureFileStructure } from '../bdd/gherkinStructuralValidator';
 import { encryptPasswordLiteralsInCode } from '../security/uiPasswordRedactor';
@@ -1407,7 +1407,7 @@ export class AgenticModeController implements vscode.Disposable {
       switch (result.stopReason) {
         case 'success': {
           const compileOnly = Boolean(result.raw?.compileOnly);
-          const apiCallOutcome = result.raw?.apiCallOutcome as 'passed' | 'failed' | 'not-run' | undefined;
+          const httpStatusCodes = Array.isArray(result.raw?.httpStatusCodes) ? (result.raw.httpStatusCodes as number[]) : [];
           if (result.finalCode) {
             this.aiCodePanel.finish(result.finalCode);
             this.postGenerationState();
@@ -1418,12 +1418,7 @@ export class AgenticModeController implements vscode.Disposable {
               'success'
             );
           } else if (isApiMode) {
-            this.aiCodePanel.setVerifyStatus(
-              apiCallOutcome === 'failed'
-                ? 'Code Correctness Confirmed — no syntax errors. The live API call itself returned an error response (see the SoftPlay Output channel) — recheck the endpoint URL/credentials and try again in your own IDE/test package.'
-                : 'Code Correctness Confirmed — compiled cleanly and the API call succeeded.',
-              'success'
-            );
+            this.aiCodePanel.setVerifyStatus(buildApiVerifySuccessMessage(settings.language, httpStatusCodes), 'success');
           } else {
             this.aiCodePanel.setVerifyStatus('Code Correctness Confirmed — ran headless without errors.', 'success');
           }

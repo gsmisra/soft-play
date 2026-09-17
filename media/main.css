@@ -327,6 +327,23 @@ body.vscode-light .code-editor-wrap {
   background: #6c6f76;
 }
 
+/* "Link Existing Class file" — the TD brand green (same fixed color as
+   --td-green, not a VS Code theme variable, matching .btn-silver's own
+   "always reads the same regardless of theme" reasoning above) with white
+   text. Combined with .btn-small for a compact size matching "Refresh
+   (discards manual edits)". */
+.btn-td-green {
+  background: var(--td-green);
+  color: #ffffff;
+}
+.btn-td-green:hover:not(:disabled) {
+  background: #479f3e;
+}
+
+.link-source-row {
+  flex-wrap: wrap;
+}
+
 #urlInput {
   flex: 1;
   padding: 7px 12px;
@@ -605,6 +622,27 @@ body.vscode-light .code-editor-wrap {
   font-size: 0.85em;
   color: var(--vscode-descriptionForeground);
   margin: 4px 0 6px;
+}
+
+/* Filters the "Custom Instructions"/"RAG Data" checkbox list below it by
+   file name/path substring — never changes which checkboxes are actually
+   CHECKED, only which are currently visible. */
+.file-search-input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 6px;
+  padding: 5px 8px;
+  border-radius: var(--clay-radius-sm);
+  border: 1px solid var(--vscode-input-border, transparent);
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  font-family: inherit;
+  font-size: 0.85em;
+}
+.file-search-input:focus {
+  outline: none;
+  border-color: var(--vscode-focusBorder, #0084ff);
 }
 
 .prompt-files-list {

@@ -39,6 +39,18 @@ interface CachedIndex {
 }
 
 let cached: CachedIndex | undefined;
+// R02: bumped by clearRagIndexCache() — an in-flight getOrBuildRagIndex()
+// call captures the epoch BEFORE its own async read/parse work starts, and
+// only actually WRITES `cached` if the epoch is still the one it started
+// with. Without this, a build already in flight when "Clear Data"/"Kill
+// All Browsers" fires could still complete afterward and silently
+// repopulate the just-cleared cache with its (now stale-relative-to-the-
+// reset) result — the exact "cache survives a reset" gap a review
+// reproduced. The one in-flight caller still gets its own computed index
+// back (harmless — its own request is being cancelled through its own,
+// separate cancellation token regardless), only the SHARED module cache
+// itself is protected from being repopulated post-reset.
+let epoch = 0;
 
 async function computeFingerprint(uris: vscode.Uri[]): Promise<string> {
   const stats = await Promise.all(
@@ -81,6 +93,8 @@ async function computeFingerprint(uris: vscode.Uri[]): Promise<string> {
  * zero times, same as it always has, since nothing new was re-derived to
  * warn about. */
 export async function getOrBuildRagIndex(workspaceRoot: vscode.Uri, onWarn?: (message: string) => void): Promise<RagIndex | undefined> {
+  // R02: captured BEFORE any async work — see `epoch`'s own doc comment.
+  const capturedEpoch = epoch;
   const folder = ragFolderUri(workspaceRoot);
   let mdFiles: vscode.Uri[];
   try {
@@ -146,8 +160,56 @@ export async function getOrBuildRagIndex(workspaceRoot: vscode.Uri, onWarn?: (me
   }
 
   const index = await buildRagIndex(recipes);
-  cached = { fingerprint, index };
+  // R02: only write back to the SHARED cache if nothing reset it while
+  // this build was in flight — see `epoch`'s own doc comment. This
+  // request's own caller still gets a real, freshly-built index either
+  // way; only the module-level cache is protected from a stale repopulate.
+  if (epoch === capturedEpoch) {
+    cached = { fingerprint, index };
+  }
   return index;
+}
+
+/**
+ * Reads and parses ONLY the given already-known `.github/rag/*.md` files,
+ * given as paths WORKSPACE-relative (exactly what `vscode.workspace.asRelativePath()`
+ * produces, and exactly what the "RAG Data" checkbox list's own values
+ * already are — see `objectSpyPanel.ts`'s `partitionRagFilesByValidity()`)
+ * — used for an explicit manual selection (`rag/ragPackingPipeline.ts`),
+ * which must never require a full corpus scan/fingerprint/index build just
+ * to send the handful of files the user actually checked. Resolving each
+ * path directly against `workspaceRoot` (rather than comparing against
+ * `RagRecipe.relativePath`, which is relative to `.github/rag/` ITSELF, a
+ * genuinely different string) is also what keeps this correct regardless
+ * of path format — no separate normalization step needed at the call site.
+ *
+ * A path that no longer exists, or fails to parse, is reported via
+ * `onWarn` (never thrown) and simply omitted from the result — the caller
+ * decides what an empty/partial result means for its own request.
+ */
+export async function loadRagRecipesByPath(workspaceRoot: vscode.Uri, workspaceRelativePaths: string[], onWarn?: (message: string) => void): Promise<RagRecipe[]> {
+  const folder = ragFolderUri(workspaceRoot);
+  const recipes: RagRecipe[] = [];
+  for (const workspaceRelativePath of workspaceRelativePaths) {
+    const uri = vscode.Uri.joinPath(workspaceRoot, workspaceRelativePath);
+    try {
+      const [bytes, stat] = await Promise.all([vscode.workspace.fs.readFile(uri), vscode.workspace.fs.stat(uri)]);
+      const content = new TextDecoder('utf-8').decode(bytes);
+      const parsed = parseRagFile(content);
+      if (!parsed.ok) {
+        onWarn?.(`Manually selected "${workspaceRelativePath}" could not be used — ${parsed.error}`);
+        continue;
+      }
+      // Same relative-to-.github/rag/ normalization as getOrBuildRagIndex()
+      // above, for consistency with every other RagRecipe this codebase
+      // ever produces (embedding text, traceability banners, ...).
+      const relativePath = path.relative(folder.fsPath, uri.fsPath).split(path.sep).join('/');
+      recipes.push({ filePath: uri.fsPath, relativePath, frontmatter: parsed.value.frontmatter, body: parsed.value.body, mtimeMs: stat.mtime });
+    } catch (err) {
+      onWarn?.(`Manually selected "${workspaceRelativePath}" could not be read: ${err instanceof Error ? err.message : String(err)} (renamed or deleted since it was selected?)`);
+    }
+  }
+  return recipes;
 }
 
 /** Forces the next `getOrBuildRagIndex()` call to rebuild from disk
@@ -158,4 +220,5 @@ export async function getOrBuildRagIndex(workspaceRoot: vscode.Uri, onWarn?: (me
  * already sees them, without waiting for a fingerprint recheck. */
 export function clearRagIndexCache(): void {
   cached = undefined;
+  epoch++;
 }

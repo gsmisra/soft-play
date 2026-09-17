@@ -6,3 +6,4 @@ out-test-integration/
 *.vsix
 .DS_Store
 .github/
+test/
