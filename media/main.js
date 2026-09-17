@@ -1159,8 +1159,49 @@
    * when searching "cassandra" even though its path alone doesn't say so),
    * normalized into one internal shape so the rest of this function never
    * needs to know which kind of list it's holding. */
+  // How much context to show around a match found only in a recipe's body
+  // text (see matchContext() below) — enough to read the surrounding
+  // statement/sentence without dumping the whole body into the list item.
+  const MATCH_SNIPPET_RADIUS = 30;
+
+  /** A user reported: "I typed a search term and the list still shows items
+   * where that term isn't found anywhere" — traced to the search
+   * deliberately matching against a RAG recipe's title/tags/body too (R04:
+   * so a recipe is findable by anything mentioned in its example code, not
+   * just its path), while the list item only ever RENDERS the bare path.
+   * A recipe whose path/title don't happen to contain the query — but whose
+   * example code does — genuinely, correctly matches, yet looks completely
+   * unrelated to the user, since the only visible text gives zero indication
+   * why it's there. This is not a filtering bug (every visible item DOES
+   * contain the query somewhere) — it's a missing explanation. Returns the
+   * shortest useful proof of the match: '' when the path itself already
+   * contains the query (nothing extra needed), the matched tag, or a short
+   * snippet of body text centered on the match — never re-implements R04's
+   * decision to search body text, just makes an already-real match visible. */
+  function matchContext(item, query) {
+    if (!query || item.path.toLowerCase().includes(query)) {
+      return '';
+    }
+    if (item.title && item.title.toLowerCase().includes(query)) {
+      return item.title;
+    }
+    const matchedTag = (item.tags || []).find((t) => t.toLowerCase().includes(query));
+    if (matchedTag) {
+      return `tag: ${matchedTag}`;
+    }
+    const body = item.body || '';
+    const idx = body.toLowerCase().indexOf(query);
+    if (idx === -1) {
+      return '';
+    }
+    const start = Math.max(0, idx - MATCH_SNIPPET_RADIUS);
+    const end = Math.min(body.length, idx + query.length + MATCH_SNIPPET_RADIUS);
+    const snippet = body.slice(start, end).replace(/\s+/g, ' ').trim();
+    return `${start > 0 ? '…' : ''}${snippet}${end < body.length ? '…' : ''}`;
+  }
+
   function makeFileCheckboxList(listEl, searchEl, emptyMessage, messageType, label) {
-    let allItems = []; // [{ path, searchText }]
+    let allItems = []; // [{ path, searchText, title?, tags?, body? }]
     let selected = new Set();
 
     function post() {
@@ -1173,6 +1214,9 @@
           ? { path: f, searchText: f.toLowerCase() }
           : {
               path: f.relPath,
+              title: f.title || '',
+              tags: f.tags || [],
+              body: f.body || '',
               // R04 (final round): the recipe's OWN body text is included
               // here (already read server-side once per refresh — see
               // objectSpyPanel.ts's partitionRagFilesByValidity()) so a
@@ -1217,6 +1261,18 @@
         const text = document.createElement('span');
         text.textContent = item.path;
         fileLabel.appendChild(text);
+        // Only ever computed for a non-empty query, and only ever renders
+        // something when the path alone doesn't already justify the match
+        // (see matchContext()'s own doc comment) — a path-only match (the
+        // common case, and the ONLY case for plain-string "Custom
+        // Instructions" entries) renders exactly as before.
+        const context = matchContext(item, query);
+        if (context) {
+          const hint = document.createElement('span');
+          hint.className = 'prompt-file-match-hint';
+          hint.textContent = `— matched: "${context}"`;
+          fileLabel.appendChild(hint);
+        }
         listEl.appendChild(fileLabel);
       }
       post();

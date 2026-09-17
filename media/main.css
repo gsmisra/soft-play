@@ -663,6 +663,20 @@ body.vscode-light .code-editor-wrap {
   font-family: var(--vscode-editor-font-family, monospace);
 }
 
+/* Shown only while searching, and only for a RAG recipe whose match came
+   from its title/tags/body rather than its own visible path (see
+   matchContext() in main.js) — without this, a genuinely matching item can
+   look completely unrelated to the search term the user just typed. */
+.prompt-file-match-hint {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+  font-size: 0.9em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
 .prompt-files-empty {
   padding: 6px 0;
   font-size: 0.82em;

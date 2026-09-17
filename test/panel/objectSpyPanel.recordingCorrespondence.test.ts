@@ -145,6 +145,13 @@ function loadObjectSpyPanelWithFakeVsCode(): { ObjectSpyPanel: new (...args: nev
       if (id === './stepCoverageChecker') {
         return originalLoad.apply(this, arguments);
       }
+      // Real code, zero vscode dependency (a plain data-shape module) — used
+      // by the "Instant instructions to LLM" API-mode regression tests below
+      // (sendToLlm()/regenerateAiCode() in API mode call hasApiRequest()/
+      // buildApiRequestSummary() for real, not through a stub).
+      if (id === '../api/apiRequestDetails') {
+        return originalLoad.apply(this, arguments);
+      }
       return {};
     }
     // eslint-disable-next-line prefer-rest-params
@@ -562,6 +569,226 @@ test('a message staged AFTER the last "Start AI Code Generation" send is still p
 
   assert.match(capturedPrompt, /second message/, 'the message staged after the last real send must still reach the regenerated prompt');
   assert.equal(c.output, '// ok');
+  assert.equal(c.errored, undefined);
+});
+
+// ---------------------------------------------------------------------
+// "Instant instructions to LLM" must reach the prompt for EVERY mode/
+// language/trigger combination, not just the UI+Java case the original
+// 2026-09-16 fix happened to be reproduced with — a user asked explicitly
+// whether this holds for a "direct" generation too (no ".feature" file ever
+// generated first, no linked scenario at all), in both UI and API
+// Automation mode, for both Java and Python, on BOTH "Start AI Code
+// Generation" (first-time) and "Regenerate AI Code". Traced through
+// runLlmRefinement()/buildLlmPrompt()/buildApiLlmPrompt(): the free-text
+// "## ⚠ Additional instructions from the user" section is appended
+// unconditionally whenever `customInstructions` is non-empty, with no
+// dependency anywhere on `linkedScenario`/a prior feature-file generation —
+// these tests exercise that real code path end to end (via the actual
+// `sendToLlm()`/`regenerateAiCode()` entry points, not by calling
+// `runLlmRefinement()` directly) for all four mode/language combinations,
+// to confirm rather than assume it.
+// ---------------------------------------------------------------------
+
+function makeApiDetails(url: string) {
+  return {
+    method: 'GET',
+    url,
+    params: [],
+    headers: [],
+    authType: 'noauth',
+    auth: {
+      apiKeyName: '',
+      apiKeyValue: '',
+      apiKeyAddTo: 'header',
+      bearerToken: '',
+      basicUsername: '',
+      basicPassword: '',
+      digestUsername: '',
+      digestPassword: '',
+      oauth1ConsumerKey: '',
+      oauth1ConsumerSecret: '',
+      oauth1AccessToken: '',
+      oauth1TokenSecret: '',
+      oauth1SignatureMethod: '',
+      oauth2AccessToken: '',
+      oauth2HeaderPrefix: '',
+      hawkAuthId: '',
+      hawkAuthKey: '',
+      hawkAlgorithm: '',
+      awsAccessKey: '',
+      awsSecretKey: '',
+      awsSessionToken: '',
+      awsRegion: '',
+      awsServiceName: '',
+      ntlmUsername: '',
+      ntlmPassword: '',
+      ntlmDomain: '',
+      ntlmWorkstation: '',
+      edgeGridAccessToken: '',
+      edgeGridClientToken: '',
+      edgeGridClientSecret: ''
+    },
+    bodyMode: 'none',
+    bodyFormFields: [],
+    bodyUrlencodedFields: [],
+    bodyRawLanguage: 'JSON',
+    bodyRaw: ''
+  };
+}
+
+for (const automationMode of ['ui', 'api'] as const) {
+  for (const language of ['java', 'python'] as const) {
+    test(`Instant instructions to LLM reach BOTH first-time "Start AI Code Generation" and a later "Regenerate AI Code" — ${automationMode.toUpperCase()} Automation mode, ${language}, no feature file/scenario ever linked (direct generation)`, async () => {
+      const capturedPrompts: string[] = [];
+      const c = makeController((p) => {
+        capturedPrompts.push(p);
+      });
+      c.settingsStore = {
+        get: () => ({
+          copilotEnabled: true,
+          copilotModelId: 'fake-model',
+          automationMode,
+          language,
+          languageVersion: language === 'java' ? '17' : '3.11',
+          browserChannel: 'chrome',
+          ragEnabled: false
+        })
+      };
+      // The "direct generation" case this was reported for: no ".feature"
+      // file was ever generated, and no scenario is linked.
+      c.linkedScenario = undefined;
+      c.nativeGeneratedCode = automationMode === 'ui' ? 'some recorded code' : '';
+      c.requestCurrentPlaywrightCode = async () => c.nativeGeneratedCode;
+      const apiDetails = automationMode === 'api' ? makeApiDetails('https://example.test/api') : undefined;
+
+      // "Start AI Code Generation" — first-time, direct (never preceded by
+      // "Start AI Feature File Generation").
+      await c.sendToLlm([], [], c.nativeGeneratedCode, 'first custom instruction', apiDetails);
+      assert.equal(capturedPrompts.length, 1, 'the first-time direct generation must actually reach the model');
+      assert.match(
+        capturedPrompts[0],
+        /first custom instruction/,
+        `[${automationMode}/${language}] first-time direct "Start AI Code Generation" must include the chat box's instructions`
+      );
+
+      // Mid-session: the user types ANOTHER instruction into "Instant
+      // instructions to LLM" WITHOUT clicking "Start AI Code Generation"
+      // again — main.js posts this the moment it's staged (Enter/➤).
+      await c.handleMessage({
+        type: 'chatInstructionsStaged',
+        payload: { customInstructions: 'first custom instruction\n\nsecond custom instruction' }
+      });
+
+      // "Regenerate AI Code" — the separate AI Generated Code panel, with no
+      // chat box of its own.
+      await c.regenerateAiCode();
+      assert.equal(capturedPrompts.length, 2, 'Regenerate AI Code must actually reach the model');
+      assert.match(
+        capturedPrompts[1],
+        /second custom instruction/,
+        `[${automationMode}/${language}] Regenerate AI Code must include an instruction staged AFTER the last real send, with no feature file/scenario ever linked`
+      );
+      assert.equal(c.errored, undefined);
+    });
+  }
+}
+
+test('Instant instructions to LLM: every consecutive message typed across an active session is checked for updates before each Regenerate AI Code click, not just the first one after a real send (API Automation, Python)', async () => {
+  const capturedPrompts: string[] = [];
+  const c = makeController((p) => {
+    capturedPrompts.push(p);
+  });
+  c.settingsStore = {
+    get: () => ({
+      copilotEnabled: true,
+      copilotModelId: 'fake-model',
+      automationMode: 'api',
+      language: 'python',
+      languageVersion: '3.11',
+      browserChannel: 'chrome',
+      ragEnabled: false
+    })
+  };
+  c.linkedScenario = undefined;
+  c.nativeGeneratedCode = '';
+  c.requestCurrentPlaywrightCode = async () => '';
+  const apiDetails = makeApiDetails('https://example.test/api');
+
+  await c.sendToLlm([], [], '', 'round one', apiDetails);
+  assert.match(capturedPrompts[0], /round one/);
+
+  // Round 2: stage a second message, regenerate — no fresh "Start AI Code
+  // Generation" click in between.
+  await c.handleMessage({ type: 'chatInstructionsStaged', payload: { customInstructions: 'round one\n\nround two' } });
+  await c.regenerateAiCode();
+  assert.match(capturedPrompts[1], /round two/, 'round 2 must pick up the second staged message');
+
+  // Round 3: stage a THIRD message, regenerate again — this is the part a
+  // fix that only re-synced once (e.g. only on the very next click after a
+  // real send) could still get wrong.
+  await c.handleMessage({ type: 'chatInstructionsStaged', payload: { customInstructions: 'round one\n\nround two\n\nround three' } });
+  await c.regenerateAiCode();
+  assert.equal(capturedPrompts.length, 3);
+  assert.match(capturedPrompts[2], /round three/, 'round 3 must pick up the third staged message, staged after TWO prior regenerations');
+  assert.match(capturedPrompts[2], /round one/, 'earlier rounds must still be present too — instructions accumulate, they are not replaced');
+  assert.match(capturedPrompts[2], /round two/);
+});
+
+test('Instant instructions to LLM reach a DIRECT "Start AI Code Generation" click made AFTER "Start AI Feature File Generation" already ran (UI Automation, Java) — the chat box is shared by both buttons', async () => {
+  const capturedPrompts: string[] = [];
+  const c = makeController((p) => {
+    capturedPrompts.push(p);
+  });
+  c.nativeGeneratedCode = 'some recorded code';
+  c.linkedScenario = undefined;
+
+  // "Start AI Feature File Generation" ran first, with the chat box's
+  // current content — this ALSO calls streamCopilotResponse(), so it's
+  // capturedPrompts[0]; the code-generation prompt tested below is [1].
+  await c.generateFeatureFile('some recorded code', 'feature-gen instruction');
+  assert.equal(c.featureOutput, '// ok');
+  assert.equal(c.lastCustomInstructions, 'feature-gen instruction');
+
+  // The user then types a NEW instruction and clicks "Start AI Code
+  // Generation" DIRECTLY — main.js's collectInstructionsForGeneration()
+  // sends the full accumulated text at click time regardless of which
+  // button (feature-file or code) was used last.
+  await c.sendToLlm([], [], 'some recorded code', 'feature-gen instruction\n\ncode-gen instruction', undefined);
+  assert.equal(capturedPrompts.length, 2, 'both the feature-file prompt and the code-generation prompt must have been sent');
+  assert.match(
+    capturedPrompts[1],
+    /code-gen instruction/,
+    '"Start AI Code Generation" run directly after a feature-file generation must still include the chat box\'s instructions'
+  );
+  assert.equal(c.errored, undefined);
+});
+
+test('Instant instructions to LLM reach "Start AI Code Generation" run AFTER "Start AI Feature File Generation" — API Automation, Python', async () => {
+  const capturedPrompts: string[] = [];
+  const c = makeController((p) => {
+    capturedPrompts.push(p);
+  });
+  c.settingsStore = {
+    get: () => ({
+      copilotEnabled: true,
+      copilotModelId: 'fake-model',
+      automationMode: 'api',
+      language: 'python',
+      languageVersion: '3.11',
+      browserChannel: 'chrome',
+      ragEnabled: false
+    })
+  };
+  c.linkedScenario = undefined;
+  const apiDetails = makeApiDetails('https://example.test/api');
+
+  await c.generateFeatureFile('', 'feature-gen instruction', apiDetails);
+  assert.equal(c.featureOutput, '// ok');
+
+  await c.sendToLlm([], [], '', 'feature-gen instruction\n\ncode-gen instruction', apiDetails);
+  assert.equal(capturedPrompts.length, 2, 'both the feature-file prompt and the code-generation prompt must have been sent');
+  assert.match(capturedPrompts[1], /code-gen instruction/);
   assert.equal(c.errored, undefined);
 });
 
