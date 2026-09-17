@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>SoftPlay — Architecture &amp; Technical Information -- v0.1.74</title>
+<title>SoftPlay — Architecture &amp; Technical Information -- v0.1.75</title>
 <style>
   :root {
     --td-green: #54b948;
@@ -347,7 +347,7 @@
 
 <header class="hero">
   <div class="wrap">
-    <span class="eyebrow">Architecture &amp; Technical Information -- v0.1.74</span>
+    <span class="eyebrow">Architecture &amp; Technical Information -- v0.1.75</span>
     <h1 class="headline">TD Securities Agentic Test Automation</h1>
     <p class="subhead">
       A single reference for how this VS Code extension is built, how it caches data locally, how it talks to the
@@ -1082,6 +1082,17 @@
         usual AI Generated Code panel for review; nothing is ever written back to the linked file automatically — an
         explicit <b>Save Code</b> click is still required, exactly as for any other generated result.
       </p>
+      <p>
+        A newly recorded or requested flow often independently redoes steps an existing method already performs
+        (navigating to the same page, dismissing the same consent dialog, logging in) simply because that's how the
+        action was captured — this is not a signal that a new method needs its own copy of those steps. The retrofit
+        prompt explicitly compares a new method's required steps against the <em>step-level body</em> of every
+        existing method (not just names or signatures) and, when they overlap, asks the model to extract the shared
+        portion into one reusable helper called by both the existing and the new method, rather than duplicating it
+        inline. This is a strengthened instruction, not a mechanical guarantee — prompting alone cannot promise
+        perfect deduplication of every possible step sequence, so review generated code before saving it, same as
+        always.
+      </p>
       <div class="diagram" style="margin-top:22px;">
         <div class="row">
           <div class="node webview"><b>File picked</b><span>vscode.window.showOpenDialog, filtered to .java/.py — validated (readable, non-empty, under the size ceiling, language matches Settings) before it replaces any previous link</span></div>
@@ -1531,7 +1542,7 @@
 
 <footer>
   <div class="wrap">
-    <p><span class="td">SoftPlay</span> — Architecture &amp; Technical Information -- v0.1.74. Generated locally; opens as a static, offline page with no external dependencies.</p>
+    <p><span class="td">SoftPlay</span> — Architecture &amp; Technical Information -- v0.1.75. Generated locally; opens as a static, offline page with no external dependencies.</p>
     <p class="muted">Close this browser tab to return to VS Code.</p>
   </div>
 </footer>
