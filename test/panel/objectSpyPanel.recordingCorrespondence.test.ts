@@ -1015,6 +1015,93 @@ test('generateFeatureFile(): an empty instruction selection includes every eligi
   assert.equal(c.featureErrored, undefined);
 });
 
+// ---------------------------------------------------------------------
+// Lightweight UI generation (2026-09-19): "Start AI Code Generation" for UI
+// Automation must stay as close as possible to the Playwright recording — no
+// Page Object Model, no extra/nested/child classes — instead of the previous
+// "enterprise Page-Object style" wrapper text. The detailed rules live in
+// prompts/senior-qe-instructions.md (see test/llm/seniorQeInstructions.test.ts);
+// these tests pin the code-level wrapper text buildLlmPrompt() adds around it.
+// ---------------------------------------------------------------------
+
+test('UI generation wrapper asks for minimal changes to the recording, never a Page Object Model', async () => {
+  let capturedPrompt = '';
+  const c = makeController((p) => {
+    capturedPrompt = p;
+  });
+  c.nativeGeneratedCode = 'some recorded code';
+  c.linkedScenario = undefined;
+
+  await c.runLlmRefinement([], 'some recorded code', '');
+
+  assert.match(capturedPrompt, /Stay as close as possible to the reference "Playwright-generated code"/);
+  assert.match(capturedPrompt, /do not introduce a Page Object Model, wrapper\/nested\/child classes/);
+  assert.match(capturedPrompt, /the recorded browser-launch override is the one exception/);
+  assert.doesNotMatch(capturedPrompt, /enterprise Page-Object style/, 'the old Page-Object wrapper text must be gone');
+  assert.match(capturedPrompt, /match this structure and style, reuse its locators as-is/, 'the reference-code header the S02 tests pin is unchanged');
+  assert.equal(c.errored, undefined);
+});
+
+for (const language of ['java', 'python'] as const) {
+  test(`UI generation wrapper gives ${language} the same lightweight instruction`, async () => {
+    let capturedPrompt = '';
+    const c = makeController((p) => {
+      capturedPrompt = p;
+    });
+    c.settingsStore = {
+      get: () => ({
+        copilotEnabled: true,
+        copilotModelId: 'fake-model',
+        automationMode: 'ui',
+        language,
+        languageVersion: language === 'java' ? '17' : '3.11',
+        browserChannel: 'chrome',
+        ragEnabled: false
+      })
+    };
+    c.nativeGeneratedCode = 'some recorded code';
+    c.linkedScenario = undefined;
+
+    await c.runLlmRefinement([], 'some recorded code', '');
+
+    assert.match(capturedPrompt, /keeping its steps and their order\/flow exactly as recorded/);
+    assert.equal(c.errored, undefined);
+  });
+}
+
+test('a partial step selection (bare snippet) no longer mentions page-object methods or per-element explicit waits', async () => {
+  let capturedPrompt = '';
+  const c = makeController((p) => {
+    capturedPrompt = p;
+  });
+  c.nativeGeneratedCode = 'some recorded code';
+  c.linkedScenario = { ...makePicker().pick(0), selectedStepCount: 1, totalStepCount: 2 };
+
+  await c.runLlmRefinement([], 'some recorded code', '');
+
+  assert.match(capturedPrompt, /Restricted scope for this request/);
+  assert.match(capturedPrompt, /whatever helper code that step definition directly calls/);
+  assert.match(capturedPrompt, /reusable screenshot helper/, 'a checked step that submits a form still gets the screenshot helper');
+  assert.doesNotMatch(capturedPrompt, /page-object/i);
+  assert.doesNotMatch(capturedPrompt, /explicit visible\+enabled waits/);
+  assert.equal(c.errored, undefined);
+});
+
+test('a fully-checked linked scenario asks for the recorded flow plus step definitions, not a "refined page object"', async () => {
+  let capturedPrompt = '';
+  const c = makeController((p) => {
+    capturedPrompt = p;
+  });
+  c.nativeGeneratedCode = 'some recorded code';
+  c.linkedScenario = makePicker().pick(0);
+
+  await c.runLlmRefinement([], 'some recorded code', '');
+
+  assert.match(capturedPrompt, /the recorded test flow \(kept as close to the recording as possible\) AND its BDD step definitions/);
+  assert.doesNotMatch(capturedPrompt, /refined page object/i);
+  assert.equal(c.errored, undefined);
+});
+
 test('generateFeatureFile(): a non-empty instruction selection sends ONLY those files', async () => {
   const c = makeController(() => undefined);
   c.readInstructionFiles = async (selected) => selected.map((p) => ({ path: p, content: `content of ${p}` }));

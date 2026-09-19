@@ -2305,9 +2305,9 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
 
   /** Shared by the chat composer's manual send and the automatic
    * post-recording refinement — always folds in the bundled senior-QE
-   * instructions (try/catch, logger.info/warn/error, explicit visible+enabled
-   * waits, zero hardcoded values, everything parameterized as top-level
-   * static/class constants) on top of whatever project-specific `.github/`
+   * instructions (lightweight try/catch, logger.info/warn/error, zero
+   * hardcoded values hoisted to top-level constants, a reusable timestamped
+   * screenshot step) on top of whatever project-specific `.github/`
    * files and free-text instructions were supplied. */
   private async runLlmRefinement(
     instructions: { path: string; content: string }[],
@@ -3524,9 +3524,9 @@ function getNonce(): string {
   return text;
 }
 
-// This is the built-in "think like a senior UI test automation engineer"
-// refinement standard (try/catch, logger.info/warn/error, explicit
-// visible+enabled waits, zero hardcoded values) sent to the LLM on every
+// This is the built-in lightweight UI-automation refinement standard (stay
+// close to the recording; lightweight try/catch, logger.info/warn/error,
+// zero hardcoded values, a reusable timestamped screenshot step) sent to the LLM on every
 // refinement, manual or automatic. Lives outside src/ deliberately:
 // .vscodeignore excludes src/**/*.ts from the packaged extension, but this
 // file must ship as plain markdown, not be compiled. Missing/unreadable is a
@@ -4281,10 +4281,12 @@ function languageVersionGuidance(language: 'java' | 'python', version: string): 
 
 /**
  * Builds the single user message sent to the Copilot model — explicitly
- * asks for the same enterprise Page-Object style/structure/language the
- * bundled senior-QE instructions describe, using the raw Playwright codegen
- * output below as the reference for which locators/actions are actually
- * correct. LLM output can't be forced into an exact shape the way a
+ * asks for lightweight, minimally-modified output that stays as close as
+ * possible to the raw Playwright codegen output below (no Page Object Model,
+ * no extra classes; only logging/try-catch, hoisted constants, and a
+ * reusable screenshot step added — see the bundled instructions in
+ * prompts/senior-qe-instructions.md), using that recording as the reference
+ * for which locators/actions are actually correct. LLM output can't be forced into an exact shape the way a
  * template can, hence the explicit, detailed ask plus extractCodeBlock()
  * cleaning up the response afterward — and why both code views stay
  * editable.
@@ -4323,9 +4325,13 @@ function buildLlmPrompt(
       `— this is the specific language/runtime version the user selected in Settings and it must compile/run correctly ` +
       `under it, using only language features actually available in that version (never a newer version's syntax, ` +
       `and no need to stay compatible with anything older either). ${versionGuidance} ` +
-      `Follow the SAME enterprise Page-Object style described in the mandatory refinement standard below, based on the ` +
-      `reference "Playwright-generated code" — real, unmodified output from Playwright's own \`codegen\` tool. Reuse the ` +
-      `exact locators it already found — do not invent new ones or guess at different ones. ` +
+      `Stay as close as possible to the reference "Playwright-generated code" below — real, unmodified output from ` +
+      `Playwright's own \`codegen\` tool — keeping its steps and their order/flow exactly as recorded, and making only ` +
+      `the light additions the mandatory refinement standard below describes. Keep the output lightweight, readable, ` +
+      `and minimally refactored: do not introduce a Page Object Model, wrapper/nested/child classes, or extra framework ` +
+      `layers (the recorded browser-launch override is the one exception — keep it exactly), and do not add complex ` +
+      `validation unless explicitly required. Reuse the exact locators it already found — do not invent new ones or ` +
+      `guess at different ones. ` +
       `Respond with ONLY the final code in a single fenced code block and no other commentary.`
   ];
 
@@ -4350,17 +4356,18 @@ function buildLlmPrompt(
         `linked scenario (see the "Linked Gherkin" section near the end of this prompt) and wants a bare, minimal ` +
         `snippet — NOT a complete runnable file. Output ONLY:\n` +
         `  (a) one BDD step definition method for each checked step, and\n` +
-        `  (b) whatever page-object method(s) that step definition directly calls — the specific Playwright ` +
-        `action(s)/assertion(s) it needs in order to do its job — reusing the reference code's own locators/actions ` +
-        `for exactly those methods.\n` +
+        `  (b) whatever helper code that step definition directly calls (including the reusable screenshot helper, if ` +
+        `the step enters values or submits a form) — the specific Playwright action(s) it needs in order to do its ` +
+        `job — reusing the reference code's own locators/actions for exactly those steps. The standard's end-of-test ` +
+        `screenshot does not apply here (no test/hook is generated).\n` +
         `Do NOT include, even though the mandatory refinement standard below would otherwise call for them: a class ` +
         `declaration/wrapper around the output, \`@Before\`/\`@After\` hooks or any other browser/Playwright launch ` +
         `or teardown code, a step definition for the Background, imports/constants/locators for anything unrelated ` +
-        `to (a)/(b) above, or a step/page-object method for any step the user left unchecked — even indirectly (e.g. ` +
+        `to (a)/(b) above, or code for any step the user left unchecked — even indirectly (e.g. ` +
         `a prior navigation/click a checked step might seem to depend on to reach the right page state; leave it ` +
         `out and let the checked step stand on its own, incomplete as a standalone runnable test). The refinement ` +
-        `standard's STYLE rules still apply to whatever you DO output (naming, explicit visible+enabled waits before ` +
-        `each interaction, real logging, zero hardcoded values, try/catch around the method itself) — only its ` +
+        `standard's STYLE rules still apply to whatever you DO output (naming, real logging, locators/values ` +
+        `hoisted to named constants, lightweight try/catch around the step) — only its ` +
         `single-complete-file, hook, and Background-related instructions are overridden here. Necessary imports for ` +
         `exactly what you output are expected; nothing beyond that.`
     );
@@ -4478,13 +4485,13 @@ function buildLlmPrompt(
             `whichever of its actions correspond to a step below; silently drop every other action, INCLUDING one a ` +
             `checked step might seem to need in order to reach the right page state (e.g. a prior navigation/click ` +
             `that belongs to a step the user did NOT check) — do not reintroduce it as a "setup" helper, a hook, or ` +
-            `anything else. Output ONLY a step definition method per checked step below plus the page-object ` +
-            `method(s) each one directly calls — no class wrapper, no hooks, nothing for an unchecked step, even ` +
+            `anything else. Output ONLY a step definition method per checked step below plus the helper code ` +
+            `each one directly calls — no class wrapper, no hooks, nothing for an unchecked step, even ` +
             `indirectly, per the "Restricted scope" section above.`
           : `. Every Given/When/Then/And/But/* line below must get its own properly linked BDD step definition per ` +
             `the "BDD Gherkin Step Definition Linking" instructions — do not just append the Gherkin as a comment. ` +
-            `Produce exactly ONE file, in exactly ONE fenced code block: the refined page object/test code AND its ` +
-            `BDD step definitions together, correctly organized and imported as idiomatic for the target language's ` +
+            `Produce exactly ONE file, in exactly ONE fenced code block: the recorded test flow (kept as close to the ` +
+            `recording as possible) AND its BDD step definitions together, correctly organized and imported as idiomatic for the target language's ` +
             `real BDD framework (Cucumber-JVM for Java, pytest-bdd for Python) — never split this into multiple ` +
             `files or code blocks.`) +
         // S02: restated here too, right next to the actual step list, not

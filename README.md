@@ -137,23 +137,30 @@ right away instead of waiting for the next codegen update.
 
 Every refinement request always includes a bundled, built-in instruction
 set (`prompts/senior-qe-instructions.md`, shipped with the extension) asking
-the model to apply, comprehensively:
+the model to make only light, minimal changes to the recording (UI Automation,
+Java and Python):
 
-- **Zero hardcoded values anywhere** — every locator, URL, timeout, and
-  expected value as a named constant declared once at the top of the class
-  (Java `static final` fields / Python class attributes), reused by
-  reference everywhere it repeats, never re-embedded as a literal.
-- **Explicit synchronization** — before every click/fill/select/check/press,
-  an explicit wait for the element to be visible, then an explicit
-  assertion that it's enabled, before acting — never a fixed sleep.
-- **Proper error handling** — every logical step wrapped in try/catch
-  (Java) or try/except (Python), never silently swallowed, always
-  re-raised after logging.
-- **Real logging, not print statements** — SLF4J in Java, the standard
-  `logging` module in Python, with `logger.info` for each step's
-  start/success, `logger.warning` for a recoverable hiccup, and
-  `logger.error` (with the failing locator/action) immediately before a
-  failure is re-raised.
+- **Stay close to the recording** — the same steps, order, and flow Playwright
+  codegen recorded; no Page Object Model, no wrapper/nested/child classes, no
+  inheritance. Only the necessary JUnit annotations (`@Test`, plus
+  `@BeforeAll`/`@AfterAll`/`@BeforeEach`/`@AfterEach` only where browser
+  init/clean-up needs them).
+- **Zero hardcoded values anywhere** — every locator's selector text, URL,
+  entered value, timeout, and expected value as a named constant in one block
+  at the top of the class (Java `static final` fields / Python module-level
+  constants), reused by reference, never re-embedded as a literal.
+- **Minimal synchronization** — Playwright's own auto-wait by default,
+  explicit waits only where a recorded step clearly needs one, never a fixed
+  sleep.
+- **Basic error handling and logging** — a lightweight try/catch (Java) or
+  try/except (Python) around each test body / major section, never silently
+  swallowed, always re-raised after logging; SLF4J in Java, the standard
+  `logging` module in Python (`INFO`/`WARN`/`ERROR` as fits), short and
+  practical.
+- **Reusable screenshot step** — one small helper called at the end of every
+  test and before a form submit / navigation away, saving a full-page,
+  date-and-time-stamped PNG to your `Documents` folder (a screenshot failure
+  only logs a warning, it never fails the test).
 - **BDD step definitions** (only when a Gherkin scenario is linked — see
   above) — Cucumber-JVM for Java, pytest-bdd for Python.
 
@@ -340,9 +347,10 @@ media/
   icon.png                 Marketplace/Extensions-view icon (256x256)
   activitybar-icon.svg     Activity Bar icon (monochrome, VS Code recolors it per theme)
 prompts/
-  senior-qe-instructions.md  Bundled LLM instruction set (try/catch, logger.info/
-                             warn/error, explicit waits, zero hardcoded values, BDD
-                             step definitions) — always included in every AI refinement request
+  senior-qe-instructions.md  Bundled LLM instruction set for UI Automation (stay close to the
+                             recording, try/catch, logger.info/warn/error, zero hardcoded
+                             values, screenshot step, BDD step definitions) — always
+                             included in every UI AI refinement request
 scripts/
   bump-version.js          Auto-increments package.json's build number (build-extension.bat)
   generate-icon.js         Regenerates media/icon.png from scratch (no image-library dependency)
