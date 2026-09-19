@@ -20,6 +20,16 @@ import { runVerifyFixAgent } from '../agent/verifyFixOrchestrator';
 import { truncateForDialog, truncateForStatusLine, buildApiVerifySuccessMessage } from '../agent/verifyFixTextTruncation';
 import { appendPasswordEncryptionSection } from '../security/passwordEncryptionSection';
 import { withDatabaseTestingInstructions } from '../llm/databaseTestingInstructions';
+import {
+  InstructionFile,
+  SelectedRagPurpose,
+  UnreadableInstructionFilesError,
+  UnusableRagFilesError,
+  buildChatInstructionsSection,
+  buildProjectInstructionsSection,
+  buildSelectedInstructionsReminder,
+  buildSelectedRagReminder
+} from '../llm/customInstructionsSection';
 import { getOrBuildFreshnessReport, FreshnessReport } from '../rag/ragFreshnessService';
 import { RAG_DRAFTS_FOLDER_SEGMENTS } from '../rag/ragCorpusGenerator';
 import { parseRagFile } from '../rag/ragFrontmatter';
@@ -1208,7 +1218,18 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
       return;
     }
 
-    let instructions = await this.readInstructionFiles(selectedFiles, epoch);
+    let instructions: InstructionFile[];
+    try {
+      instructions = await this.readInstructionFiles(selectedFiles, epoch);
+    } catch (err) {
+      if (!(err instanceof UnreadableInstructionFilesError)) {
+        throw err;
+      }
+      // The real send would refuse to start for this reason, so there is no
+      // meaningful number to show — say why instead.
+      this.webview?.postMessage({ type: 'tokenEstimate', payload: { available: false, reason: err.message } });
+      return;
+    }
     const builtIn = isApiMode ? readApiAutomationInstructions() : readSeniorQeInstructions();
     // Same Auto Password Encryption pass the real send would do (see
     // runLlmRefinement()) — measuring the UN-redacted/un-encrypted prompt
@@ -1271,17 +1292,30 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
           }
         })()
       : undefined;
-    const { section: ragSection } = await this.buildRagSection(
-      settings,
-      isApiMode,
-      measuredCode,
-      apiDetails,
-      measuredCustomInstructions,
-      linkedScenarioSnapshot,
-      mandatoryTokensForEstimate,
-      selectedRagFiles,
-      model
-    );
+    let ragSection: string;
+    try {
+      ({ section: ragSection } = await this.buildRagSection(
+        settings,
+        isApiMode,
+        measuredCode,
+        apiDetails,
+        measuredCustomInstructions,
+        linkedScenarioSnapshot,
+        mandatoryTokensForEstimate,
+        selectedRagFiles,
+        model
+      ));
+    } catch (err) {
+      if (!(err instanceof UnusableRagFilesError)) {
+        throw err;
+      }
+      // An unusable selected file would stop generation, so there is no
+      // meaningful estimate — say why instead of showing a misleading number.
+      if (seq === this.tokenEstimateSeq) {
+        this.webview?.postMessage({ type: 'tokenEstimate', payload: { available: false, reason: err.message } });
+      }
+      return;
+    }
     const prompt = isApiMode
       ? await buildApiLlmPrompt(
           settings.language,
@@ -1567,7 +1601,10 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     }
     this.lastCustomInstructions = customInstructions.trim();
     this.selectedRagFiles = selectedRagFiles;
-    const instructions = await this.readInstructionFiles(selectedFiles, epoch);
+    const instructions = await this.readSelectedInstructionsOrReport(selectedFiles, epoch);
+    if (!instructions) {
+      return; // an explicitly selected file couldn't be read — already reported to the user
+    }
     if (epoch !== this.sessionEpoch) {
       // "Clear Data"/"Kill All Browsers" fired while this instruction read
       // was still in flight — this request is stale before it even reaches
@@ -1615,7 +1652,10 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     // actually recorded, so every trigger path (this button, manual chat
     // send, the automatic pipeline) enforces it the same way.
     const playwrightCode = await this.requestCurrentPlaywrightCode();
-    const instructions = await this.readInstructionFiles(this.selectedInstructionFiles, epoch);
+    const instructions = await this.readSelectedInstructionsOrReport(this.selectedInstructionFiles, epoch);
+    if (!instructions) {
+      return; // an explicitly selected file couldn't be read — already reported to the user
+    }
     if (epoch !== this.sessionEpoch) {
       // "Clear Data"/"Kill All Browsers" fired while this preflight was
       // still in flight — see sendToLlm()'s identical check for why this
@@ -1750,7 +1790,8 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
         mandatoryTokens,
         selectedRagFiles,
         resolvedModel,
-        cts.token
+        cts.token,
+        'feature-file'
       );
       if (epoch !== this.sessionEpoch || this.featureGenCancellation !== cts || cts.token.isCancellationRequested) {
         return;
@@ -1797,7 +1838,12 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
       }
       const message = err instanceof CopilotUnavailableError ? err.message : describeError(err);
       this.outputChannel.appendLine(`Feature-file generation failed: ${message}`);
-      this.generatedFeaturePanel.showError(message);
+      // Selected recipes are sent in full, never trimmed — say so when that is what made the request too large.
+      this.generatedFeaturePanel.showError(
+        selectedRagFiles.length > 0 && err instanceof PromptTooLargeError
+          ? `${message} The ${selectedRagFiles.length} selected RAG Data recipe(s) are always sent in full — uncheck some RAG Data files or choose a model with a larger context window in Settings.`
+          : message
+      );
     }
   }
 
@@ -2310,7 +2356,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
    * screenshot step) on top of whatever project-specific `.github/`
    * files and free-text instructions were supplied. */
   private async runLlmRefinement(
-    instructions: { path: string; content: string }[],
+    instructions: InstructionFile[],
     playwrightCode: string,
     customInstructions: string,
     apiDetails?: ApiRequestDetails,
@@ -2487,7 +2533,18 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
         );
         return;
       }
-      // Built once with an empty RAG section purely to measure the
+      // Recipes the user explicitly SELECTED in "RAG Data" are MANDATORY
+      // context, exactly like selected Custom Instructions: built here,
+      // before the measurement below, so they count as mandatory (never
+      // squeezed by the packing budget), and reused for the real prompt. A
+      // missing/invalid/wrong-language selected file throws
+      // UnusableRagFilesError out of this try block → stops generation
+      // (see the catch) instead of silently proceeding without it.
+      const selectedRag =
+        selectedRagFiles.length > 0
+          ? await this.buildRagSection(settings, isApiMode, playwrightCode, apiDetails, customInstructions, linkedScenarioSnapshot, undefined, selectedRagFiles, undefined, cts.token)
+          : undefined;
+      // Built once with an empty AUTOMATIC-RAG section purely to measure the
       // MANDATORY (non-RAG) token cost — packing (buildRagSection below)
       // needs this to compute how much of the model's own real context
       // window is actually left for RAG content, per Phase 3's "consume
@@ -2496,6 +2553,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
       // flows straight through to buildRagSection()'s own documented
       // unmeasured fallback, never silently treated as "zero mandatory
       // cost, unlimited RAG budget."
+      const mandatoryRagSection = selectedRag?.section ?? '';
       const mandatoryPrompt = isApiMode
         ? await buildApiLlmPrompt(
             settings.language,
@@ -2505,7 +2563,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
             apiDetails!,
             customInstructions,
             this.getEncryptSecret(),
-            '',
+            mandatoryRagSection,
             linkedScenarioSnapshot,
             suggestedBaseName,
             preparedLinkedSource
@@ -2518,7 +2576,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
             instructions,
             playwrightCode,
             customInstructions,
-            '',
+            mandatoryRagSection,
             linkedScenarioSnapshot,
             suggestedBaseName,
             recordingMismatch,
@@ -2545,24 +2603,36 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
             }
           })()
         : undefined;
-      // "Link Existing Class file": linked source is MANDATORY context — it
-      // can never be silently dropped or truncated the way optional RAG
-      // content can. If it (plus everything else already mandatory) alone
-      // leaves no real room for a response, stop here with actionable
-      // guidance rather than sending a request that can only fail, or
-      // silently truncating the file. Scoped to the linked-source case only
-      // — this is a NEW, additive check, not a change to any
-      // already-existing mandatory-content behavior.
-      if (preparedLinkedSource && resolvedModel && mandatoryTokens !== undefined && mandatoryTokens >= resolvedModel.maxInputTokens) {
+      // "Link Existing Class file" source and selected "RAG Data" recipes are
+      // MANDATORY context — neither can be silently dropped or truncated the
+      // way optional automatic RAG content can. If they (plus everything
+      // else already mandatory) alone leave no real room for a response,
+      // stop here with actionable guidance rather than sending a request
+      // that can only fail, or silently trimming what the user chose.
+      // Scoped to those two cases only — a NEW, additive check, not a
+      // change to any already-existing mandatory-content behavior.
+      if ((preparedLinkedSource || selectedRag) && resolvedModel && mandatoryTokens !== undefined && mandatoryTokens >= resolvedModel.maxInputTokens) {
+        const chosen = [
+          preparedLinkedSource && `linked file "${preparedLinkedSource.fileName}"`,
+          selectedRag && `${selectedRag.matches.length} selected RAG Data recipe(s)`
+        ].filter(Boolean);
+        const remedies = [
+          preparedLinkedSource && 'unlink the file and pick a smaller one',
+          selectedRag && 'uncheck some RAG Data files',
+          'reduce the checked Custom Instructions files',
+          'choose a model with a larger context window in Settings'
+        ].filter(Boolean);
+        const advice = `${remedies.slice(0, -1).join(', ')}, or ${remedies[remedies.length - 1]}`;
         this.postLlmError(
-          `The linked file "${preparedLinkedSource.fileName}" plus the required instructions (${mandatoryTokens.toLocaleString()} tokens) ` +
+          `The ${chosen.join(' and ')} plus the required instructions (${mandatoryTokens.toLocaleString()} tokens) ` +
             `already exceeds model "${settings.copilotModelId}"'s ${resolvedModel.maxInputTokens.toLocaleString()}-token limit, before any ` +
-            `response can even be generated. Unlink the file and pick a smaller one, reduce the checked Custom Instructions files, or ` +
-            `choose a model with a larger context window in Settings.`
+            `response can even be generated. ${advice.charAt(0).toUpperCase()}${advice.slice(1)}. ` +
+            `Selected files are always sent in full, never trimmed.`
         );
         return;
       }
-      const built = await this.buildRagSection(settings, isApiMode, playwrightCode, apiDetails, customInstructions, linkedScenarioSnapshot, mandatoryTokens, selectedRagFiles, resolvedModel, cts.token);
+      // Selected recipes were already built above; automatic retrieval only runs when nothing was selected.
+      const built = selectedRag ?? (await this.buildRagSection(settings, isApiMode, playwrightCode, apiDetails, customInstructions, linkedScenarioSnapshot, mandatoryTokens, selectedRagFiles, resolvedModel, cts.token));
       ragSection = built.section;
       ragMatches = built.matches;
       const prompt = isApiMode
@@ -2658,6 +2728,23 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
       const message = err instanceof CopilotUnavailableError ? err.message : describeError(err);
       this.outputChannel.appendLine(`Code generation request failed: ${message}`);
 
+      // A selected "RAG Data" file that can't be used stops generation
+      // outright — never a silent skip, never a call without it.
+      if (err instanceof UnusableRagFilesError) {
+        this.postLlmError(err.message);
+        return;
+      }
+      // Selected recipes are never dropped or trimmed to make a request fit,
+      // so a too-large request gets targeted guidance instead of the
+      // retry-without-RAG below (which is only for AUTOMATIC matches).
+      if (selectedRagFiles.length > 0 && err instanceof PromptTooLargeError) {
+        this.postLlmError(
+          `${message} The ${selectedRagFiles.length} selected RAG Data recipe(s) are always sent in full and are never trimmed or dropped — ` +
+            `uncheck some RAG Data files, reduce the checked Custom Instructions files, or choose a model with a larger context window in Settings.`
+        );
+        return;
+      }
+
       // A response with genuinely zero completions from the model backend
       // (seen in practice — see isEmptyModelResponseError()'s own doc
       // comment), OR a request llm/copilotClient.ts's own token-budget
@@ -2674,7 +2761,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
       // one automatic attempt WITHOUT the RAG section, so this specific,
       // recoverable failure doesn't just dead-end on a cryptic raw
       // provider error the user has no way to act on.
-      if (ragSection && (err instanceof PromptTooLargeError || isEmptyModelResponseError(message))) {
+      if (ragSection && selectedRagFiles.length === 0 && (err instanceof PromptTooLargeError || isEmptyModelResponseError(message))) {
         this.outputChannel.appendLine(
           err instanceof PromptTooLargeError
             ? 'Request was too large for the model with RAG components included — retrying once without them...'
@@ -2889,7 +2976,10 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
     // reason `linkedScenario` above is a parameter, not a live field read.
     selectedRagFiles: string[],
     model?: vscode.LanguageModelChat,
-    cancellationToken?: vscode.CancellationToken
+    cancellationToken?: vscode.CancellationToken,
+    // Selected recipes feed the feature-file prompt too, but as scenario
+    // context only (no import list) — see formatSelectedRagSection().
+    purpose: SelectedRagPurpose = 'code'
   ): Promise<{ section: string; matches: RagMatch[] }> {
     // A manual "RAG Data" checkbox selection is honored even when "Use
     // reusable components" is off — see rag/ragPackingPipeline.ts's own doc
@@ -2907,7 +2997,8 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
       cancellationToken,
       logPrefix: 'Reusable components (RAG)',
       onLog: (message) => this.outputChannel.appendLine(message),
-      selectedRagFiles
+      selectedRagFiles,
+      purpose
     });
   }
 
@@ -3015,15 +3106,24 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
    * additional files the moment it's discovered, rather than only being
    * discarded by the caller once every file has already been read.
    */
-  private async readInstructionFiles(relPaths: string[], epoch: number): Promise<{ path: string; content: string }[]> {
+  private async readInstructionFiles(relPaths: string[], epoch: number): Promise<InstructionFile[]> {
+    // Only an EXPLICIT checkbox selection is "user selected" (and therefore
+    // top priority in the prompt — see llm/customInstructionsSection.ts); the
+    // empty-selection "send every .github/*.md" default keeps its old,
+    // neutral rendering — and its old leniency (below).
+    const userSelected = relPaths.length > 0;
     if (!vscode.workspace.workspaceFolders?.length) {
+      if (userSelected) {
+        throw new UnreadableInstructionFilesError(relPaths.map((p) => ({ path: p, reason: 'no workspace folder is open' })));
+      }
       return [];
     }
     const effectivePaths = await this.resolveEffectiveInstructionFilePaths(relPaths);
     if (epoch !== this.sessionEpoch) {
       return [];
     }
-    const results: { path: string; content: string }[] = [];
+    const results: InstructionFile[] = [];
+    const unreadable: { path: string; reason: string }[] = [];
     for (const relPath of effectivePaths) {
       if (epoch !== this.sessionEpoch) {
         break;
@@ -3039,12 +3139,43 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
         if (epoch !== this.sessionEpoch) {
           break;
         }
-        results.push({ path: relPath, content });
-      } catch {
-        // Skip a file that vanished/moved between listing and sending.
+        results.push({ path: relPath, content, userSelected });
+      } catch (err) {
+        // Default ("nothing checked") set: skip a file that vanished/moved
+        // between listing and sending — nobody chose it individually. An
+        // EXPLICITLY selected file is different: dropping it would generate
+        // code WITHOUT an instruction the user picked, so every one is
+        // collected and reported below (all at once, not one per retry).
+        unreadable.push({ path: relPath, reason: describeError(err) });
       }
     }
+    // A stale request (reset/newer request) is discarded by its caller — never
+    // report a failure on its behalf.
+    if (userSelected && unreadable.length > 0 && epoch === this.sessionEpoch) {
+      throw new UnreadableInstructionFilesError(unreadable);
+    }
     return results;
+  }
+
+  /**
+   * `readInstructionFiles()` for the two "start a code generation" entry
+   * points (`sendToLlm()` / `regenerateAiCode()`): an unreadable EXPLICITLY
+   * selected file stops the request BEFORE any model call and is shown to the
+   * user (which file, restore-or-uncheck) instead of surfacing as an
+   * unhandled rejection. `undefined` means "already reported — stop"; `[]`
+   * still means "nothing to add / stale request", exactly as before.
+   */
+  private async readSelectedInstructionsOrReport(relPaths: string[], epoch: number): Promise<InstructionFile[] | undefined> {
+    try {
+      return await this.readInstructionFiles(relPaths, epoch);
+    } catch (err) {
+      if (!(err instanceof UnreadableInstructionFilesError)) {
+        throw err;
+      }
+      this.outputChannel.appendLine(`Generation stopped before contacting the model — ${err.message}`);
+      this.postLlmError(err.message);
+      return undefined;
+    }
   }
 
   private postCopilotEnabledState(enabled: boolean): void {
@@ -3567,7 +3698,7 @@ function buildFeatureFilePrompt(
   builtInInstructions: string,
   playwrightCode: string,
   customInstructions: string,
-  instructions: { path: string; content: string }[],
+  instructions: InstructionFile[],
   ragSection: string
 ): string {
   const parts: string[] = [];
@@ -3581,9 +3712,7 @@ function buildFeatureFilePrompt(
     );
   }
 
-  if (instructions.length) {
-    parts.push(`\n## Project instructions/skills/prompts (from .github/) — follow these`, ...instructions.map((f) => `### ${f.path}\n${f.content}`));
-  }
+  parts.push(...buildProjectInstructionsSection(instructions, ragSection));
 
   // `playwrightCode` has already had any password/credential literal
   // replaced with an `ENC[v1:...]` token by Auto Password Encryption (see
@@ -3608,18 +3737,13 @@ function buildFeatureFilePrompt(
   if (ragReminder) {
     parts.push(ragReminder);
   }
+  parts.push(...buildSelectedInstructionsReminder(instructions, ragSection));
 
   // Deliberately LAST — see buildLlmPrompt()'s identical block for why:
   // placed earlier, this reads as a suggestion easily outweighed by
   // whatever large block follows it; last, it's what the model reads
   // right before generating.
-  if (customInstructions) {
-    parts.push(
-      `\n## ⚠ Additional instructions from the user — read this last and apply it\nThe user typed the following ` +
-        `into SoftPlay's chat box specifically for this request. Treat it as a real, binding requirement, not a ` +
-        `suggestion — if it conflicts with something more generic stated earlier in this prompt, this wins:\n${customInstructions}`
-    );
-  }
+  parts.push(...buildChatInstructionsSection(customInstructions, instructions, ragSection));
 
   return parts.join('\n');
 }
@@ -3687,7 +3811,7 @@ async function buildApiFeatureFilePrompt(
   // R07 (external review, 2026-09-17): same two params as buildApiLlmPrompt()
   // — see buildFeatureFilePrompt()'s own doc comment for why they now apply
   // to feature-file generation too.
-  instructions: { path: string; content: string }[] = [],
+  instructions: InstructionFile[] = [],
   ragSection = ''
 ): Promise<string> {
   const parts: string[] = [];
@@ -3701,9 +3825,7 @@ async function buildApiFeatureFilePrompt(
     );
   }
 
-  if (instructions.length) {
-    parts.push(`\n## Project instructions/skills/prompts (from .github/) — follow these`, ...instructions.map((f) => `### ${f.path}\n${f.content}`));
-  }
+  parts.push(...buildProjectInstructionsSection(instructions, ragSection));
 
   if (linkedScenario) {
     const gherkinBlock = [linkedScenario.backgroundRawText, linkedScenario.rawText].filter(Boolean).join('\n\n');
@@ -3726,15 +3848,10 @@ async function buildApiFeatureFilePrompt(
   if (ragReminder) {
     parts.push(ragReminder);
   }
+  parts.push(...buildSelectedInstructionsReminder(instructions, ragSection));
 
   // Deliberately LAST — see buildLlmPrompt()'s identical block for why.
-  if (customInstructions) {
-    parts.push(
-      `\n## ⚠ Additional instructions from the user — read this last and apply it\nThe user typed the following ` +
-        `into SoftPlay's chat box specifically for this request. Treat it as a real, binding requirement, not a ` +
-        `suggestion — if it conflicts with something more generic stated earlier in this prompt, this wins:\n${customInstructions}`
-    );
-  }
+  parts.push(...buildChatInstructionsSection(customInstructions, instructions, ragSection));
 
   return parts.join('\n');
 }
@@ -3753,7 +3870,7 @@ async function buildApiLlmPrompt(
   language: 'java' | 'python',
   languageVersion: string,
   builtInInstructions: string,
-  instructions: { path: string; content: string }[],
+  instructions: InstructionFile[],
   apiDetails: ApiRequestDetails,
   customInstructions: string,
   encryptSecret: SecretEncryptor,
@@ -3804,12 +3921,7 @@ async function buildApiLlmPrompt(
     parts.push(`\n## Mandatory refinement standard — apply every part of this\n${builtInInstructions}`);
   }
 
-  if (instructions.length) {
-    parts.push(
-      `\n## Project instructions/skills/prompts (from .github/) — follow these`,
-      ...instructions.map((f) => `### ${f.path}\n${f.content}`)
-    );
-  }
+  parts.push(...buildProjectInstructionsSection(instructions, ragSection));
 
   const linkedSourceSection = buildLinkedSourceSection(linkedSource);
   if (linkedSourceSection) {
@@ -3866,19 +3978,14 @@ async function buildApiLlmPrompt(
   if (linkedSourceReminder) {
     parts.push(linkedSourceReminder);
   }
+  parts.push(...buildSelectedInstructionsReminder(instructions, ragSection));
 
   // Free-text instructions from the chat composer ("Add any details for
   // the AI to follow…") — deliberately LAST, same reasoning as
   // buildLlmPrompt()'s identical block: a model weighs what it reads most
   // recently more heavily, and this document alone runs well over a
   // thousand lines, easily burying/outweighing anything placed earlier.
-  if (customInstructions) {
-    parts.push(
-      `\n## ⚠ Additional instructions from the user — read this last and apply it\nThe user typed the following ` +
-        `into SoftPlay's chat box specifically for this request. Treat it as a real, binding requirement, not a ` +
-        `suggestion — if it conflicts with something more generic stated earlier in this prompt, this wins:\n${customInstructions}`
-    );
-  }
+  parts.push(...buildChatInstructionsSection(customInstructions, instructions, ragSection));
 
   return parts.join('\n');
 }
@@ -4231,6 +4338,13 @@ function buildRagUsageReminder(ragSection: string): string {
   if (!ragSection) {
     return '';
   }
+  // Recipes the user explicitly SELECTED are mandatory, not "reuse the ones
+  // that genuinely fit" — see llm/customInstructionsSection.ts. Automatic
+  // matches keep the softer reminder below, unchanged.
+  const [selectedReminder] = buildSelectedRagReminder(ragSection);
+  if (selectedReminder) {
+    return selectedReminder;
+  }
   return (
     `\n## ⚠ Reusable components reminder (read this again before writing the final code)\n` +
     `Earlier in this prompt, under "## Reusable components available", you were offered existing helper(s) to ` +
@@ -4296,7 +4410,7 @@ function buildLlmPrompt(
   languageVersion: string,
   browserChannel: 'chrome' | 'edge',
   builtInInstructions: string,
-  instructions: { path: string; content: string }[],
+  instructions: InstructionFile[],
   playwrightCode: string,
   customInstructions: string,
   /** See buildApiLlmPrompt()'s identical parameter. */
@@ -4403,12 +4517,7 @@ function buildLlmPrompt(
     );
   }
 
-  if (instructions.length) {
-    parts.push(
-      `\n## Project instructions/skills/prompts (from .github/) — follow these`,
-      ...instructions.map((f) => `### ${f.path}\n${f.content}`)
-    );
-  }
+  parts.push(...buildProjectInstructionsSection(instructions, ragSection));
 
   const linkedSourceSection = buildLinkedSourceSection(linkedSource);
   if (linkedSourceSection) {
@@ -4549,6 +4658,7 @@ function buildLlmPrompt(
   if (linkedSourceReminder) {
     parts.push(linkedSourceReminder);
   }
+  parts.push(...buildSelectedInstructionsReminder(instructions, ragSection));
 
   // Free-text instructions from the chat composer ("Add any details for
   // the AI to follow…") — deliberately the LAST thing in the prompt, after
@@ -4559,13 +4669,7 @@ function buildLlmPrompt(
   // specific, most current ask — apply it on top of everything above,
   // adjusting whatever part of the output it's actually about, even where
   // that means deviating from a general rule stated earlier.
-  if (customInstructions) {
-    parts.push(
-      `\n## ⚠ Additional instructions from the user — read this last and apply it\nThe user typed the following ` +
-        `into SoftPlay's chat box specifically for this request. Treat it as a real, binding requirement, not a ` +
-        `suggestion — if it conflicts with something more generic stated earlier in this prompt, this wins:\n${customInstructions}`
-    );
-  }
+  parts.push(...buildChatInstructionsSection(customInstructions, instructions, ragSection));
 
   return parts.join('\n');
 }

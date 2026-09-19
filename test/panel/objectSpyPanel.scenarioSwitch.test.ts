@@ -143,6 +143,10 @@ function loadObjectSpyPanelWithFakeVsCode(): { ObjectSpyPanel: new (...args: nev
       // checks, verify-fix agent, ...) is never reached by the code paths
       // this test exercises — an empty stub is enough for the module to
       // load without throwing.
+      // Pure, vscode-free — real code (see llm/customInstructionsSection.ts).
+      if (id === '../llm/customInstructionsSection') {
+        return originalLoad.apply(this, arguments);
+      }
       return {};
     }
     // eslint-disable-next-line prefer-rest-params

@@ -188,10 +188,45 @@ subscription/extension version exposes are what show up.
    action: the extension tracks the current selection and folds whichever
    files are checked into every refinement automatically, both the
    automatic post-recording pipeline and the chat composer's manual send
-   below. Unchecking everything is fine too — refinement still runs, just
-   without any project-specific `.md` file's content, on top of the
-   always-included built-in instructions. Click **Refresh file list** if
-   you add files after opening the panel.
+   below. **Files you check take the highest priority:** only the checked
+   files are sent, and the prompt tells the model that, wherever they
+   conflict with SoftPlay's built-in refinement standard, reusable
+   components (RAG), example code **or your own chat instructions**, your
+   checked files win (in UI and API Automation, Java and Python, for both
+   generation and **Regenerate AI Code** — the selection is re-read every
+   time). A few things the environment depends on are never overridden: the
+   target language/version, the Chrome/Edge launch requirement, Auto
+   Password Encryption, and the output format. An instruction the model has
+   to set aside (a chat instruction a checked file overrules, or a file rule
+   that would break one of those four) is named in a short comment near the
+   top of the generated code rather than dropped silently. **If a checked
+   file can't be read** (deleted, renamed, no access, no workspace open),
+   generation stops before anything is sent, names the file, and asks you to
+   restore it or uncheck it. If nothing is checked, every `.github/*.md`
+   file (except `.github/rag/`) is sent as ordinary project guidance,
+   without that priority. Click **Refresh file list** if you add files after
+   opening the panel.
+
+   **RAG Data** works the same way for reusable-component recipes in
+   `.github/rag/`. With nothing checked, matching stays automatic and
+   optional ("reuse the ones that genuinely fit"). **Recipes you check hold
+   the same top priority as checked Custom md files:** each one is sent **in
+   full** (no size cap or trimming, even when "Use reusable components" is
+   off) and the prompt tells the model to use every one, called exactly as
+   shown with its imports copied verbatim, and to outrank the built-in
+   standard, example code and your chat instructions (UI and API, Java and
+   Python, **Regenerate AI Code**, and feature-file generation, where a
+   recipe is used as scenario context and no code or imports are added). If
+   a checked recipe and a checked Custom md file genuinely conflict, neither
+   simply wins: the model follows the more specific rule and names both in a
+   comment at the top of the code. Anything it sets aside is named there too,
+   never dropped silently. **If a checked recipe can't be used** (missing,
+   unreadable, not a valid recipe, not tagged for the selected language, or
+   no workspace open), or the selection alone is too large for the model's
+   context window, generation stops before anything is sent (or, if the model
+   itself refuses, is never silently retried without your recipes) and tells
+   you which file to fix or uncheck — a checked recipe is never trimmed or
+   dropped to make a request fit.
 3. The chat composer underneath is for **free-text instructions** — type
    something and press Enter (or click ➤) to trigger an immediate
    refinement request combining that text, whatever `.md` files are

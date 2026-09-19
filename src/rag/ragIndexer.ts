@@ -183,13 +183,21 @@ export async function getOrBuildRagIndex(workspaceRoot: vscode.Uri, onWarn?: (me
  * genuinely different string) is also what keeps this correct regardless
  * of path format — no separate normalization step needed at the call site.
  *
- * A path that no longer exists, or fails to parse, is reported via
- * `onWarn` (never thrown) and simply omitted from the result — the caller
- * decides what an empty/partial result means for its own request.
+ * A path that no longer exists, or fails to parse, is logged via `onWarn`
+ * AND returned in `unusable` with its reason (never thrown here) — every
+ * selected path lands in exactly one of `loaded`/`unusable`, so the caller
+ * can refuse to proceed rather than quietly generate without a recipe the
+ * user explicitly checked. `loaded` keeps the caller's own selected path
+ * beside each recipe (for accurate error messages), in selection order.
  */
-export async function loadRagRecipesByPath(workspaceRoot: vscode.Uri, workspaceRelativePaths: string[], onWarn?: (message: string) => void): Promise<RagRecipe[]> {
+export async function loadRagRecipesByPath(
+  workspaceRoot: vscode.Uri,
+  workspaceRelativePaths: string[],
+  onWarn?: (message: string) => void
+): Promise<{ loaded: { path: string; recipe: RagRecipe }[]; unusable: { path: string; reason: string }[] }> {
   const folder = ragFolderUri(workspaceRoot);
-  const recipes: RagRecipe[] = [];
+  const loaded: { path: string; recipe: RagRecipe }[] = [];
+  const unusable: { path: string; reason: string }[] = [];
   for (const workspaceRelativePath of workspaceRelativePaths) {
     const uri = vscode.Uri.joinPath(workspaceRoot, workspaceRelativePath);
     try {
@@ -198,18 +206,24 @@ export async function loadRagRecipesByPath(workspaceRoot: vscode.Uri, workspaceR
       const parsed = parseRagFile(content);
       if (!parsed.ok) {
         onWarn?.(`Manually selected "${workspaceRelativePath}" could not be used — ${parsed.error}`);
+        unusable.push({ path: workspaceRelativePath, reason: `not a valid recipe — ${parsed.error}` });
         continue;
       }
       // Same relative-to-.github/rag/ normalization as getOrBuildRagIndex()
       // above, for consistency with every other RagRecipe this codebase
       // ever produces (embedding text, traceability banners, ...).
       const relativePath = path.relative(folder.fsPath, uri.fsPath).split(path.sep).join('/');
-      recipes.push({ filePath: uri.fsPath, relativePath, frontmatter: parsed.value.frontmatter, body: parsed.value.body, mtimeMs: stat.mtime });
+      loaded.push({
+        path: workspaceRelativePath,
+        recipe: { filePath: uri.fsPath, relativePath, frontmatter: parsed.value.frontmatter, body: parsed.value.body, mtimeMs: stat.mtime }
+      });
     } catch (err) {
-      onWarn?.(`Manually selected "${workspaceRelativePath}" could not be read: ${err instanceof Error ? err.message : String(err)} (renamed or deleted since it was selected?)`);
+      const reason = err instanceof Error ? err.message : String(err);
+      onWarn?.(`Manually selected "${workspaceRelativePath}" could not be read: ${reason} (renamed or deleted since it was selected?)`);
+      unusable.push({ path: workspaceRelativePath, reason });
     }
   }
-  return recipes;
+  return { loaded, unusable };
 }
 
 /** Forces the next `getOrBuildRagIndex()` call to rebuild from disk

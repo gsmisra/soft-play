@@ -152,6 +152,10 @@ function loadObjectSpyPanelWithFakeVsCode(): { ObjectSpyPanel: new (...args: nev
       if (id === '../api/apiRequestDetails') {
         return originalLoad.apply(this, arguments);
       }
+      // Pure, vscode-free — real code (see llm/customInstructionsSection.ts).
+      if (id === '../llm/customInstructionsSection') {
+        return originalLoad.apply(this, arguments);
+      }
       return {};
     }
     // eslint-disable-next-line prefer-rest-params
@@ -835,7 +839,10 @@ test('sendToLlm() threads its OWN selectedRagFiles parameter into buildRagSectio
     return { section: '', matches: [] };
   };
 
-  await c.sendToLlm(['instructions.md'], ['this-click-own-selection.md'], 'some recorded code', '');
+  // No Custom Instructions selection here — this test is about RAG threading. (It used to pass a
+  // made-up 'instructions.md' that could not exist in this fake workspace and only passed because a
+  // missing SELECTED file was silently dropped; that is now a hard stop, by design.)
+  await c.sendToLlm([], ['this-click-own-selection.md'], 'some recorded code', '');
 
   assert.deepEqual(capturedSelectedRagFiles, ['this-click-own-selection.md']);
   assert.equal(c.output, '// ok');

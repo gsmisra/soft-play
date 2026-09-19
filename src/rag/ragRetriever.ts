@@ -3,6 +3,7 @@ import type { RagIndex, RagRecipeMetadata } from './ragIndexBuilder';
 import type { RagAutomationMode, RagLanguage } from './ragTypes';
 import { applyRelevanceGate, DEFAULT_RELEVANCE_GATE, GateCandidate, RelevanceGateConfig } from './ragRelevanceGate';
 import { TfIdfEmbeddings } from './tfidfEmbeddings';
+import { buildSelectedRagSectionHeader, SelectedRagPurpose } from '../llm/customInstructionsSection';
 
 /**
  * Turns a built `RagIndex` (ragIndexBuilder.ts) plus a query into the
@@ -515,6 +516,37 @@ export interface FormatRagPromptSectionOptions {
   maxRecipeBodyChars?: number;
   /** Overrides `RAG_MAX_TOTAL_SECTION_CHARS`. */
   maxTotalSectionChars?: number;
+}
+
+/**
+ * The section for recipes the user EXPLICITLY checked in the "RAG Data" list.
+ * Unlike `formatRagPromptSection()` (automatic matches: optional "reuse the ones
+ * that genuinely fit", capped at `RAG_MAX_RECIPE_BODY_CHARS` per recipe and
+ * `RAG_MAX_TOTAL_SECTION_CHARS` overall, over-budget recipes omitted), this:
+ *  - states highest priority, equal to selected Custom Instructions (see
+ *    llm/customInstructionsSection.ts — one shared wording);
+ *  - renders EVERY recipe's body IN FULL — no per-recipe or total cap, nothing
+ *    omitted or truncated, since the user chose each one (whether it all fits the
+ *    model's window is checked by the caller against the real token count, and
+ *    stops the request rather than trimming anything);
+ *  - keeps the same "Required imports" rendering for code (a feature file has no
+ *    code, so `purpose: 'feature-file'` omits imports).
+ * `''` for no matches. Order is the order given (the user's own selection order).
+ */
+export function formatSelectedRagSection(matches: RagMatch[], language: RagLanguage, purpose: SelectedRagPurpose = 'code'): string {
+  if (matches.length === 0) {
+    return '';
+  }
+  const parts = [...buildSelectedRagSectionHeader(matches.length, purpose)];
+  matches.forEach((match, i) => {
+    parts.push(`\n### ${i + 1}. ${match.title} (id: \`${match.id}\`, source file: \`${path.basename(match.filePath)}\`)`, match.body);
+  });
+  const importEntries = purpose === 'code' ? importsFor(matches, language) : [];
+  if (importEntries.length > 0) {
+    const importLines = importEntries.map((entry) => formatImportStatement(entry, language));
+    parts.push(`\n### Required imports for the component(s) used above\n${importLines.map((line) => `\`${line}\``).join('\n')}`);
+  }
+  return parts.join('\n');
 }
 
 /** Pure formatter — returns an empty section (and no included matches) when

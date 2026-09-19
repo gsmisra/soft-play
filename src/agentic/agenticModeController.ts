@@ -29,6 +29,7 @@ import { InvalidTestCaseCsvError, normalizeTestCaseCsvResponse } from './csvTest
 import { parseCsvStrict, stringifyCsv, MalformedCsvError } from './csvUtils';
 import { buildAgenticActionShape, AgenticActionKind } from './agenticActionShape';
 import { withDatabaseTestingInstructions } from '../llm/databaseTestingInstructions';
+import { InstructionFile, UnreadableInstructionFilesError, buildProjectInstructionsSection } from '../llm/customInstructionsSection';
 import {
   AGENTIC_LEGACY_UNSUPPORTED_EXTENSIONS,
   AGENTIC_MAX_SEGMENT_CHARS,
@@ -580,26 +581,41 @@ export class AgenticModeController implements vscode.Disposable {
    * Instructions" checkbox list works exactly like Standard mode's
    * (nothing selected by default; the user opts specific files in),
    * rather than silently including every instruction file that exists.
-   * Reviewed rather than unit tested (pure vscode.workspace.fs glue,
-   * mirroring objectSpyPanel.ts's own readInstructionFiles()). */
-  private async readSelectedCustomInstructionFiles(): Promise<string> {
-    if (!vscode.workspace.workspaceFolders?.length || this.selectedInstructionFiles.length === 0) {
-      return '';
+   * Mirrors objectSpyPanel.ts's readInstructionFiles(): an EMPTY selection
+   * is `[]` (nothing to read), but files the user explicitly checked that
+   * cannot be read — including because no workspace is open at all — stop
+   * the request instead of being dropped. */
+  private async readSelectedCustomInstructionFiles(): Promise<InstructionFile[]> {
+    if (this.selectedInstructionFiles.length === 0) {
+      return [];
+    }
+    if (!vscode.workspace.workspaceFolders?.length) {
+      throw new UnreadableInstructionFilesError(this.selectedInstructionFiles.map((p) => ({ path: p, reason: 'no workspace folder is open' })));
     }
     const workspaceRoot = vscode.workspace.workspaceFolders[0].uri;
-    const contents = await Promise.all(
-      this.selectedInstructionFiles.map(async (relPath) => {
+    const unreadable: { path: string; reason: string }[] = [];
+    const files = await Promise.all(
+      this.selectedInstructionFiles.map(async (relPath): Promise<InstructionFile | undefined> => {
         try {
           const uri = vscode.Uri.joinPath(workspaceRoot, relPath);
-          const content = await readWorkspaceFileCached(uri);
-          return `### ${relPath}\n${content}`;
-        } catch {
-          // Skip a file that vanished/moved between listing and sending.
-          return '';
+          // Always `userSelected` — Agentic Mode has no "nothing checked =
+          // send all" default; only files the user checked ever get here, so
+          // they all get the highest-priority rendering (see
+          // llm/customInstructionsSection.ts).
+          return { path: relPath, content: await readWorkspaceFileCached(uri), userSelected: true };
+        } catch (err) {
+          unreadable.push({ path: relPath, reason: err instanceof Error ? err.message : String(err) });
+          return undefined;
         }
       })
     );
-    return contents.filter(Boolean).join('\n\n');
+    // Every file here was explicitly checked, so an unreadable one must stop
+    // the request (the callers' own catch blocks surface `message` to the
+    // user) rather than let it run WITHOUT an instruction the user chose.
+    if (unreadable.length > 0) {
+      throw new UnreadableInstructionFilesError(unreadable);
+    }
+    return files.filter((f): f is InstructionFile => !!f);
   }
 
   /** Per-file character budget when building the RAG retrieval QUERY
@@ -811,10 +827,7 @@ export class AgenticModeController implements vscode.Disposable {
       parts.push(isApiMode ? this.readApiAutomationInstructions() : this.readSeniorQeInstructions());
       parts.push(`Target language: ${settings.language} (version ${settings.languageVersion}).`);
     }
-    const customInstructions = await this.readSelectedCustomInstructionFiles();
-    if (customInstructions) {
-      parts.push('## Team custom instructions / skills / prompt files\n' + customInstructions);
-    }
+    parts.push(...buildProjectInstructionsSection(await this.readSelectedCustomInstructionFiles()));
     // Database testing intent: only ever driven by the "Instant
     // instructions to LLM" chat box text (userRequest), per the explicit
     // ask — a deterministic keyword/regex check
@@ -871,10 +884,21 @@ export class AgenticModeController implements vscode.Disposable {
     // two-message shape (F12) — see buildRagSection()'s own doc comment on
     // why packing needs this to know how much of the model's real context
     // window is actually left for RAG content.
-    const mandatorySystemInstructions = await this.buildSystemInstructions(settings, '', false, this.lastUserRequest);
-    const mandatoryTokens = await this.measureAgenticRequestTokens(model, mandatorySystemInstructions, ingestedContext, this.lastUserRequest);
-    const ragSection = await this.buildRagSection(settings, mandatoryTokens, model);
-    const systemInstructions = await this.buildSystemInstructions(settings, ragSection, false, this.lastUserRequest);
+    let systemInstructions: string;
+    try {
+      const mandatorySystemInstructions = await this.buildSystemInstructions(settings, '', false, this.lastUserRequest);
+      const mandatoryTokens = await this.measureAgenticRequestTokens(model, mandatorySystemInstructions, ingestedContext, this.lastUserRequest);
+      const ragSection = await this.buildRagSection(settings, mandatoryTokens, model);
+      systemInstructions = await this.buildSystemInstructions(settings, ragSection, false, this.lastUserRequest);
+    } catch (err) {
+      if (!(err instanceof UnreadableInstructionFilesError)) {
+        throw err;
+      }
+      // A real generation would refuse to start for this reason — say why
+      // instead of showing a number for a request that can't be sent.
+      this.getSidebarWebview()?.postMessage({ type: 'tokenEstimate', payload: { available: false, reason: err.message } });
+      return;
+    }
 
     const sentTokens = await this.measureAgenticRequestTokens(model, systemInstructions, ingestedContext, this.lastUserRequest);
     if (seq !== this.tokenEstimateSeq) {

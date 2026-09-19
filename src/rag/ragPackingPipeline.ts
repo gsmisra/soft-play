@@ -2,10 +2,10 @@ import * as vscode from 'vscode';
 import { ObjectSpySettings } from '../settings/settingsStore';
 import { getOrBuildRagIndex, loadRagRecipesByPath } from './ragIndexer';
 import { dedupeRecipeIds } from './ragIndexBuilder';
-import { formatRagPromptSection, RagMatch } from './ragRetriever';
+import { formatRagPromptSection, formatSelectedRagSection, RagMatch } from './ragRetriever';
 import { retrieveForOperations, OperationRagCandidate } from './ragOperationRetrieval';
-import { OperationPlan, RagOperation } from './ragOperationPlanner';
-import { RagLanguage, RagRecipe } from './ragTypes';
+import { OperationPlan } from './ragOperationPlanner';
+import { SelectedRagPurpose, UnusableRagFilesError } from '../llm/customInstructionsSection';
 import { resolveHybridRetrieveMatches } from './ragHybridConfig';
 import { packOperationCandidates, PackingDiagnostics } from './ragOperationPacking';
 import { getOrBuildFreshnessReport } from './ragFreshnessService';
@@ -48,22 +48,20 @@ export interface RagPackingContext {
   onLog: (message: string) => void;
   /** Workspace-relative paths of whichever "RAG Data" checkboxes the user
    * has explicitly checked (the "RAG Data" search+checkbox list) — when
-   * non-empty, this ENTIRELY bypasses automatic TF-IDF/hybrid retrieval's
-   * RANKING/SCORING: no relevance judgment is applied, and the freshness/
-   * staleness check that would otherwise exclude a candidate never applies
-   * either, regardless of `settings.ragEnabled`. This is NOT an
-   * unconditional guarantee that every selected file reaches the prompt,
-   * though — two real constraints still apply, deliberately, and are
-   * logged (never silent) when they remove something: (1) `language` is
-   * still a hard filter (see `buildManuallySelectedCandidates()`'s own doc
-   * comment — a structural incompatibility, not a relevance judgment), and
-   * (2) the SAME token/character budget packing every other path goes
-   * through (`packOperationCandidates()`/`formatRagPromptSection()`) can
-   * still omit a selected file whole if it genuinely doesn't fit — a
-   * selection is a strong request to include, never a bypass of the actual
-   * context-window limit. `undefined`/empty (the default) is byte-for-byte
-   * the existing automatic-retrieval behavior. */
+   * non-empty, this ENTIRELY bypasses automatic TF-IDF/hybrid retrieval:
+   * no ranking, no freshness exclusion, no budget packing, regardless of
+   * `settings.ragEnabled`. Selected recipes hold the SAME importance as
+   * selected Custom Instructions (see `packSelectedRagSection()`): rendered
+   * in FULL with a highest-priority statement, and if ANY selected file
+   * cannot be used (missing/unreadable, not a valid recipe, not tagged for
+   * the target language, no workspace) this THROWS `UnusableRagFilesError`
+   * instead of quietly omitting it. `undefined`/empty (the default) is
+   * byte-for-byte the existing automatic-retrieval behavior. */
   selectedRagFiles?: string[];
+  /** What the section is for — code generation (default) or feature-file
+   * generation (recipes are business context there, never code). Only
+   * affects the wording of a SELECTED-recipes section. */
+  purpose?: SelectedRagPurpose;
 }
 
 /** The set of `RagMatch.filePath` values currently `stale` or `missing` per
@@ -116,63 +114,60 @@ function logPackingResult(context: RagPackingContext, plan: OperationPlan, candi
 }
 
 /**
- * Builds `OperationRagCandidate[]` from recipes ALREADY loaded specifically
- * for an explicit "RAG Data" checkbox selection (`loadRagRecipesByPath()`
- * in ragIndexer.ts — deliberately NOT a full corpus index build, see that
- * function's own doc comment) — completely bypassing automatic TF-IDF/
- * hybrid retrieval and its scoring/ranking, since an explicit user
- * selection needs no relevance judgment at all. `language` is still a HARD
- * filter (the one thing automatic retrieval ALSO never relaxes, unlike
- * `automationMode`, which is only ever a soft preference) — a recipe that's
- * genuinely incompatible with the target language (e.g. a Python-only
- * helper while generating Java) is structurally unusable regardless of the
- * user's intent, so it's skipped with a clear log line rather than silently
- * included and confusing the model with syntax that doesn't apply. A
- * selected path that no longer resolves to a valid recipe at all is
- * already reported by `loadRagRecipesByPath()` itself (it simply isn't in
- * `recipes` here), so this function only needs to report the
- * language-incompatible case.
+ * The section for recipes the user EXPLICITLY checked in the "RAG Data" list
+ * (`selectedRagFiles`) — a different job from automatic retrieval, so it does
+ * NOT go through retrieval/ranking/staleness/budget packing at all. Selected
+ * recipes hold the same importance as selected Custom Instructions:
  *
- * `coveredOperationIds` is set to EVERY operation for each selected match —
- * that bookkeeping exists purely to guide automatic retrieval's own
- * prioritization/packing tie-breaks (ragOperationPacking.ts's "redundant
- * candidate" logic), which has no meaning for an explicit selection that
- * was never competing against anything else for inclusion; this just
- * ensures packing never treats a manually selected file as "redundant" and
- * demotes it below another one.
+ *  - rendered in FULL, highest priority (`formatSelectedRagSection()`), in the
+ *    user's own selection order, regardless of `settings.ragEnabled`;
+ *  - loaded directly by path (`loadRagRecipesByPath()` — never a whole-corpus
+ *    index build just to send the few files the user checked);
+ *  - NEVER silently dropped: if ANY selected file is missing/unreadable, is not
+ *    a valid recipe, is not tagged for the target `language` (the one hard
+ *    filter — a Python-only helper can't be used from Java), or no workspace is
+ *    open, this throws `UnusableRagFilesError` naming every such file, and the
+ *    caller stops before contacting the model. Whether the FULL text fits the
+ *    model's context window is the caller's job (it owns the real token count)
+ *    — it stops rather than trims, because trimming a recipe the user chose is
+ *    exactly the silent omission this rule forbids.
+ *
+ * Deliberately independent of the operation plan: nothing here competes for
+ * inclusion, so there is nothing to plan.
  */
-function buildManuallySelectedCandidates(
-  recipes: RagRecipe[],
-  canonicalIds: string[],
-  operations: RagOperation[],
-  language: RagLanguage,
-  logPrefix: string,
-  onLog: (message: string) => void
-): OperationRagCandidate[] {
-  const skippedForLanguage: string[] = [];
-  const candidates: OperationRagCandidate[] = [];
-  const operationIds = operations.map((op) => op.operationId);
-
-  recipes.forEach((recipe, i) => {
-    if (!(recipe.frontmatter.language as string[]).includes(language)) {
-      skippedForLanguage.push(recipe.relativePath);
-      return;
-    }
-    const match: RagMatch = {
-      id: canonicalIds[i],
-      title: recipe.frontmatter.title,
-      body: recipe.body,
-      imports: recipe.frontmatter.imports,
-      score: 1,
-      filePath: recipe.filePath
-    };
-    candidates.push({ match, coveredOperationIds: operationIds, bestScore: 1 });
-  });
-
-  if (skippedForLanguage.length > 0) {
-    onLog(`${logPrefix}: ${skippedForLanguage.length} manually selected RAG file(s) skipped — not tagged for ${language}: ${skippedForLanguage.join(', ')}.`);
+async function packSelectedRagSection(context: RagPackingContext): Promise<{ section: string; matches: RagMatch[] }> {
+  const { settings, logPrefix, onLog, purpose } = context;
+  const selectedPaths = context.selectedRagFiles ?? [];
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
+  if (!workspaceRoot) {
+    throw new UnusableRagFilesError(selectedPaths.map((p) => ({ path: p, reason: 'no workspace folder is open' })));
   }
-  return candidates;
+
+  const { loaded, unusable } = await loadRagRecipesByPath(workspaceRoot, selectedPaths, (message) => onLog(`${logPrefix}: ${message}`));
+  const usable: typeof loaded = [];
+  for (const entry of loaded) {
+    const languages = entry.recipe.frontmatter.language as string[];
+    if (languages.includes(settings.language)) {
+      usable.push(entry);
+    } else {
+      unusable.push({ path: entry.path, reason: `not tagged for ${settings.language} — its "language:" frontmatter lists ${languages.join(', ') || 'nothing'}` });
+    }
+  }
+  if (unusable.length > 0) {
+    throw new UnusableRagFilesError(unusable);
+  }
+
+  const canonicalIds = dedupeRecipeIds(usable.map((e) => e.recipe));
+  const matches: RagMatch[] = usable.map((e, i) => ({
+    id: canonicalIds[i],
+    title: e.recipe.frontmatter.title,
+    body: e.recipe.body,
+    imports: e.recipe.frontmatter.imports,
+    score: 1,
+    filePath: e.recipe.filePath
+  }));
+  onLog(`${logPrefix}: ${matches.length} manually selected RAG recipe(s) included IN FULL as highest-priority context — ${matches.map((m) => m.id).join(', ')}.`);
+  return { section: formatSelectedRagSection(matches, settings.language, purpose ?? 'code'), matches };
 }
 
 /**
@@ -181,7 +176,9 @@ function buildManuallySelectedCandidates(
  * `''`/no matches whenever RAG is off (and nothing was manually selected —
  * see `selectedRagFiles`), no workspace is open, `.github/rag` has nothing
  * indexed, or `plan` has no operations — every one of those is a silent,
- * normal no-op, never surfaced as an error.
+ * normal no-op, never surfaced as an error. The ONE exception is an explicit
+ * `selectedRagFiles` selection: that never no-ops silently — see
+ * `packSelectedRagSection()`.
  */
 export async function packRagSection(plan: OperationPlan, context: RagPackingContext): Promise<{ section: string; matches: RagMatch[] }> {
   const { extensionContext, settings, mandatoryTokens, model, cancellationToken, logPrefix, onLog, selectedRagFiles } = context;
@@ -195,6 +192,10 @@ export async function packRagSection(plan: OperationPlan, context: RagPackingCon
   if (!hasManualSelection && !settings.ragEnabled) {
     return empty;
   }
+  // An explicit selection is handled entirely separately — see packSelectedRagSection().
+  if (hasManualSelection) {
+    return packSelectedRagSection(context);
+  }
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
   if (!workspaceRoot) {
     return empty;
@@ -203,60 +204,35 @@ export async function packRagSection(plan: OperationPlan, context: RagPackingCon
     return empty;
   }
 
-  let candidates: OperationRagCandidate[];
-  // A08's stale/missing exclusion only ever applies to AUTOMATIC retrieval
-  // — a manual selection is never filtered out for staleness (the user
-  // explicitly asked for this exact file), so this stays empty for that
-  // path, same as "nothing known stale."
+  // Automatic retrieval. A08's stale/missing exclusion applies here only (a manual selection never reaches this point).
   let staleFilePaths = new Set<string>();
-  if (hasManualSelection) {
-    // Deliberately NEVER calls getOrBuildRagIndex() — a manual selection
-    // must not require scanning/parsing the WHOLE .github/rag/ corpus just
-    // to send the handful of files the user actually checked (this was a
-    // real, reported gap: the "reduce load" goal the checkbox list exists
-    // for wasn't served by reusing the shared, whole-corpus index). Loads
-    // and parses ONLY the requested files, resolved directly by their own
-    // workspace-relative path — see loadRagRecipesByPath()'s own doc
-    // comment for why this is also what keeps path matching correct
-    // regardless of format (a prior version compared these paths against
-    // RagRecipe.relativePath, which is relative to .github/rag/ ITSELF, a
-    // different string, and so never actually matched a real UI selection).
-    const recipes = await loadRagRecipesByPath(workspaceRoot, selectedRagFiles!, (message) => onLog(`${logPrefix}: ${message}`));
-    if (recipes.length === 0) {
-      logPackingResult(context, plan, [], [], undefined);
-      return empty;
-    }
-    const canonicalIds = dedupeRecipeIds(recipes);
-    candidates = buildManuallySelectedCandidates(recipes, canonicalIds, plan.operations, settings.language, logPrefix, onLog);
-  } else {
-    const index = await getOrBuildRagIndex(workspaceRoot, (message) => onLog(`${logPrefix}: ${message}`));
-    if (!index) {
-      return empty;
-    }
-    // Phase 6: `undefined` (hybrid mode off, the default) falls straight
-    // through to retrieveForOperations()'s own default (plain lexical
-    // retrieveRagMatches()), zero behavior change.
-    //
-    // A10: `cancellationToken` (this SAME generation request's own, when the
-    // caller has one) is bridged into a plain `AbortSignal` and forwarded to
-    // every per-operation semantic-embedding call this resolves to;
-    // `onSemanticFailure` reports a real (non-cancellation) semantic failure
-    // ONCE for this whole generation.
-    const retrieveMatches = await resolveHybridRetrieveMatches(extensionContext, settings, {
-      cancellationToken,
-      onSemanticFailure: (message) => onLog(`${logPrefix}: semantic (hybrid) retrieval failed for this request (${message}) — falling back to lexical-only matching for the rest of it.`)
-    });
-    if (retrieveMatches) {
-      onLog(`${logPrefix}: hybrid (lexical + semantic, RRF-fused) retrieval is active for this request.`);
-    }
-
-    // A08: fetched BEFORE retrieval and threaded INTO retrieveForOperations()
-    // itself, so a known stale/missing recipe is excluded from EACH
-    // operation's own per-operation top-k rather than discarded from an
-    // already-truncated result afterward.
-    staleFilePaths = await getStaleRagFilePaths(workspaceRoot, context);
-    candidates = await retrieveForOperations(index, plan.operations, settings.language, settings.automationMode, undefined, retrieveMatches, staleFilePaths);
+  const index = await getOrBuildRagIndex(workspaceRoot, (message) => onLog(`${logPrefix}: ${message}`));
+  if (!index) {
+    return empty;
   }
+  // Phase 6: `undefined` (hybrid mode off, the default) falls straight
+  // through to retrieveForOperations()'s own default (plain lexical
+  // retrieveRagMatches()), zero behavior change.
+  //
+  // A10: `cancellationToken` (this SAME generation request's own, when the
+  // caller has one) is bridged into a plain `AbortSignal` and forwarded to
+  // every per-operation semantic-embedding call this resolves to;
+  // `onSemanticFailure` reports a real (non-cancellation) semantic failure
+  // ONCE for this whole generation.
+  const retrieveMatches = await resolveHybridRetrieveMatches(extensionContext, settings, {
+    cancellationToken,
+    onSemanticFailure: (message) => onLog(`${logPrefix}: semantic (hybrid) retrieval failed for this request (${message}) — falling back to lexical-only matching for the rest of it.`)
+  });
+  if (retrieveMatches) {
+    onLog(`${logPrefix}: hybrid (lexical + semantic, RRF-fused) retrieval is active for this request.`);
+  }
+
+  // A08: fetched BEFORE retrieval and threaded INTO retrieveForOperations()
+  // itself, so a known stale/missing recipe is excluded from EACH
+  // operation's own per-operation top-k rather than discarded from an
+  // already-truncated result afterward.
+  staleFilePaths = await getStaleRagFilePaths(workspaceRoot, context);
+  const candidates = await retrieveForOperations(index, plan.operations, settings.language, settings.automationMode, undefined, retrieveMatches, staleFilePaths);
   if (candidates.length === 0) {
     logPackingResult(context, plan, candidates, [], undefined);
     return empty;

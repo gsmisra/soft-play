@@ -112,6 +112,10 @@ function loadObjectSpyPanelWithFakeVsCode(): { ObjectSpyPanel: new (...args: nev
       if (id === './ragTraceabilityBanner') {
         return { prependRagTraceabilityBanner: (code: string) => ({ code, observedMatches: [] }) };
       }
+      // Pure, vscode-free — real code (see llm/customInstructionsSection.ts).
+      if (id === '../llm/customInstructionsSection') {
+        return originalLoad.apply(this, arguments);
+      }
       return {};
     }
     // eslint-disable-next-line prefer-rest-params
