@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import { ObjectSpySettings, SettingsStore } from '../settings/settingsStore';
 import { clearFileCaches, readFileCachedSync, readWorkspaceFileCached } from '../cache/fileCache';
 import { clearRagIndexCache } from '../rag/ragIndexer';
-import { CopilotUnavailableError, countModelTokens, extractCodeBlock, findModel } from '../llm/copilotClient';
+import { COPILOT_NO_MODELS_MESSAGE, copilotSetupProblem, CopilotUnavailableError, countModelTokens, extractCodeBlock, findModel } from '../llm/copilotClient';
 import { VSCodeCopilotToolCallingModel } from '../agent/vscodeCopilotToolCallingModel';
 import { checkEnvironment } from '../execution/environmentCheck';
 import { runVerifyFixAgent } from '../agent/verifyFixOrchestrator';
@@ -1868,12 +1868,19 @@ export class AgenticModeController implements vscode.Disposable {
   // ------------------------------------------------------------------
 
   private async resolveModel(settings: ObjectSpySettings): Promise<vscode.LanguageModelChat> {
-    if (!settings.copilotEnabled || !settings.copilotModelId) {
-      throw new CopilotUnavailableError();
+    const setupProblem = copilotSetupProblem(settings);
+    if (setupProblem) {
+      throw new CopilotUnavailableError(setupProblem);
     }
-    const model = await findModel(settings.copilotModelId);
+    let model: vscode.LanguageModelChat | undefined;
+    try {
+      model = await findModel(settings.copilotModelId);
+    } catch (err) {
+      // VS Code refused or failed the lookup itself (e.g. Copilot Chat still starting, or access not granted).
+      throw new CopilotUnavailableError(`VS Code could not list the GitHub Copilot models: ${err instanceof Error ? err.message : String(err)}. ${COPILOT_NO_MODELS_MESSAGE}`);
+    }
     if (!model) {
-      throw new CopilotUnavailableError();
+      throw new CopilotUnavailableError(COPILOT_NO_MODELS_MESSAGE);
     }
     return model;
   }

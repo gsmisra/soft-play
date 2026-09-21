@@ -92,11 +92,32 @@ export async function findModel(modelId: string): Promise<vscode.LanguageModelCh
 }
 
 export class CopilotUnavailableError extends Error {
-  constructor() {
-    super('No GitHub Copilot chat model is available. Is GitHub Copilot Chat installed and are you signed in?');
+  /** `message` overrides the generic text when the caller knows the SPECIFIC reason (see `copilotSetupProblem()`),
+   * so the user is told what to actually do instead of always being asked whether Copilot is installed. */
+  constructor(message = 'No GitHub Copilot chat model is available. Is GitHub Copilot Chat installed and are you signed in?') {
+    super(message);
     this.name = 'CopilotUnavailableError';
   }
 }
+
+/** Why a Copilot request cannot even start, from SoftPlay's OWN settings — or `undefined` when the settings are fine.
+ * "Link with GitHub Copilot LLM" is off by default, and the old single message ("is Copilot installed and are you
+ * signed in?") sent people who were signed in looking in the wrong place. */
+export function copilotSetupProblem(settings: { copilotEnabled: boolean; copilotModelId: string }): string | undefined {
+  if (!settings.copilotEnabled) {
+    return 'GitHub Copilot is not linked yet: "Link with GitHub Copilot LLM" is turned off in SoftPlay. Click the ⚙ Settings button, turn it on, choose a model under "Copilot model", then try again.';
+  }
+  if (!settings.copilotModelId) {
+    return 'No Copilot model is selected in SoftPlay. Click the ⚙ Settings button, pick one under "Copilot model", then try again.';
+  }
+  return undefined;
+}
+
+/** Text for the case where the settings are right but VS Code itself exposes no Copilot chat model. */
+export const COPILOT_NO_MODELS_MESSAGE =
+  'VS Code reports no GitHub Copilot chat models. Check that the GitHub Copilot Chat extension is installed AND enabled, that you are signed in ' +
+  '(Accounts menu, bottom-left), that its status is not "not signed in / no access", and that your organisation\'s Copilot policy allows chat models. ' +
+  'Reloading the window after signing in often fixes it.';
 
 /**
  * Counts each message's own token count via the model's REAL tokenizer
