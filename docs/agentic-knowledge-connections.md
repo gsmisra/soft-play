@@ -55,9 +55,12 @@ never leaves the old content reachable through the conversation memory (see belo
 
 ## Configuration
 
-`config/agentic-connections.json` (schema: `config/agentic-connections.schema.json`) ships with **three
-disabled placeholders** — two Jira, one Confluence — and no hostnames. The file is read from the extension's
-install directory, never from the workspace. An administrator populates it before packaging.
+`config/agentic-connections.json` (schema: `config/agentic-connections.schema.json`) ships with **three enabled
+connections** for the TD hosts — `track.td.com` and `jtmf.td.com` (Jira) and `collaborate.td.com` (Confluence) —
+each `"deployment": "datacenter"`, `"authMode": "basic"` (username + password), and no credentials. The file is
+read from the extension's install directory, never from the workspace. `datacenter` and `basic` are **assumptions**
+(the hosts are self-hosted `*.td.com`, and username + password was requested); if a deployment only allows personal
+access tokens or SSO, change `authMode` to `"pat"` — or note that SSO-only cannot be used by this feature.
 
 ```json
 {
@@ -107,7 +110,20 @@ exact reason — never guessed around. A link is matched on the **parsed** origi
 | Jira / Confluence **Cloud** (`*.atlassian.net`, Atlassian API tokens) | — | — | **Not supported.** No Cloud assumptions are made anywhere. |
 | SSO (SAML / OIDC browser sign-in), OAuth, MFA prompts | — | — | **Not supported.** If a link only works after a browser sign-in, the request ends in a "login required" message; nothing tries to bypass it. |
 
-No TD hostnames appear anywhere in the repository. They are supplied by the administrator.
+The three TD hosts in the shipped configuration were taken from sample links supplied for this work
+(`https://track.td.com/browse/CIB-12033`, `https://jtmf.td.com/browse/TPTDIG-34973` and a `https://collaborate.td.com/spaces/TCoE/pages/<id>/<title>` page).
+Tests confirm those exact links resolve to the right connection and reference; nothing has been sent to those servers.
+
+**Link intake.** A link the user pastes that belongs to a configured connection is recognised by the app itself
+(before the prompt is built), so the Connect button — or, once connected, the retrieved card — appears without
+relying on the model to notice the link. Links to other hosts are ignored by the intake. Two links on the same host
+get one button each; the first click asks for credentials, the second reuses them.
+
+**Password entry.** The password is typed only into VS Code's own input box opened with `password: true`, which
+shows every character as a dot (●). The username box is plain text. Neither value is ever put in a prompt, tool
+argument, transcript entry, log or file. A password typed into the *chat box* instead is not masked while typing (it is
+an ordinary text area), but it is encrypted (`ENC[…]`) before it reaches the transcript or the model — use the Connect
+button, which is what the chat tells the user to do.
 
 ## Security model
 
@@ -186,13 +202,13 @@ No TD hostnames appear anywhere in the repository. They are supplied by the admi
 
 ## Pre-packaging checklist
 
-Fill in, then verify live, before packaging. (This work did not package or deploy anything.)
+Confirm, then verify live, before packaging. (This work did not package or deploy anything.)
 
-**Populate in `config/agentic-connections.json`** (for each of the two Jira entries and the Confluence entry):
-- [ ] `enabled: true`
-- [ ] `baseUrl` — the real `https://host[/context]` of the Data Center / Server deployment
-- [ ] `deployment: "datacenter"`
-- [ ] `authMode` — `"pat"` (preferred) or `"basic"`, matching what that deployment allows
+**Confirm in `config/agentic-connections.json`** (the shipped values come from sample links; check each of the two Jira entries and the Confluence entry):
+- [x] `enabled: true` — set for all three
+- [x] `baseUrl` — `https://track.td.com`, `https://jtmf.td.com`, `https://collaborate.td.com` (no context path). **Check each has no context path** (e.g. `/jira`, `/confluence`); if one does, add it to `baseUrl` and to the links you paste
+- [ ] `deployment: "datacenter"` — assumed for all three; confirm they are Data Center / Server (a Cloud site is not supported)
+- [ ] `authMode` — `"basic"` (username + password) is set because that was requested; confirm each deployment accepts Basic authentication for REST calls, otherwise switch to `"pat"`
 - [ ] (Jira) `acceptanceCriteriaFieldIds` — the `customfield_NNNNN` ids the team uses, if any
 - [ ] `limits` — only if the defaults do not suit the network or attachment sizes
 - [ ] Confirm the file still parses (open the extension; a bad entry is reported with its reason on first use)

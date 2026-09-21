@@ -68,6 +68,8 @@ export interface ChatActionView {
   connectionLabel: string;
   origin: string;
   authMode: string;
+  /** The link the user pasted that this button will retrieve (their own text). Lets the host show ONE button per link. */
+  linkUrl?: string;
   resolved: boolean;
 }
 

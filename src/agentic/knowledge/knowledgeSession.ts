@@ -281,7 +281,10 @@ export class KnowledgeSession {
       if (!connection || !connection.enabled || connection.configError) {
         return { status: 'error', code: 'invalid_config', message: `The connection "${pending.connection.label}" is not available (it may have been disabled or changed).` };
       }
-      const credentials = await this.deps.host.promptCredentials({ connection: toPublicConnection(connection) }, op.signal);
+      // Already connected to this connection in this session (e.g. a SECOND pasted link on the same host): the
+      // click is still the user's deliberate action, but the same credentials are reused — no second prompt.
+      const existing = this.credentials.get(connection.id);
+      const credentials = existing ?? (await this.deps.host.promptCredentials({ connection: toPublicConnection(connection) }, op.signal));
       // Cleared or cancelled while the prompt was open: store NOTHING.
       const halted2 = this.interrupted(op, stale);
       if (halted2) {

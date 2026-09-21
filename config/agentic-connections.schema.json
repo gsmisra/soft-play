@@ -19,7 +19,7 @@
           "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$", "description": "Stable identifier. Credentials are scoped to this id, not merely to the host." },
           "label": { "type": "string", "minLength": 1, "description": "Shown to the user, e.g. in the 'Connect securely' prompt." },
           "product": { "enum": ["jira", "confluence"] },
-          "enabled": { "type": "boolean", "description": "false = placeholder: local-file chat works and any link to it is answered with setup guidance." },
+          "enabled": { "type": "boolean", "description": "false = configured but unused: local-file chat works and any link to it is answered with setup guidance." },
           "baseUrl": {
             "type": "string",
             "description": "https origin plus the deployment's context path, no trailing slash needed — e.g. https://jira.example.com or https://tools.example.com/jira. No credentials, query string or fragment. Required when enabled."

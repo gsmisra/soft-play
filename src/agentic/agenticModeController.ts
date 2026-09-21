@@ -1410,6 +1410,10 @@ export class AgenticModeController implements vscode.Disposable {
     ensureCurrent();
     const chatModel = await this.resolveModel(settings);
     ensureCurrent();
+    // Links the user pasted are recognised here, before the prompt is built, so a page that is already reachable
+    // is part of THIS turn's context and an unauthenticated one gets its "Connect securely" button immediately.
+    await this.intakeUserLinks(userText, cts, context, isCurrent);
+    ensureCurrent();
     const ingestedContext = this.buildIngestedContextFrom(context.segments, true);
     await this.prepareTurnContext(context, ensureCurrent);
     const instructionFiles = context.instructionFiles ?? [];
@@ -1714,7 +1718,17 @@ export class AgenticModeController implements vscode.Disposable {
   }
 
   private showConnectAction(action: PendingConnectAction, generation: number): void {
-    if (this.chatSession.getEntries().some((e) => e.action?.actionId === action.actionId)) {
+    const linkUrl = normalizeUrl(action.url);
+    // ONE button per link: the host (link intake) and the model (open_knowledge_link) may both open the same pasted link.
+    const alreadyOffered = this.chatSession
+      .getEntries()
+      .some(
+        (e) =>
+          e.action &&
+          (e.action.actionId === action.actionId ||
+            (!e.action.resolved && e.action.kind === action.kind && e.action.origin === action.connection.origin && e.action.linkUrl === linkUrl))
+      );
+    if (alreadyOffered) {
       return;
     }
     const view: ChatActionView = {
@@ -1723,19 +1737,59 @@ export class AgenticModeController implements vscode.Disposable {
       connectionLabel: action.connection.label,
       origin: action.connection.origin,
       authMode: action.connection.authMode,
+      linkUrl,
       resolved: false
     };
     const what = action.kind === 'reconnect' ? 'Reconnect' : 'Connect';
+    const how =
+      action.connection.authMode === 'pat'
+        ? 'You will be asked for your personal access token in a masked VS Code prompt (shown as ●●●●).'
+        : 'You will be asked for your username, then your password in a masked VS Code prompt (the password is shown as ●●●●).';
     this.chatSession.addHostEntry(
       {
         kind: 'action',
-        text:
-          `${what} to ${action.connection.label} (${action.connection.origin}) to continue. ` +
-          `Your ${action.connection.authMode === 'pat' ? 'personal access token' : 'username and password'} is entered in a masked VS Code prompt, kept in memory for this session only, and is never sent to the AI model.`,
+        text: `${what} to ${action.connection.label} (${action.connection.origin}) to read this link. ${how} It is kept in memory for this session only and is never sent to the AI model.`,
         action: view
       },
       generation
     );
+  }
+
+  /** Link intake: a link the USER pasted that belongs to a configured connection is recognised by the app itself —
+   * not left to the model's judgement to notice — so the "Connect securely" button (or the retrieved card, when
+   * already connected) appears the moment they send it. Nothing is contacted without credentials. Links that match
+   * no configured connection are ignored here silently (the model's own tool call reports those). At most three per
+   * message. */
+  private async intakeUserLinks(userText: string, cts: vscode.CancellationTokenSource, context: AgenticTurnContext, isCurrent: () => boolean): Promise<void> {
+    const seen = new Set<string>();
+    const links: string[] = [];
+    for (const raw of extractUrls(userText)) {
+      const key = normalizeUrl(raw);
+      if (key && !seen.has(key)) {
+        seen.add(key);
+        links.push(raw);
+      }
+    }
+    const generation = this.chatSession.getGeneration();
+    const signal = this.abortSignalFor(cts.token);
+    for (const link of links.slice(0, 3)) {
+      if (!isCurrent()) {
+        return;
+      }
+      let result: OpenResult;
+      try {
+        result = await this.knowledge.openLink(link, { signal });
+      } catch {
+        return; // the model's own tool call will report anything unusual
+      }
+      if (!isCurrent() || result.status === 'stale' || result.status === 'cancelled') {
+        return;
+      }
+      if (result.status === 'error' && (result.code === 'no_match' || result.code === 'config_error')) {
+        continue;
+      }
+      this.presentOpenResult(result, generation, context);
+    }
   }
 
   /** The user clicked "Connect securely". Opens the masked prompt, then retrieves the pending link. */

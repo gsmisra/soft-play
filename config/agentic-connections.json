@@ -2,31 +2,31 @@
   "schemaVersion": 1,
   "connections": [
     {
-      "id": "td-jira-1",
-      "label": "TD Jira 1",
+      "id": "td-jira-track",
+      "label": "TD Jira (track)",
       "product": "jira",
-      "enabled": false,
-      "baseUrl": "",
-      "deployment": "unconfigured",
-      "authMode": "unconfigured"
+      "enabled": true,
+      "baseUrl": "https://track.td.com",
+      "deployment": "datacenter",
+      "authMode": "basic"
     },
     {
-      "id": "td-jira-2",
-      "label": "TD Jira 2",
+      "id": "td-jira-jtmf",
+      "label": "TD Jira (JTMF)",
       "product": "jira",
-      "enabled": false,
-      "baseUrl": "",
-      "deployment": "unconfigured",
-      "authMode": "unconfigured"
+      "enabled": true,
+      "baseUrl": "https://jtmf.td.com",
+      "deployment": "datacenter",
+      "authMode": "basic"
     },
     {
       "id": "td-confluence",
-      "label": "TD Confluence",
+      "label": "TD Confluence (collaborate)",
       "product": "confluence",
-      "enabled": false,
-      "baseUrl": "",
-      "deployment": "unconfigured",
-      "authMode": "unconfigured"
+      "enabled": true,
+      "baseUrl": "https://collaborate.td.com",
+      "deployment": "datacenter",
+      "authMode": "basic"
     }
   ],
   "limits": {

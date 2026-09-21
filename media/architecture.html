@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>SoftPlay — Architecture &amp; Technical Information -- v0.1.78</title>
+<title>SoftPlay — Architecture &amp; Technical Information -- v0.1.79</title>
 <style>
   :root {
     --td-green: #54b948;
@@ -347,7 +347,7 @@
 
 <header class="hero">
   <div class="wrap">
-    <span class="eyebrow">Architecture &amp; Technical Information -- v0.1.78</span>
+    <span class="eyebrow">Architecture &amp; Technical Information -- v0.1.79</span>
     <h1 class="headline">TD Securities Agentic Test Automation</h1>
     <p class="subhead">
       A single reference for how this VS Code extension is built, how it caches data locally, how it talks to the
@@ -1038,13 +1038,13 @@
         <p>Listed sizes are prechecked, but provider metadata can be missing or wrong, so a cumulative <i>received-bytes</i> budget is enforced too: each download may use only what is left of the batch allowance, and a stream is abandoned at that ceiling.</p>
       </div>
     </div>
-    <p class="note" style="margin-top:14px;">Configuration reference, security model, failure handling, official Atlassian API links, the pre-packaging checklist and the exact verification status: <code>docs/agentic-knowledge-connections.md</code>. The shipped <code>config/agentic-connections.json</code> holds three <b>disabled</b> placeholders (two Jira, one Confluence), no hostnames and no credentials; the two Jira variants and the Confluence connection are filled in by an administrator before packaging, and nothing has yet been run against a live TD server.</p>
+    <p class="note" style="margin-top:14px;">Configuration reference, security model, failure handling, official Atlassian API links, the pre-packaging checklist and the exact verification status: <code>docs/agentic-knowledge-connections.md</code>. The shipped <code>config/agentic-connections.json</code> lists <code>track.td.com</code> and <code>jtmf.td.com</code> (Jira) and <code>collaborate.td.com</code> (Confluence) — Data Center, username + password, no credentials. A link the user pastes to one of them is recognised by the app itself (<code>intakeUserLinks()</code>), which offers the Connect button; the password is typed only into VS Code's masked input box (<code>password: true</code>, shown as dots). Nothing has yet been run against a live TD server.</p>
 
     <p class="note" style="margin-top:14px;">Genuinely shared, not duplicated: RAG retrieval (<code>ragIndexer.ts</code>/<code>ragRetriever.ts</code>), custom-instruction file reading, and the exact same Token Monitoring message contract Standard mode's own bar already renders.</p>
 
     <h2 class="inline-h">Quality &amp; testing</h2>
     <div class="grid cols-3" style="margin-top:12px;">
-      <div class="card tight"><span class="tag">1,595 offline tests passing</span><p>Ingestion and parsing with real round-trips; the knowledge layer (config, transport, adapters, session) against scripted servers; the real controller with a scripted LangChain model for the Jira/Confluence walkthroughs, Stop/Clear Data at each await and per-turn snapshots; and the shipped <code>agenticMode.js</code> run against the shipped HTML in a stub DOM. Key guards were checked by temporarily breaking them. <b>Not covered:</b> any live TD Jira/Confluence host, VS Code's proxy/CA behaviour, and the real masked prompt, picker and webview inside an Extension Development Host.</p></div>
+      <div class="card tight"><span class="tag">1,618 offline tests passing</span><p>Ingestion and parsing with real round-trips; the knowledge layer (config, transport, adapters, session) against scripted servers; the real controller with a scripted LangChain model for the Jira/Confluence walkthroughs, Stop/Clear Data at each await and per-turn snapshots; and the shipped <code>agenticMode.js</code> run against the shipped HTML in a stub DOM. Key guards were checked by temporarily breaking them. <b>Not covered:</b> any live TD Jira/Confluence host, VS Code's proxy/CA behaviour, and the real masked prompt, picker and webview inside an Extension Development Host.</p></div>
       <div class="card tight"><span class="tag">Fixed a real Node-version bug</span><p><code>pdfjs-dist</code> needs ES2024's <code>Promise.withResolvers</code> — missing on some older bundled Node versions. A small ponyfill (installed only if genuinely missing) fixed a real crash found on a colleague's machine.</p></div>
       <div class="card tight"><span class="tag">Type-checked and syntax-checked</span><p>All three TypeScript projects and both webview scripts pass their checks. <code>vsce package</code> was <b>not</b> run for the chat-first / knowledge-connections work — packaging waits for the pre-packaging checklist.</p></div>
     </div>
@@ -1636,7 +1636,7 @@
 
 <footer>
   <div class="wrap">
-    <p><span class="td">SoftPlay</span> — Architecture &amp; Technical Information -- v0.1.78. Generated locally; opens as a static, offline page with no external dependencies.</p>
+    <p><span class="td">SoftPlay</span> — Architecture &amp; Technical Information -- v0.1.79. Generated locally; opens as a static, offline page with no external dependencies.</p>
     <p class="muted">Close this browser tab to return to VS Code.</p>
   </div>
 </footer>

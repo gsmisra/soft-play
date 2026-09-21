@@ -341,11 +341,16 @@ access token (Bearer) or, where enabled, Basic authentication. **Not supported:*
 Atlassian Cloud, SSO/SAML/OIDC browser sign-in, OAuth and MFA prompts — a link
 that only works after a browser sign-in ends in a "login required" message.
 
-The shipped configuration contains three **disabled placeholders** (two Jira,
-one Confluence) with no hostnames and no credentials: local chat works
-unchanged, and a Jira/Confluence link is answered with setup guidance. An
-administrator fills in `enabled`, `baseUrl`, `deployment` (`"datacenter"`) and
-`authMode` (`"pat"` or `"basic"`) before packaging.
+The shipped `config/agentic-connections.json` lists three connections, all
+enabled for **username + password** (`"authMode": "basic"`, Data Center):
+`https://track.td.com` and `https://jtmf.td.com` (Jira) and
+`https://collaborate.td.com` (Confluence), and contains no credentials. The
+chat recognises a pasted link to one of them by itself and shows the **Connect
+securely** button; when clicked, VS Code asks for your **username**, then your
+**password in a masked box (shown as ●●●●)**. Links to any other host are
+ignored (the agent answers with setup guidance if asked to open one). To use a
+personal access token instead, change that connection's `authMode` to `"pat"`;
+to add a host, add a connection (`baseUrl`, `deployment`, `authMode`).
 **See `docs/agentic-knowledge-connections.md`** (inside the extension folder) for the
 configuration reference, security model, failure handling, official API
 references, the **pre-packaging checklist**, and exactly what has and has not
