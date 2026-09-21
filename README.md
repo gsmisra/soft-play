@@ -269,11 +269,14 @@ itself the real, one-time opt-in.
 
 ## Total Agentic Mode — a conversational workspace
 
-With **Total Agentic Mode** on (Settings), the sidebar is chat-first. Under the
-collapsible **Input Files**, **Custom Instructions & RAG Data** and **Token
-Monitoring** sections sits **Instant instructions to LLM**: a standalone
+With **Total Agentic Mode** on (Settings), the sidebar is chat-first. The
+**Input Files**, **Custom Instructions & RAG Data** and **Token Monitoring**
+sections live together in one master section, **Control Panel**, which starts
+collapsed. Below it sits **Instant instructions to LLM**: a standalone
 conversation with a LangChain tool-calling agent that takes the remaining
-height (collapse the sections above to give it more). There is no Generate
+height, with a compact chat-style input box. Open the Control Panel when you
+need to drop files, tick instructions or recipes, read the token bar or click
+**Clear Data**. There is no Generate
 section — you ask for what you want, and reopen results from links the chat
 shows.
 

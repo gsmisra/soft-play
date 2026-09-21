@@ -170,6 +170,17 @@ body.agentic-theme details.section > .section-body {
 body.agentic-theme details.section:last-of-type {
   margin-bottom: 18px;
 }
+/* The Control Panel: ONE collapsed master card holding Input Files, Custom Instructions & RAG Data and Token
+   Monitoring. The three sections inside keep their own open/closed state, drawn as lighter cards within it. */
+body.agentic-theme details.ag-control-panel > .section-body { padding: 0 12px 14px; }
+body.agentic-theme .ag-control-body > details.section {
+  margin: 10px 0 0;
+  border-radius: 18px;
+  box-shadow: var(--ag-clay-sm);
+}
+body.agentic-theme .ag-control-body > details.section:last-of-type { margin-bottom: 0; }
+body.agentic-theme .ag-control-body > details.section > summary { padding: 12px 16px; }
+body.agentic-theme .ag-control-body > details.section > .section-body { padding: 2px 14px 16px; }
 body.agentic-theme .ai-assist {
   border-radius: 18px;
   background: #ffffff;
@@ -619,14 +630,15 @@ body.agentic-theme .ag-composer {
   width: 100%;
   max-width: 100%;
   min-width: 200px;
-  height: 176px;
-  min-height: 120px;
+  /* Compact, like a chat input: about two lines of text plus the send row. Still resizable with the corner handle. */
+  height: 96px;
+  min-height: 80px;
   max-height: 80vh;
   resize: both;
   overflow: hidden;
-  padding: 14px 12px 8px 18px;
+  padding: 9px 10px 6px 16px;
   border: 1.5px solid rgba(79, 107, 255, 0.4);
-  border-radius: 24px;
+  border-radius: 20px;
   background: #ffffff;
   box-shadow: var(--ag-pressed), 0 0 0 4px rgba(79, 107, 255, 0.06);
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
@@ -649,7 +661,7 @@ body.agentic-theme .ag-composer-input {
   color: var(--ag-ink);
   font-family: var(--ag-font);
   font-size: 0.92em;
-  line-height: 1.55;
+  line-height: 1.45;
 }
 body.agentic-theme .ag-composer-input::placeholder { color: var(--ag-mute); }
 body.agentic-theme .ag-composer-bar {
@@ -657,7 +669,7 @@ body.agentic-theme .ag-composer-bar {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 14px 0 0; /* right padding keeps the buttons clear of the corner resize handle */
+  padding: 2px 12px 0 0; /* right padding keeps the buttons clear of the corner resize handle */
 }
 body.agentic-theme .ag-composer-hint {
   flex: 1;
@@ -674,8 +686,8 @@ body.agentic-theme .ag-composer-hint {
 /* Messenger-style send button: a round gradient button with a paper plane. */
 body.agentic-theme .ag-send-btn {
   flex: none;
-  width: 40px;
-  height: 40px;
+  width: 32px;
+  height: 32px;
   padding: 0;
   display: grid;
   place-items: center;
@@ -687,7 +699,7 @@ body.agentic-theme .ag-send-btn {
   box-shadow: 0 10px 20px -6px rgba(79, 107, 255, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.5);
   transition: transform 0.14s ease, box-shadow 0.14s ease, filter 0.14s ease;
 }
-body.agentic-theme .ag-send-btn svg { width: 19px; height: 19px; transform: translateX(1px); }
+body.agentic-theme .ag-send-btn svg { width: 16px; height: 16px; transform: translateX(1px); }
 body.agentic-theme .ag-send-btn:hover:not(:disabled) {
   transform: translateY(-2px) scale(1.06);
   filter: brightness(1.06);
@@ -704,7 +716,7 @@ body.agentic-theme .ag-send-btn.ag-stop {
   background: linear-gradient(135deg, #ff5d73, #ff8a5c);
   box-shadow: 0 10px 20px -6px rgba(255, 93, 115, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.5);
 }
-body.agentic-theme .ag-send-btn.ag-stop svg { transform: none; width: 15px; height: 15px; }
+body.agentic-theme .ag-send-btn.ag-stop svg { transform: none; width: 13px; height: 13px; }
 body.agentic-theme [hidden] { display: none !important; }
 
 /* ---- Cards the HOST puts in the conversation ----------------------------

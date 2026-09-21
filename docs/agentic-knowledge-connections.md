@@ -14,8 +14,9 @@ Contents: [Workflow](#workflow) · [Per-turn context](#per-turn-context) · [Con
 ## Workflow
 
 The sidebar is chat-first. There is no Generate section: the panel titled **Instant instructions to LLM** is a
-standalone conversation that takes the remaining vertical space (collapse the Input Files, Custom
-Instructions & RAG Data and Token Monitoring sections to give it more). A feature file, automation code or a
+standalone conversation that takes the remaining vertical space. Input Files, Custom Instructions & RAG Data
+and Token Monitoring are grouped in one master section, **Control Panel**, collapsed by default, so a fresh
+sidebar is a clean, large chat. A feature file, automation code or a
 test-case CSV is requested in the conversation; the agent's `generate_*` tools run the same generation
 pipelines the old buttons ran, and each finished artifact appears as a card in the chat that reopens it.
 

@@ -4,7 +4,28 @@ import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
 import { AgenticChatSession } from '../../src/agentic/agenticChatSession';
-import { emptyKnowledgeSession } from './knowledge/fakeKnowledge';
+import { parseConnectionsConfig } from '../../src/agentic/knowledge/connectionConfig';
+import { KnowledgeSession } from '../../src/agentic/knowledge/knowledgeSession';
+
+/** A real `KnowledgeSession` with no connections, whose host and transport fail loudly if anything touches them.
+ * Defined HERE (not imported from a shared test helper) on purpose: `test/` is git-ignored in this repository, so
+ * a tracked test must not depend on an untracked helper file — that broke the build on a machine that only had
+ * the tracked files. */
+function emptyKnowledgeSession(): KnowledgeSession {
+  const refuse = (name: string) => async (): Promise<never> => {
+    throw new Error(`unexpected knowledge call: ${name}`);
+  };
+  return new KnowledgeSession({
+    getConfig: async () => parseConnectionsConfig(JSON.stringify({ schemaVersion: 1, connections: [] })),
+    createTransport: () => ({ get: async (req: { url: string }) => refuse(`network request ${req.url}`)() }),
+    host: {
+      promptCredentials: refuse('promptCredentials'),
+      selectAttachments: refuse('selectAttachments'),
+      ingestAttachment: refuse('ingestAttachment'),
+      redact: async (text: string) => text
+    }
+  });
+}
 
 /**
  * Item 3: direct unit tests for `AgenticModeController`'s own orchestration

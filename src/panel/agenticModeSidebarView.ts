@@ -8,10 +8,11 @@ import * as vscode from 'vscode';
  * templates based on `settings.agenticModeEnabled`; nothing else about
  * Standard mode's own HTML changes because this file exists.
  *
- * Layout, top to bottom: the header; the collapsible context sections (Input
- * Files, Custom Instructions & RAG Data, Token Monitoring) — collapse them to
- * give the conversation more room — and the "Instant instructions to LLM" chat,
- * a standalone panel that takes the remaining height. There is no Generate
+ * Layout, top to bottom: the header; ONE master "Control Panel" section, collapsed
+ * by default, that holds the context sections (Input Files, Custom Instructions &
+ * RAG Data, Token Monitoring); and the "Instant instructions to LLM" chat, a
+ * standalone panel that takes the remaining height — so a fresh sidebar is a
+ * clean, big conversation. There is no Generate
  * section: a feature file, automation code or a test-case CSV is requested in
  * the chat (the agent's tools run the same generation pipelines) and reopened
  * from links the chat shows.
@@ -77,80 +78,86 @@ export function getAgenticModeSidebarHtml(params: {
     <button id="settingsBtn" class="btn-icon-top" title="Settings (language, browser, GitHub Copilot, Total Agentic Mode)">⚙</button>
   </div>
 
-  <details class="section" id="agenticIngestSection" open>
-    <summary>Input Files</summary>
-    <div class="section-body">
-      <div class="toolbar-row" style="justify-content: flex-end;">
-        <button id="agenticClearDataBtn" class="btn btn-danger clear-data-btn" title="Wipe every ingested file, the chat and the LLM's memory of it, retrieved Jira/Confluence pages, saved connections, selections and generated output — so nothing from this session carries over into the next one">Clear Data</button>
-      </div>
-      <p class="note" style="margin-top: 0;">
-        Drop one or more requirement/data files (.csv, .json, .xml, .yml, .txt, .md, .log, .xlsx, .docx, .pdf).
-        After ingesting, open Ingestion Configuration to choose exactly which sheet/columns/rows/lines of each file
-        reach the LLM. Files read from Jira/Confluence attachments appear here too.
-      </p>
-      <div id="agenticDropZone" class="rag-dropzone">
-        <span>Drop input files here, or</span>
-        <button type="button" id="agenticBrowseBtn" class="btn btn-secondary">Choose Files…</button>
-        <input type="file" id="agenticFileInput" multiple hidden accept=".csv,.json,.xml,.yml,.yaml,.txt,.md,.log,.xlsx,.docx,.pdf" />
-      </div>
-      <div class="toolbar-row" style="margin-top: 10px; justify-content: space-between;">
-        <span id="agenticFileCountLabel" class="status-text">No files ingested yet.</span>
-        <button id="agenticManageFilesBtn" class="btn btn-small btn-silver" hidden>Manage Ingested Files…</button>
-      </div>
-      <div id="agenticRejectedList" class="agentic-rejected-list" hidden></div>
-    </div>
-  </details>
-
-  <details class="section" id="agenticCustomInstructionsRagSection" open>
-    <summary>Custom Instructions &amp; RAG Data</summary>
-    <div class="section-body">
-      <details class="ai-assist" id="agenticCustomInstructionsSubsection">
-        <summary>Custom Instructions</summary>
-        <div class="ai-assist-body">
-          <div class="ai-files-header">Instruction / skill / prompt files (<code>.github/*.md</code>) — check the ones the agent must follow</div>
-          <input id="agenticInstructionsSearch" class="file-search-input" type="search" placeholder="Search instruction files…" aria-label="Search instruction files" />
-          <div id="agenticPromptFilesList" class="prompt-files-list">
-            <div class="prompt-files-empty">No .md files found yet — click Refresh.</div>
-          </div>
-          <p class="note">Checked files take priority over everything else, including what you type. <strong>Nothing checked = no instruction files are sent</strong> in Total Agentic Mode.</p>
+  <!-- One master section, collapsed by default, so the conversation below gets the whole sidebar. -->
+  <details class="section ag-control-panel" id="agenticControlPanel">
+    <summary>Control Panel</summary>
+    <div class="section-body ag-control-body">
+    <details class="section" id="agenticIngestSection" open>
+      <summary>Input Files</summary>
+      <div class="section-body">
+        <div class="toolbar-row" style="justify-content: flex-end;">
+          <button id="agenticClearDataBtn" class="btn btn-danger clear-data-btn" title="Wipe every ingested file, the chat and the LLM's memory of it, retrieved Jira/Confluence pages, saved connections, selections and generated output — so nothing from this session carries over into the next one">Clear Data</button>
         </div>
-      </details>
-
-      <details class="ai-assist" id="agenticRagDataSubsection">
-        <summary>RAG Data</summary>
-        <div class="ai-assist-body">
-          <div class="ai-files-header">Reusable component recipes (<code>.github/rag/*.md</code>) — check the ones to use</div>
-          <input id="agenticRagSearch" class="file-search-input" type="search" placeholder="Search recipes (name, title, tags, code)…" aria-label="Search RAG recipes" />
-          <div id="agenticRagFilesList" class="prompt-files-list">
-            <div class="prompt-files-empty">No recipes found yet — click Refresh.</div>
-          </div>
-          <p class="note">Checked recipes are the <strong>only</strong> ones sent, in full, with the same top priority as checked instruction files. <strong>Nothing checked = recipes are matched automatically</strong> (when enabled in Settings).</p>
+        <p class="note" style="margin-top: 0;">
+          Drop one or more requirement/data files (.csv, .json, .xml, .yml, .txt, .md, .log, .xlsx, .docx, .pdf).
+          After ingesting, open Ingestion Configuration to choose exactly which sheet/columns/rows/lines of each file
+          reach the LLM. Files read from Jira/Confluence attachments appear here too.
+        </p>
+        <div id="agenticDropZone" class="rag-dropzone">
+          <span>Drop input files here, or</span>
+          <button type="button" id="agenticBrowseBtn" class="btn btn-secondary">Choose Files…</button>
+          <input type="file" id="agenticFileInput" multiple hidden accept=".csv,.json,.xml,.yml,.yaml,.txt,.md,.log,.xlsx,.docx,.pdf" />
         </div>
-      </details>
+        <div class="toolbar-row" style="margin-top: 10px; justify-content: space-between;">
+          <span id="agenticFileCountLabel" class="status-text">No files ingested yet.</span>
+          <button id="agenticManageFilesBtn" class="btn btn-small btn-silver" hidden>Manage Ingested Files…</button>
+        </div>
+        <div id="agenticRejectedList" class="agentic-rejected-list" hidden></div>
+      </div>
+    </details>
 
-      <div class="toolbar-row">
-        <button id="agenticRefreshPromptFilesBtn" class="btn btn-small btn-silver" title="Re-scan .github/*.md (Custom Instructions) and .github/rag/*.md (RAG Data). Checked files that still exist stay checked.">Refresh file list</button>
-      </div>
-    </div>
-  </details>
+    <details class="section" id="agenticCustomInstructionsRagSection" open>
+      <summary>Custom Instructions &amp; RAG Data</summary>
+      <div class="section-body">
+        <details class="ai-assist" id="agenticCustomInstructionsSubsection">
+          <summary>Custom Instructions</summary>
+          <div class="ai-assist-body">
+            <div class="ai-files-header">Instruction / skill / prompt files (<code>.github/*.md</code>) — check the ones the agent must follow</div>
+            <input id="agenticInstructionsSearch" class="file-search-input" type="search" placeholder="Search instruction files…" aria-label="Search instruction files" />
+            <div id="agenticPromptFilesList" class="prompt-files-list">
+              <div class="prompt-files-empty">No .md files found yet — click Refresh.</div>
+            </div>
+            <p class="note">Checked files take priority over everything else, including what you type. <strong>Nothing checked = no instruction files are sent</strong> in Total Agentic Mode.</p>
+          </div>
+        </details>
 
-  <details class="section" id="tokenMonitoringSection">
-    <summary>Token Monitoring</summary>
-    <div class="section-body">
-      <div class="token-bar-track">
-        <div id="tokenBarFill" class="token-bar-fill"></div>
+        <details class="ai-assist" id="agenticRagDataSubsection">
+          <summary>RAG Data</summary>
+          <div class="ai-assist-body">
+            <div class="ai-files-header">Reusable component recipes (<code>.github/rag/*.md</code>) — check the ones to use</div>
+            <input id="agenticRagSearch" class="file-search-input" type="search" placeholder="Search recipes (name, title, tags, code)…" aria-label="Search RAG recipes" />
+            <div id="agenticRagFilesList" class="prompt-files-list">
+              <div class="prompt-files-empty">No recipes found yet — click Refresh.</div>
+            </div>
+            <p class="note">Checked recipes are the <strong>only</strong> ones sent, in full, with the same top priority as checked instruction files. <strong>Nothing checked = recipes are matched automatically</strong> (when enabled in Settings).</p>
+          </div>
+        </details>
+
+        <div class="toolbar-row">
+          <button id="agenticRefreshPromptFilesBtn" class="btn btn-small btn-silver" title="Re-scan .github/*.md (Custom Instructions) and .github/rag/*.md (RAG Data). Checked files that still exist stay checked.">Refresh file list</button>
+        </div>
       </div>
-      <div class="token-stats-row">
-        <span id="tokenPercentLabel" class="token-percent-label">—</span>
-        <span id="tokenModelLabel" class="token-model-label"></span>
+    </details>
+
+    <details class="section" id="tokenMonitoringSection">
+      <summary>Token Monitoring</summary>
+      <div class="section-body">
+        <div class="token-bar-track">
+          <div id="tokenBarFill" class="token-bar-fill"></div>
+        </div>
+        <div class="token-stats-row">
+          <span id="tokenPercentLabel" class="token-percent-label">—</span>
+          <span id="tokenModelLabel" class="token-model-label"></span>
+        </div>
+        <div id="tokenUnavailableNote" class="token-unavailable-note">Enable "Link with GitHub Copilot LLM" and pick a model in Settings to see token usage.</div>
+        <div id="tokenBreakdown" class="token-breakdown" hidden>
+          <div class="token-breakdown-item"><span class="token-breakdown-label">Sent</span><span id="tokenSentValue" class="token-breakdown-value">0</span></div>
+          <div class="token-breakdown-item"><span class="token-breakdown-label">Received</span><span id="tokenReceivedValue" class="token-breakdown-value">0</span></div>
+          <div class="token-breakdown-item"><span class="token-breakdown-label">Total</span><span id="tokenTotalValue" class="token-breakdown-value">0</span></div>
+          <div class="token-breakdown-item"><span class="token-breakdown-label">Context limit</span><span id="tokenMaxValue" class="token-breakdown-value">0</span></div>
+        </div>
       </div>
-      <div id="tokenUnavailableNote" class="token-unavailable-note">Enable "Link with GitHub Copilot LLM" and pick a model in Settings to see token usage.</div>
-      <div id="tokenBreakdown" class="token-breakdown" hidden>
-        <div class="token-breakdown-item"><span class="token-breakdown-label">Sent</span><span id="tokenSentValue" class="token-breakdown-value">0</span></div>
-        <div class="token-breakdown-item"><span class="token-breakdown-label">Received</span><span id="tokenReceivedValue" class="token-breakdown-value">0</span></div>
-        <div class="token-breakdown-item"><span class="token-breakdown-label">Total</span><span id="tokenTotalValue" class="token-breakdown-value">0</span></div>
-        <div class="token-breakdown-item"><span class="token-breakdown-label">Context limit</span><span id="tokenMaxValue" class="token-breakdown-value">0</span></div>
-      </div>
+    </details>
     </div>
   </details>
 
@@ -158,7 +165,7 @@ export function getAgenticModeSidebarHtml(params: {
     <h2 id="agenticChatTitle" class="ag-chat-title">Instant instructions to LLM</h2>
     <div id="agenticChatLog" class="ag-chat-log" role="log" aria-live="polite" aria-label="Conversation with the LLM"></div>
     <div id="agenticComposer" class="ag-composer" title="Drag the bottom-right corner to make this box bigger or smaller">
-      <textarea id="agenticChatInput" class="ag-composer-input" rows="3" placeholder="Ask about your files, paste a Jira or Confluence link, or tell the agent what to create…" aria-label="Instant instructions to LLM"></textarea>
+      <textarea id="agenticChatInput" class="ag-composer-input" rows="2" placeholder="Ask, paste a Jira / Confluence link, or say what to create…" aria-label="Instant instructions to LLM"></textarea>
       <div class="ag-composer-bar">
         <span class="ag-composer-hint">Enter = send · Shift+Enter = new line</span>
         <button type="button" id="agenticChatStopBtn" class="ag-send-btn ag-stop" title="Stop" aria-label="Stop" hidden>
