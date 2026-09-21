@@ -65,6 +65,10 @@ export interface AgenticFileMeta {
   id: string;
   fileName: string;
   kind: AgenticFileKind;
+  /** Present only for a file imported from a Jira/Confluence attachment:
+   * which service, resource and attachment it came from and when. A locally
+   * dropped file has none. */
+  provenance?: import('./knowledge/knowledgeTypes').AttachmentProvenance;
   /** Original upload size in bytes — shown in the Ingestion Configuration
    * panel so a user can judge "is this worth trimming down" at a glance. */
   sizeBytes: number;

@@ -1,0 +1,821 @@
+/* ==========================================================================
+   Total Agentic Mode — sidebar theme.
+
+   Clean, all-white "iPhone" surfaces in a claymorphic style (soft, puffy,
+   paired light/dark shadows) with a cool, futuristic accent: an electric
+   indigo -> violet -> cyan gradient, uppercase micro-labels with wide
+   tracking, and monospace for data.
+
+   Loaded AFTER main.css by agenticModeSidebarView.ts and scoped entirely
+   under `body.agentic-theme`, so Standard mode's own look (main.css alone)
+   and every other panel are completely untouched. Everything here is fixed
+   colour, deliberately NOT derived from the user's VS Code theme: the ask is
+   a white look in light AND dark editors. The trick that makes that possible
+   without rewriting main.css: the `--vscode-*` variables main.css reads are
+   re-declared on <body>, which overrides the values VS Code sets on <html>
+   for everything inside it.
+
+   Fonts: the webview's CSP allows no remote fonts, so this uses each OS's own
+   high-quality system faces (SF Pro on Apple, Segoe UI Variable on Windows).
+   ========================================================================== */
+
+body.agentic-theme {
+  --ag-ink: #0f172a;
+  --ag-ink-soft: #475467;
+  --ag-mute: #7b8497;
+  --ag-line: rgba(15, 23, 42, 0.07);
+  --ag-accent: #4f6bff;
+  --ag-accent-2: #7a5cff;
+  --ag-cyan: #14c8e8;
+  --ag-danger: #e5484d;
+  --ag-ok: #12b76a;
+  --ag-warn: #f79009;
+  --ag-gradient: linear-gradient(135deg, #4f6bff 0%, #7a5cff 55%, #14c8e8 100%);
+  --ag-shadow-lo: rgba(120, 134, 170, 0.24);
+  --ag-clay: 10px 12px 26px var(--ag-shadow-lo), -8px -8px 20px #ffffff, inset 0 1px 0 rgba(255, 255, 255, 0.95), inset 0 -4px 10px rgba(120, 134, 170, 0.08);
+  --ag-clay-sm: 5px 6px 14px var(--ag-shadow-lo), -4px -4px 10px #ffffff, inset 0 1px 0 rgba(255, 255, 255, 0.95), inset 0 -2px 6px rgba(120, 134, 170, 0.07);
+  --ag-pressed: inset 4px 4px 10px rgba(120, 134, 170, 0.16), inset -4px -4px 10px #ffffff;
+  --ag-font: 'SF Pro Display', 'SF Pro Text', 'Inter', 'Segoe UI Variable Display', 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --ag-mono: 'SF Mono', 'JetBrains Mono', 'Cascadia Code', 'Fira Code', Consolas, 'Courier New', monospace;
+
+  /* Re-point every VS Code variable main.css reads (see the header comment). */
+  --vscode-foreground: var(--ag-ink);
+  --vscode-editor-background: #ffffff;
+  --vscode-descriptionForeground: var(--ag-mute);
+  --vscode-input-background: #ffffff;
+  --vscode-input-foreground: var(--ag-ink);
+  --vscode-input-border: transparent;
+  --vscode-focusBorder: var(--ag-accent);
+  --vscode-panel-border: var(--ag-line);
+  --vscode-button-background: var(--ag-accent);
+  --vscode-button-foreground: #ffffff;
+  --vscode-button-hoverBackground: var(--ag-accent-2);
+  --vscode-button-secondaryBackground: #f2f5fb;
+  --vscode-button-secondaryForeground: var(--ag-ink);
+  --vscode-button-secondaryHoverBackground: #e8edf8;
+  --vscode-list-hoverBackground: rgba(79, 107, 255, 0.06);
+  --vscode-errorForeground: var(--ag-danger);
+  --vscode-checkbox-border: #c3cadb;
+  --vscode-badge-background: var(--ag-accent);
+  --vscode-badge-foreground: #ffffff;
+  --vscode-contrastBorder: transparent;
+  --vscode-font-family: var(--ag-font);
+  --vscode-editor-font-family: var(--ag-mono);
+
+  font-family: var(--ag-font);
+  color: var(--ag-ink);
+  background: #ffffff;
+  background-image: radial-gradient(1100px 380px at 50% -160px, rgba(79, 107, 255, 0.07), transparent 70%);
+  background-repeat: no-repeat;
+  -webkit-font-smoothing: antialiased;
+  letter-spacing: 0.005em;
+}
+
+body.agentic-theme *:focus-visible {
+  outline: 2px solid rgba(79, 107, 255, 0.55);
+  outline-offset: 2px;
+}
+
+/* ---- Header --------------------------------------------------------- */
+body.agentic-theme .app-title-row {
+  position: relative;
+  border-bottom: 0;
+  padding: 18px 18px 16px;
+}
+/* A thin animated "scan line" under the header — the one moving thing. */
+body.agentic-theme .app-title-row::after {
+  content: '';
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  bottom: 0;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, var(--ag-accent), var(--ag-cyan), transparent);
+  background-size: 200% 100%;
+  animation: ag-scan 5s linear infinite;
+  opacity: 0.85;
+}
+@keyframes ag-scan {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+/* Keep the settings gear beside the title however narrow the sidebar is
+   (the wide-tracked title wraps within its own column instead). */
+body.agentic-theme .title-row {
+  flex-wrap: nowrap;
+  align-items: flex-start;
+}
+body.agentic-theme .title-group { flex: 1 1 auto; }
+body.agentic-theme .btn-icon-top { margin-top: 2px; }
+body.agentic-theme .title {
+  font-size: 0.95em;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  background: var(--ag-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+body.agentic-theme .title-subtitle {
+  color: var(--ag-mute);
+  font-family: var(--ag-mono);
+  font-size: 0.68em;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+body.agentic-theme .version-badge {
+  font-family: var(--ag-mono);
+  font-size: 0.66em;
+  letter-spacing: 0.08em;
+  color: #ffffff;
+  background: var(--ag-gradient);
+  padding: 2px 10px;
+  border-radius: 999px;
+  box-shadow: 0 4px 10px -3px rgba(79, 107, 255, 0.55);
+}
+body.agentic-theme .btn-icon-top {
+  background: #ffffff;
+  color: var(--ag-accent);
+  border-radius: 14px;
+  box-shadow: var(--ag-clay-sm);
+}
+
+/* ---- Sections (clay cards) ------------------------------------------ */
+body.agentic-theme details.section {
+  margin: 14px 14px 0;
+  border-radius: 24px;
+  background: #ffffff;
+  box-shadow: var(--ag-clay);
+}
+body.agentic-theme details.section > summary {
+  padding: 15px 20px;
+  font-size: 0.7em;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ag-ink-soft);
+}
+body.agentic-theme details.section > summary::marker {
+  color: var(--ag-accent);
+}
+body.agentic-theme details.section > summary:hover {
+  background: rgba(79, 107, 255, 0.05);
+}
+body.agentic-theme details.section > .section-body {
+  padding: 4px 18px 20px;
+}
+body.agentic-theme details.section:last-of-type {
+  margin-bottom: 18px;
+}
+body.agentic-theme .ai-assist {
+  border-radius: 18px;
+  background: #ffffff;
+  box-shadow: var(--ag-clay-sm);
+}
+body.agentic-theme .ai-assist summary {
+  font-size: 0.78em;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--ag-ink);
+}
+body.agentic-theme .ai-files-header,
+body.agentic-theme .note,
+body.agentic-theme .status-text {
+  color: var(--ag-mute);
+}
+body.agentic-theme code {
+  font-family: var(--ag-mono);
+  font-size: 0.92em;
+  color: var(--ag-accent-2);
+  background: rgba(122, 92, 255, 0.08);
+  padding: 1px 6px;
+  border-radius: 6px;
+}
+
+/* ---- Buttons -------------------------------------------------------- */
+body.agentic-theme .btn,
+body.agentic-theme .btn-secondary {
+  padding: 9px 20px;
+  border: 0;
+  border-radius: 999px;
+  background: #f4f6fc;
+  color: var(--ag-ink);
+  font-family: var(--ag-font);
+  font-size: 0.84em;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  box-shadow: var(--ag-clay-sm);
+  transition: transform 0.14s ease, box-shadow 0.14s ease, filter 0.14s ease;
+}
+body.agentic-theme .btn:hover:not(:disabled),
+body.agentic-theme .btn-secondary:hover:not(:disabled) {
+  background: #eef2fb;
+  transform: translateY(-2px);
+  box-shadow: 8px 10px 20px var(--ag-shadow-lo), -6px -6px 14px #ffffff, inset 0 1px 0 #ffffff;
+}
+body.agentic-theme .btn:active:not(:disabled),
+body.agentic-theme .btn-secondary:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: var(--ag-pressed);
+}
+body.agentic-theme .btn-small {
+  padding: 6px 14px;
+  font-size: 0.78em;
+}
+body.agentic-theme .btn-primary {
+  color: #ffffff;
+  background: var(--ag-gradient);
+  box-shadow: 0 10px 22px -8px rgba(79, 107, 255, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+body.agentic-theme .btn-primary:hover:not(:disabled) {
+  background: var(--ag-gradient);
+  filter: brightness(1.06) saturate(1.05);
+  box-shadow: 0 14px 28px -8px rgba(79, 107, 255, 0.78), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+body.agentic-theme .btn-silver {
+  background: #f4f6fc;
+  color: var(--ag-ink);
+}
+body.agentic-theme .btn-silver:hover:not(:disabled) {
+  background: #eef2fb;
+}
+body.agentic-theme .btn-danger {
+  background: #ffffff;
+  color: var(--ag-danger);
+  box-shadow: var(--ag-clay-sm), inset 0 0 0 1px rgba(229, 72, 77, 0.28);
+}
+body.agentic-theme .btn-danger:hover:not(:disabled) {
+  background: #fff5f5;
+}
+body.agentic-theme .toolbar-row {
+  gap: 12px;
+}
+
+/* ---- Drop zone, lists, inputs --------------------------------------- */
+body.agentic-theme .rag-dropzone {
+  border: 2px dashed rgba(79, 107, 255, 0.32);
+  border-radius: 22px;
+  background: #ffffff;
+  box-shadow: var(--ag-pressed);
+  color: var(--ag-ink-soft);
+  padding: 26px 16px;
+}
+body.agentic-theme .rag-dropzone.dragover {
+  border-color: var(--ag-accent);
+  background: rgba(79, 107, 255, 0.05);
+  box-shadow: var(--ag-pressed), 0 0 0 4px rgba(79, 107, 255, 0.1);
+}
+body.agentic-theme .prompt-files-list {
+  border-radius: 16px;
+  background: #ffffff;
+  box-shadow: var(--ag-pressed);
+  padding: 8px 12px;
+}
+body.agentic-theme .prompt-file-item {
+  font-family: var(--ag-mono);
+  font-size: 0.78em;
+  color: var(--ag-ink-soft);
+}
+body.agentic-theme input[type='checkbox'] {
+  accent-color: var(--ag-accent);
+}
+body.agentic-theme .agentic-rejected-list { color: var(--ag-danger); }
+body.agentic-theme .agentic-csv-status {
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: var(--ag-pressed);
+  color: var(--ag-ink-soft);
+}
+body.agentic-theme .agentic-csv-status.success { color: var(--ag-ok); }
+body.agentic-theme .agentic-csv-status.error { color: var(--ag-danger); }
+
+/* ---- Token Monitoring ----------------------------------------------- */
+body.agentic-theme .token-bar-track {
+  height: 12px;
+  background: #ffffff;
+  box-shadow: var(--ag-pressed);
+}
+body.agentic-theme .token-bar-fill {
+  background: var(--ag-gradient);
+  box-shadow: 0 0 10px rgba(79, 107, 255, 0.45);
+}
+body.agentic-theme .token-bar-fill[data-level='mid'] { background: linear-gradient(90deg, #f79009, #fdb022); box-shadow: 0 0 10px rgba(247, 144, 9, 0.4); }
+body.agentic-theme .token-bar-fill[data-level='high'] { background: linear-gradient(90deg, #e5484d, #ff7a59); box-shadow: 0 0 10px rgba(229, 72, 77, 0.4); }
+body.agentic-theme .token-percent-label,
+body.agentic-theme .token-breakdown-value {
+  font-family: var(--ag-mono);
+  font-size: 0.95em;
+}
+body.agentic-theme .token-breakdown { border-top-color: var(--ag-line); }
+
+/* ---- Scrollbars ------------------------------------------------------ */
+body.agentic-theme ::-webkit-scrollbar { width: 8px; height: 8px; }
+body.agentic-theme ::-webkit-scrollbar-track { background: transparent; }
+body.agentic-theme ::-webkit-scrollbar-thumb { background: rgba(120, 134, 170, 0.3); border-radius: 8px; }
+body.agentic-theme ::-webkit-scrollbar-thumb:hover { background: rgba(79, 107, 255, 0.5); }
+
+/* ==========================================================================
+   Chat
+   ========================================================================== */
+/* Page layout: the collapsible context sections take their natural height and the
+   chat panel takes ALL the height that is left — no fixed heights, so it works in a
+   narrow or short sidebar (collapse the context sections above to give it more,
+   or let the page scroll when everything is open). */
+html { height: 100%; }
+body.agentic-theme {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  box-sizing: border-box;
+}
+body.agentic-theme > .app-title-row,
+body.agentic-theme > details.section {
+  flex: 0 0 auto;
+}
+body.agentic-theme .ag-chat-panel {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-sizing: border-box;
+  min-height: 380px;
+  margin: 14px 14px 18px;
+  padding: 16px 18px 18px;
+  border-radius: 24px;
+  background: #ffffff;
+  box-shadow: var(--ag-clay);
+}
+/* The heading of the conversation panel. */
+body.agentic-theme .ag-chat-title {
+  flex: none;
+  margin: 0 0 0 2px;
+  font-family: var(--ag-mono);
+  font-size: 0.7em;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  background: var(--ag-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* The conversation: grows with the panel, scrolls inside it. */
+body.agentic-theme .ag-chat-log {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-sizing: border-box;
+  flex: 1 1 200px;
+  min-height: 160px;
+  overflow-y: auto;
+  padding: 16px 14px;
+  border-radius: 20px;
+  background: #ffffff;
+  box-shadow: var(--ag-pressed);
+}
+body.agentic-theme .ag-chat-empty {
+  margin: auto;
+  max-width: 24em;
+  text-align: center;
+  color: var(--ag-mute);
+  font-size: 0.82em;
+  line-height: 1.6;
+}
+body.agentic-theme .ag-chat-empty strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 1.05em;
+  letter-spacing: 0.04em;
+  background: var(--ag-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+body.agentic-theme .ag-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 92%;
+}
+/* Only a message that has just ARRIVED animates (the transcript is re-drawn
+   on every update; animating everything each time would flicker). */
+body.agentic-theme .ag-new { animation: ag-pop 0.2s ease-out; }
+@keyframes ag-pop {
+  from { opacity: 0; transform: translateY(6px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+body.agentic-theme .ag-msg-user { align-self: flex-end; align-items: flex-end; }
+body.agentic-theme .ag-msg-assistant,
+body.agentic-theme .ag-msg-error { align-self: flex-start; align-items: flex-start; }
+
+body.agentic-theme .ag-bubble {
+  box-sizing: border-box;
+  max-width: 100%;
+  padding: 10px 16px;
+  border-radius: 20px;
+  font-size: 0.86em;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+body.agentic-theme .ag-msg-user .ag-bubble {
+  color: #ffffff;
+  white-space: pre-wrap;
+  background: var(--ag-gradient);
+  border-bottom-right-radius: 6px;
+  box-shadow: 0 10px 20px -8px rgba(79, 107, 255, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.4);
+}
+body.agentic-theme .ag-msg-assistant .ag-bubble {
+  color: var(--ag-ink);
+  background: #ffffff;
+  border-bottom-left-radius: 6px;
+  box-shadow: var(--ag-clay-sm);
+}
+body.agentic-theme .ag-msg-error .ag-bubble {
+  color: #b42318;
+  background: #fff5f4;
+  border-bottom-left-radius: 6px;
+  box-shadow: var(--ag-clay-sm), inset 0 0 0 1px rgba(229, 72, 77, 0.25);
+  white-space: pre-wrap;
+}
+body.agentic-theme .ag-role {
+  font-family: var(--ag-mono);
+  font-size: 0.6em;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ag-mute);
+  margin: 0 8px;
+}
+body.agentic-theme .ag-role .ag-orb {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--ag-gradient);
+  box-shadow: 0 0 8px rgba(79, 107, 255, 0.7);
+  vertical-align: 0;
+}
+body.agentic-theme .ag-regen-chip {
+  display: inline-block;
+  margin: 0 8px;
+  padding: 1px 9px;
+  border-radius: 999px;
+  font-size: 0.64em;
+  letter-spacing: 0.06em;
+  color: var(--ag-accent-2);
+  background: rgba(122, 92, 255, 0.09);
+}
+
+/* Markdown-lite inside an answer */
+body.agentic-theme .ag-bubble p { margin: 0 0 8px; white-space: pre-line; }
+body.agentic-theme .ag-bubble p:last-child,
+body.agentic-theme .ag-bubble ul:last-child,
+body.agentic-theme .ag-bubble ol:last-child { margin-bottom: 0; }
+body.agentic-theme .ag-bubble ul,
+body.agentic-theme .ag-bubble ol { margin: 0 0 8px; padding-left: 20px; }
+body.agentic-theme .ag-bubble li { margin: 2px 0; }
+body.agentic-theme .ag-bubble .ag-h { display: block; margin: 4px 0 6px; font-weight: 750; letter-spacing: 0.02em; }
+body.agentic-theme .ag-bubble strong { font-weight: 700; }
+body.agentic-theme .ag-table {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  overflow-x: auto;
+  font-family: var(--ag-mono);
+  font-size: 0.86em;
+  line-height: 1.45;
+  white-space: pre;
+  border-radius: 12px;
+  background: #f6f8fd;
+}
+body.agentic-theme .ag-code {
+  margin: 0 0 8px;
+  border-radius: 14px;
+  overflow: hidden;
+  background: #f6f8fd;
+  box-shadow: inset 0 0 0 1px var(--ag-line);
+}
+body.agentic-theme .ag-code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 8px 5px 12px;
+  font-family: var(--ag-mono);
+  font-size: 0.66em;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ag-mute);
+  background: rgba(79, 107, 255, 0.06);
+}
+body.agentic-theme .ag-code pre {
+  margin: 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-family: var(--ag-mono);
+  font-size: 0.84em;
+  line-height: 1.5;
+  color: #1d2939;
+}
+body.agentic-theme .ag-code pre code { padding: 0; background: none; color: inherit; font-size: inherit; }
+
+/* Small action buttons under the latest answer */
+body.agentic-theme .ag-actions { display: flex; gap: 6px; margin: 0 6px; }
+body.agentic-theme .ag-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 11px;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  font-family: var(--ag-font);
+  font-size: 0.68em;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  color: var(--ag-ink-soft);
+  background: #ffffff;
+  box-shadow: var(--ag-clay-sm);
+  transition: transform 0.12s ease, color 0.12s ease;
+}
+body.agentic-theme .ag-action:hover { transform: translateY(-1px); color: var(--ag-accent); }
+body.agentic-theme .ag-action svg { width: 12px; height: 12px; }
+
+/* Tool steps and notes */
+body.agentic-theme .ag-tool {
+  align-self: flex-start;
+  max-width: 96%;
+  font-size: 0.72em;
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: var(--ag-clay-sm);
+}
+body.agentic-theme .ag-tool > summary {
+  padding: 6px 12px;
+  cursor: pointer;
+  font-family: var(--ag-mono);
+  color: var(--ag-ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+body.agentic-theme .ag-tool > summary::before { content: '\2699\00a0'; color: var(--ag-accent); }
+body.agentic-theme .ag-tool pre {
+  margin: 0;
+  padding: 4px 12px 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--ag-mono);
+  color: var(--ag-mute);
+}
+body.agentic-theme .ag-note {
+  align-self: center;
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-size: 0.68em;
+  letter-spacing: 0.04em;
+  color: var(--ag-mute);
+  background: #f4f6fc;
+}
+
+/* "Thinking" dots */
+body.agentic-theme .ag-typing {
+  align-self: flex-start;
+  display: flex;
+  gap: 5px;
+  padding: 12px 16px;
+  border-radius: 20px;
+  border-bottom-left-radius: 6px;
+  background: #ffffff;
+  box-shadow: var(--ag-clay-sm);
+}
+body.agentic-theme .ag-typing span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ag-gradient);
+  animation: ag-bounce 1.1s ease-in-out infinite;
+}
+body.agentic-theme .ag-typing span:nth-child(2) { animation-delay: 0.15s; }
+body.agentic-theme .ag-typing span:nth-child(3) { animation-delay: 0.3s; }
+@keyframes ag-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.45; }
+  30% { transform: translateY(-5px); opacity: 1; }
+}
+
+/* ---- The composer ---------------------------------------------------
+   ONE rounded box (border, glow, radius) that holds the text area and the
+   send row. The BOX is what the corner handle resizes — height AND width —
+   and the text area simply fills it, so the border is always fully visible:
+   `box-sizing: border-box` + `max-width: 100%` are what stop it from ever
+   growing wider than the sidebar and having its right edge clipped. */
+body.agentic-theme .ag-composer {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 200px;
+  height: 176px;
+  min-height: 120px;
+  max-height: 80vh;
+  resize: both;
+  overflow: hidden;
+  padding: 14px 12px 8px 18px;
+  border: 1.5px solid rgba(79, 107, 255, 0.4);
+  border-radius: 24px;
+  background: #ffffff;
+  box-shadow: var(--ag-pressed), 0 0 0 4px rgba(79, 107, 255, 0.06);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+body.agentic-theme .ag-composer:focus-within {
+  border-color: var(--ag-accent);
+  box-shadow: var(--ag-pressed), 0 0 0 4px rgba(79, 107, 255, 0.16), 0 0 22px rgba(79, 107, 255, 0.22);
+}
+body.agentic-theme .ag-composer-input {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0 6px 0 0;
+  resize: none;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--ag-ink);
+  font-family: var(--ag-font);
+  font-size: 0.92em;
+  line-height: 1.55;
+}
+body.agentic-theme .ag-composer-input::placeholder { color: var(--ag-mute); }
+body.agentic-theme .ag-composer-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px 0 0; /* right padding keeps the buttons clear of the corner resize handle */
+}
+body.agentic-theme .ag-composer-hint {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--ag-mono);
+  font-size: 0.6em;
+  letter-spacing: 0.06em;
+  color: var(--ag-mute);
+}
+
+/* Messenger-style send button: a round gradient button with a paper plane. */
+body.agentic-theme .ag-send-btn {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  color: #ffffff;
+  background: var(--ag-gradient);
+  box-shadow: 0 10px 20px -6px rgba(79, 107, 255, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  transition: transform 0.14s ease, box-shadow 0.14s ease, filter 0.14s ease;
+}
+body.agentic-theme .ag-send-btn svg { width: 19px; height: 19px; transform: translateX(1px); }
+body.agentic-theme .ag-send-btn:hover:not(:disabled) {
+  transform: translateY(-2px) scale(1.06);
+  filter: brightness(1.06);
+  box-shadow: 0 14px 26px -6px rgba(79, 107, 255, 0.8), inset 0 1px 0 rgba(255, 255, 255, 0.55);
+}
+body.agentic-theme .ag-send-btn:active:not(:disabled) { transform: scale(0.96); }
+body.agentic-theme .ag-send-btn:disabled {
+  cursor: default;
+  color: #a9b1c3;
+  background: #eef1f7;
+  box-shadow: inset 1px 1px 3px rgba(120, 134, 170, 0.2);
+}
+body.agentic-theme .ag-send-btn.ag-stop {
+  background: linear-gradient(135deg, #ff5d73, #ff8a5c);
+  box-shadow: 0 10px 20px -6px rgba(255, 93, 115, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+body.agentic-theme .ag-send-btn.ag-stop svg { transform: none; width: 15px; height: 15px; }
+body.agentic-theme [hidden] { display: none !important; }
+
+/* ---- Cards the HOST puts in the conversation ----------------------------
+   A retrieved Jira/Confluence resource, a "connect securely" prompt, and a link to
+   a generated artifact. Distinct from chat bubbles so they read as the app talking,
+   not the model. */
+body.agentic-theme .ag-card {
+  align-self: stretch;
+  box-sizing: border-box;
+  padding: 14px 16px;
+  border-radius: 20px;
+  background: #ffffff;
+  box-shadow: var(--ag-clay-sm), inset 3px 0 0 var(--ag-accent);
+  font-size: 0.84em;
+  line-height: 1.5;
+  animation: none;
+}
+body.agentic-theme .ag-card-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+body.agentic-theme .ag-card-kicker {
+  font-family: var(--ag-mono);
+  font-size: 0.72em;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ag-accent);
+}
+body.agentic-theme .ag-card-title { margin: 2px 0 4px; font-size: 1.04em; font-weight: 750; overflow-wrap: anywhere; }
+body.agentic-theme .ag-card-meta { color: var(--ag-mute); font-size: 0.86em; overflow-wrap: anywhere; }
+body.agentic-theme .ag-card-line { color: var(--ag-ink-soft); }
+body.agentic-theme .ag-card-warn { margin-top: 6px; color: #b54708; font-size: 0.9em; }
+body.agentic-theme .ag-card-question { margin: 12px 0 6px; font-weight: 650; }
+body.agentic-theme .ag-card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+body.agentic-theme .ag-card-btn {
+  padding: 7px 16px;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  font-family: var(--ag-font);
+  font-size: 0.86em;
+  font-weight: 650;
+  color: #ffffff;
+  background: var(--ag-gradient);
+  box-shadow: 0 8px 18px -8px rgba(79, 107, 255, 0.7);
+  transition: transform 0.12s ease, filter 0.12s ease;
+}
+body.agentic-theme .ag-card-btn:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.06); }
+body.agentic-theme .ag-card-btn:disabled { cursor: default; color: #a9b1c3; background: #eef1f7; box-shadow: none; }
+body.agentic-theme .ag-card-btn.ag-secondary { color: var(--ag-ink); background: #f4f6fc; box-shadow: var(--ag-clay-sm); }
+body.agentic-theme .ag-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+body.agentic-theme .ag-chip {
+  padding: 5px 12px;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  font-family: var(--ag-font);
+  font-size: 0.86em;
+  color: var(--ag-accent-2);
+  background: rgba(122, 92, 255, 0.09);
+  transition: background 0.12s ease;
+}
+body.agentic-theme .ag-chip:hover:not(:disabled) { background: rgba(122, 92, 255, 0.18); }
+body.agentic-theme .ag-chip:disabled { opacity: 0.5; cursor: default; }
+body.agentic-theme .ag-attach-list { margin: 6px 0 0; padding: 0; list-style: none; border-radius: 14px; background: #f8f9fd; box-shadow: var(--ag-pressed); }
+body.agentic-theme .ag-attach-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 12px;
+  font-family: var(--ag-mono);
+  font-size: 0.9em;
+}
+body.agentic-theme .ag-attach-row + .ag-attach-row { border-top: 1px solid var(--ag-line); }
+body.agentic-theme .ag-attach-name { overflow-wrap: anywhere; }
+body.agentic-theme .ag-attach-size { color: var(--ag-mute); white-space: nowrap; }
+body.agentic-theme .ag-attach-reason { display: block; margin-top: 2px; color: var(--ag-mute); font-family: var(--ag-font); font-size: 0.92em; }
+body.agentic-theme .ag-badge {
+  flex: none;
+  white-space: nowrap; /* "Can't read" must not wrap onto two lines in a narrow sidebar */
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-family: var(--ag-font);
+  font-size: 0.78em;
+  font-weight: 650;
+  color: var(--ag-ink-soft);
+  background: #eef1f7;
+}
+body.agentic-theme .ag-badge.ag-ok { color: #067647; background: #e3f7ec; }
+body.agentic-theme .ag-badge.ag-no { color: #93370d; background: #fdf0e1; }
+body.agentic-theme .ag-card.ag-connect { box-shadow: var(--ag-clay-sm), inset 3px 0 0 var(--ag-cyan); }
+body.agentic-theme .ag-card.ag-connect.ag-resolved { opacity: 0.7; }
+body.agentic-theme .ag-card.ag-artifact { box-shadow: var(--ag-clay-sm), inset 3px 0 0 var(--ag-ok); }
+
+/* ---- Search boxes over the Custom Instructions / RAG lists --------------- */
+body.agentic-theme .file-search-input {
+  border-radius: 999px;
+  padding: 7px 14px;
+  background: #ffffff;
+  box-shadow: var(--ag-pressed);
+  color: var(--ag-ink);
+  font-family: var(--ag-font);
+}
+body.agentic-theme .file-search-input:focus { box-shadow: var(--ag-pressed), 0 0 0 3px rgba(79, 107, 255, 0.2); }
+body.agentic-theme .prompt-file-match-hint { color: var(--ag-mute); }
+/* main.css keeps the "why it matched" hint on one truncated line; in a narrow sidebar that cut it down to "…",
+   so here it wraps under the file name instead. */
+body.agentic-theme .prompt-file-item { flex-wrap: wrap; }
+body.agentic-theme .prompt-file-item > span { overflow-wrap: anywhere; min-width: 0; }
+body.agentic-theme .prompt-file-match-hint { flex: 1 1 100%; white-space: normal; overflow: visible; text-overflow: clip; padding-left: 22px; }
+
+@media (prefers-reduced-motion: reduce) {
+  body.agentic-theme .app-title-row::after,
+  body.agentic-theme .ag-typing span,
+  body.agentic-theme .ag-new { animation: none; }
+}

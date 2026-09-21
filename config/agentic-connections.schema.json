@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "softplay-agentic-connections.schema.json",
+  "title": "SoftPlay Total Agentic Mode — Jira / Confluence connections",
+  "description": "Addresses and modes only. This file must never contain credentials: usernames, passwords and tokens are entered in a masked VS Code prompt and kept in memory for the session. Any key that looks like a credential is rejected when the file is loaded.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "connections"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "connections": {
+      "type": "array",
+      "description": "Every Jira / Confluence deployment the agent may read. Ids must be unique.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "label", "product", "enabled"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$", "description": "Stable identifier. Credentials are scoped to this id, not merely to the host." },
+          "label": { "type": "string", "minLength": 1, "description": "Shown to the user, e.g. in the 'Connect securely' prompt." },
+          "product": { "enum": ["jira", "confluence"] },
+          "enabled": { "type": "boolean", "description": "false = placeholder: local-file chat works and any link to it is answered with setup guidance." },
+          "baseUrl": {
+            "type": "string",
+            "description": "https origin plus the deployment's context path, no trailing slash needed — e.g. https://jira.example.com or https://tools.example.com/jira. No credentials, query string or fragment. Required when enabled."
+          },
+          "deployment": { "enum": ["unconfigured", "datacenter"], "description": "'datacenter' = Jira/Confluence Data Center or Server REST API. Atlassian Cloud and other deployments are not implemented." },
+          "authMode": {
+            "enum": ["unconfigured", "pat", "basic"],
+            "description": "'pat' = personal access token sent as 'Authorization: Bearer' (Jira 8.14+/Confluence 7.9+). 'basic' = username + password, only where your administrator permits it. SSO/MFA-only deployments are not supported."
+          },
+          "acceptanceCriteriaFieldIds": {
+            "type": "array",
+            "description": "Jira only: custom-field ids that hold acceptance criteria, e.g. [\"customfield_10200\"]. No id is assumed.",
+            "items": { "type": "string", "pattern": "^customfield_\\d+$" }
+          }
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requestTimeoutMs": { "type": "integer", "minimum": 1000, "maximum": 120000 },
+        "maxResponseBytes": { "type": "integer", "minimum": 1024, "maximum": 52428800 },
+        "maxAttachmentBytes": { "type": "integer", "minimum": 1024, "maximum": 52428800 },
+        "maxAttachmentBatchBytes": { "type": "integer", "minimum": 1024, "maximum": 209715200 },
+        "maxAttachmentCount": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "maxListingPages": { "type": "integer", "minimum": 1, "maximum": 50 }
+      }
+    }
+  }
+}

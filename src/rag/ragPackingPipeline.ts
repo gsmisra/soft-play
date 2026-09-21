@@ -62,6 +62,9 @@ export interface RagPackingContext {
    * generation (recipes are business context there, never code). Only
    * affects the wording of a SELECTED-recipes section. */
   purpose?: SelectedRagPurpose;
+  /** Selected recipes ALREADY loaded for this request (see `loadSelectedRagMatches()`); when given, the
+   * files are not read again. */
+  preloadedSelected?: RagMatch[];
 }
 
 /** The set of `RagMatch.filePath` values currently `stale` or `missing` per
@@ -136,7 +139,20 @@ function logPackingResult(context: RagPackingContext, plan: OperationPlan, candi
  * inclusion, so there is nothing to plan.
  */
 async function packSelectedRagSection(context: RagPackingContext): Promise<{ section: string; matches: RagMatch[] }> {
-  const { settings, logPrefix, onLog, purpose } = context;
+  // A request that already loaded its selected recipes (`preloadedSelected`) formats THOSE — it never reads
+  // the files a second time, so the recipes a chat turn used and the ones its generation tool uses are the
+  // same bytes even if a file is edited in between.
+  const matches = context.preloadedSelected ?? (await loadSelectedRagMatches(context));
+  return { section: formatSelectedRagSection(matches, context.settings.language, context.purpose ?? 'code'), matches };
+}
+
+/**
+ * Reads and validates the recipes the user checked (see `packSelectedRagSection`), throwing
+ * `UnusableRagFilesError` for any missing/invalid/wrong-language one or when no workspace is open.
+ * Exported so a caller can load them ONCE per request and reuse the result for several purposes.
+ */
+export async function loadSelectedRagMatches(context: RagPackingContext): Promise<RagMatch[]> {
+  const { settings, logPrefix, onLog } = context;
   const selectedPaths = context.selectedRagFiles ?? [];
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
   if (!workspaceRoot) {
@@ -167,7 +183,7 @@ async function packSelectedRagSection(context: RagPackingContext): Promise<{ sec
     filePath: e.recipe.filePath
   }));
   onLog(`${logPrefix}: ${matches.length} manually selected RAG recipe(s) included IN FULL as highest-priority context — ${matches.map((m) => m.id).join(', ')}.`);
-  return { section: formatSelectedRagSection(matches, settings.language, purpose ?? 'code'), matches };
+  return matches;
 }
 
 /**

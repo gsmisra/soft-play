@@ -267,6 +267,91 @@ either way, it only ever runs at all while you've explicitly turned on
 **Link with GitHub Copilot LLM** and picked a model in Settings, which is
 itself the real, one-time opt-in.
 
+## Total Agentic Mode — a conversational workspace
+
+With **Total Agentic Mode** on (Settings), the sidebar is chat-first. Under the
+collapsible **Input Files**, **Custom Instructions & RAG Data** and **Token
+Monitoring** sections sits **Instant instructions to LLM**: a standalone
+conversation with a LangChain tool-calling agent that takes the remaining
+height (collapse the sections above to give it more). There is no Generate
+section — you ask for what you want, and reopen results from links the chat
+shows.
+
+- **Ask, then ask again.** The conversation is remembered, so follow-ups,
+  corrections and "same thing but…" requests refer to earlier answers. When
+  the history would not fit the model's context window, the oldest whole
+  exchanges are left out of what is sent (and you are told) — never a half
+  exchange.
+- **Every message works from one snapshot.** When you press Send, SoftPlay
+  captures the current settings, the Input Files segments you selected in
+  Ingestion Configuration (a segment cut by a size cap is labelled as such),
+  the checked Custom Instructions and the checked RAG recipes, and reads the
+  checked files **once**. The prompt, the token budget and any tool that turn
+  calls all use that snapshot; a change made while the model is working applies
+  to your next message.
+- **Custom Instructions and RAG Data.** Only the files you check are sent.
+  **In Total Agentic Mode, nothing checked = no instruction files** (unlike
+  Standard mode, where nothing checked means all). Checked instructions and
+  checked RAG recipes are peers: recipes are sent in full, and a real conflict
+  is resolved by the more specific rule, with both named. An unreadable
+  instruction file, or an unusable or too-large recipe selection, stops the turn
+  before the model is called — it is never silently dropped or retried without.
+  The search boxes only filter what you see; a checked file that is hidden by
+  the filter stays checked.
+- **Generate on request.** Ask for a **feature file**, **automation code** or a
+  **manual test-case CSV** and the agent runs the same pipelines the old
+  buttons ran; each result appears as a card in the chat that reopens it (the
+  CSV is saved into the workspace; nothing is executed without Verify & Fix's
+  usual approval). Tool calls show as collapsible steps.
+- **Regenerate / Copy / Stop.** **↻ Regenerate** asks for the newest answer
+  again (type a preference first, e.g. "shorter, as a table"); **■ Stop**
+  cancels a running turn.
+- **Enter** sends, **Shift+Enter** is a new line. The box's bottom-right corner
+  is a drag handle.
+- **Where it lives.** The transcript and the LLM's memory are kept in memory
+  only and end when VS Code closes or you click **Clear Data**, which wipes the
+  chat, the memory, every loaded file, retrieved pages, connection credentials,
+  selections and generated output — a reply, prompt answer or download still in
+  flight is discarded, never shown afterwards. Removing a loaded file also
+  clears the model's memory of the conversation (the transcript stays, with a
+  note), because earlier answers may have quoted it. Credentials typed into the
+  chat are encrypted (`ENC[...]`) before they reach the model, the transcript or
+  the memory.
+
+### Jira and Confluence (read-only)
+
+Paste a Jira issue or Confluence page link in the chat. If it matches a
+connection configured in `config/agentic-connections.json`, SoftPlay shows a
+**Connect securely** card — **nothing is contacted until you click it**. The
+click opens a masked VS Code input for your personal access token (or
+username/password where the deployment allows it); the credential is held in
+memory for the session, scoped to that one connection, and never reaches the
+model, the transcript, logs or files. The page then appears as a card: title,
+source, retrieval time, summary fields and an attachment **list** — no
+attachment is downloaded. You are asked whether to read any attachments and what
+to do next. **Read attachments…** opens a picker; only the files you tick are
+downloaded, parsed like a dropped file, and added to Input Files with their
+provenance. Everything is read-only (`GET` only) over HTTPS.
+
+**Supported:** Jira and Confluence **Data Center / Server** with a personal
+access token (Bearer) or, where enabled, Basic authentication. **Not supported:**
+Atlassian Cloud, SSO/SAML/OIDC browser sign-in, OAuth and MFA prompts — a link
+that only works after a browser sign-in ends in a "login required" message.
+
+The shipped configuration contains three **disabled placeholders** (two Jira,
+one Confluence) with no hostnames and no credentials: local chat works
+unchanged, and a Jira/Confluence link is answered with setup guidance. An
+administrator fills in `enabled`, `baseUrl`, `deployment` (`"datacenter"`) and
+`authMode` (`"pat"` or `"basic"`) before packaging.
+**See `docs/agentic-knowledge-connections.md`** (inside the extension folder) for the
+configuration reference, security model, failure handling, official API
+references, the **pre-packaging checklist**, and exactly what has and has not
+been verified (no live TD host, proxy/CA or Extension Development Host run yet).
+
+**Look.** Agentic Mode's sidebar has its own clean white, claymorphic,
+futuristic theme (`media/agenticMode.css`), fixed regardless of your VS Code
+colour theme. Standard mode and the other panels are unchanged.
+
 ## Kill All Browsers
 
 Closes the `codegen` browser process this extension launched and clears the

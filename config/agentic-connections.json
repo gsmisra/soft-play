@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "connections": [
+    {
+      "id": "td-jira-1",
+      "label": "TD Jira 1",
+      "product": "jira",
+      "enabled": false,
+      "baseUrl": "",
+      "deployment": "unconfigured",
+      "authMode": "unconfigured"
+    },
+    {
+      "id": "td-jira-2",
+      "label": "TD Jira 2",
+      "product": "jira",
+      "enabled": false,
+      "baseUrl": "",
+      "deployment": "unconfigured",
+      "authMode": "unconfigured"
+    },
+    {
+      "id": "td-confluence",
+      "label": "TD Confluence",
+      "product": "confluence",
+      "enabled": false,
+      "baseUrl": "",
+      "deployment": "unconfigured",
+      "authMode": "unconfigured"
+    }
+  ],
+  "limits": {
+    "requestTimeoutMs": 30000,
+    "maxResponseBytes": 5242880,
+    "maxAttachmentBytes": 10485760,
+    "maxAttachmentBatchBytes": 31457280,
+    "maxAttachmentCount": 20,
+    "maxListingPages": 10
+  }
+}

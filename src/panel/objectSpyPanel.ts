@@ -115,9 +115,13 @@ type InboundMessage =
   | { type: 'agentic:updateDraftInstructions'; payload: string }
   | { type: 'agentic:refreshInstructionFiles' }
   | { type: 'agentic:selectedInstructionFiles'; payload: string[] }
-  | { type: 'agentic:generateFeatureFile' }
-  | { type: 'agentic:generateCode' }
-  | { type: 'agentic:generateCsv' }
+  | { type: 'agentic:selectedRagFiles'; payload: string[] }
+  | { type: 'agentic:connect'; payload: { actionId: string } }
+  | { type: 'agentic:importAttachments'; payload: { sourceId: string } }
+  | { type: 'agentic:openArtifact'; payload: { artifactId: string } }
+  | { type: 'agentic:chatSend'; payload: string }
+  | { type: 'agentic:chatRegenerate'; payload?: string }
+  | { type: 'agentic:chatStop' }
   | { type: 'agentic:clearData' };
 
 /** Status shape the webview renders (status pill, Start/Stop enablement) —
@@ -690,6 +694,9 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
       case 'agentic:ready':
         this.agenticController.postFileList();
         this.agenticController.postGenerationState();
+        // The chat lives in the controller, not the webview: a re-created
+        // sidebar re-renders the conversation from here.
+        this.agenticController.postChatState();
         void this.agenticController.estimateTokens();
         break;
       case 'agentic:ingestFiles': {
@@ -717,14 +724,26 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
       case 'agentic:selectedInstructionFiles':
         this.agenticController.setSelectedInstructionFiles(message.payload);
         break;
-      case 'agentic:generateFeatureFile':
-        await this.agenticController.generateFeatureFile();
+      case 'agentic:selectedRagFiles':
+        this.agenticController.setSelectedRagFiles(message.payload);
         break;
-      case 'agentic:generateCode':
-        await this.agenticController.generateAutomationCode();
+      case 'agentic:connect':
+        await this.agenticController.connectSecurely(message.payload.actionId);
         break;
-      case 'agentic:generateCsv':
-        await this.agenticController.generateTestCaseCsv();
+      case 'agentic:importAttachments':
+        await this.agenticController.importAttachmentsFromCard(message.payload.sourceId);
+        break;
+      case 'agentic:openArtifact':
+        await this.agenticController.openArtifact(message.payload.artifactId);
+        break;
+      case 'agentic:chatSend':
+        await this.agenticController.sendChatMessage(message.payload);
+        break;
+      case 'agentic:chatRegenerate':
+        await this.agenticController.regenerateChatResponse(message.payload ?? '');
+        break;
+      case 'agentic:chatStop':
+        this.agenticController.stopChat();
         break;
       case 'agentic:clearData':
         this.agenticController.reset();
@@ -3271,6 +3290,7 @@ export class ObjectSpyPanel implements vscode.Disposable, vscode.WebviewViewProv
       return getAgenticModeSidebarHtml({
         webview,
         styleUri: webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'main.css')),
+        themeUri: webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'agenticMode.css')),
         scriptUri: webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'agenticMode.js')),
         nonce: getNonce(),
         version: this.getVersion()

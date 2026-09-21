@@ -3,6 +3,8 @@ import * as assert from 'node:assert/strict';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
+import { AgenticChatSession } from '../../src/agentic/agenticChatSession';
+import { emptyKnowledgeSession } from './knowledge/fakeKnowledge';
 
 /**
  * Item 3: direct unit tests for `AgenticModeController`'s own orchestration
@@ -159,6 +161,14 @@ function makeController(): Record<string, any> {
   controller.verifyCancellation = undefined;
   controller.aiCodePanel = fakePanel();
   controller.generatedFeaturePanel = fakePanel();
+  // The chat's own state — reset() now also wipes it (see agenticModeController.chat.test.ts).
+  controller.chatSession = new AgenticChatSession();
+  controller.chatCancellation = undefined;
+  controller.chatGeneration = undefined;
+  controller.knowledge = emptyKnowledgeSession();
+  controller.selectedRagFiles = [];
+  controller.artifacts = new Map();
+  controller.nextArtifactId = 1;
   return controller;
 }
 
@@ -309,19 +319,17 @@ test('Item 7: generateTestCaseCsv() enforces the real .github/Jira_test_case_tem
   const original = chainModule.buildAgenticTestCaseCsvChain;
   // Only 4 columns — deliberately short of the template's 5.
   chainModule.buildAgenticTestCaseCsvChain = () => ({ invoke: async () => 'Summary,Step #,Step Explanation,Expected Result\nLogin,1,Enter credentials,Logged in\n' });
-  let reportedError: string | undefined;
-  const webview = { postMessage: (m: { type: string; payload: { state: string; message?: string } }) => {
-    if (m.type === 'agentic:csvStatus' && m.payload.state === 'error') {
-      reportedError = m.payload.message;
-    }
-  } };
-  controller.getSidebarWebview = () => webview;
+  let succeeded: boolean;
   try {
-    await controller.generateTestCaseCsv();
+    succeeded = await controller.generateTestCaseCsv();
   } finally {
     chainModule.buildAgenticTestCaseCsvChain = original;
   }
-  assert.ok(reportedError && /does not exactly match/.test(reportedError), `expected a header-mismatch error, got: ${reportedError}`);
+  // The sidebar no longer has a CSV status line: the failure is kept in the chat (and the call reports false).
+  const reported = controller.chatSession.getEntries().find((e: { kind: string }) => e.kind === 'error');
+  assert.equal(succeeded, false);
+  assert.ok(reported && /^Test-case CSV generation failed: .*does not exactly match/.test(reported.text), `expected a header-mismatch error in the chat, got: ${reported?.text}`);
+  assert.equal(controller.chatSession.getEntries().some((e: { kind: string }) => e.kind === 'artifact'), false, 'a failed generation never offers an artifact to reopen');
 });
 
 // ---------------------------------------------------------------------
